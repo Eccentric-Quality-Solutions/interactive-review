@@ -1,0 +1,10 @@
+# dependencies & build output
+node_modules/
+out/
+out-test/
+out-integration/
+.vscode-test/
+*.vsix
+
+# local reference clone of molon/hunkwise (reproducible; carries its own .git)
+reference/

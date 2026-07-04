@@ -1,0 +1,310 @@
+<title>Approve / Deny flow — experimental vs stable API</title>
+<style>
+  :root {
+    /* page chrome — light */
+    --page-bg: #e9edf2;
+    --panel-bg: #ffffff;
+    --fg: #1b2530;
+    --muted: #586472;
+    --faint: #8894a3;
+    --accent: #1f6fb2;
+    --border: #d3dae2;
+    --good: #1a7f37;
+    --warn: #9a6700;
+    --bad: #b3261e;
+    /* editor — VS Code Light+ */
+    --ed-bg: #ffffff;
+    --ed-fg: #383a42;
+    --ed-gutter: #237893;
+    --ed-active: #f4f6f8;
+    --ins-bg: rgba(46,160,67,0.13);
+    --ins-stripe: #2ea043;
+    --del-bg: rgba(203,36,49,0.11);
+    --del-stripe: #cf222e;
+    --codelens: #1a72c4;
+    --kw: #0000ff;
+    --str: #a31515;
+    --fn: #795e26;
+    --typ: #267f99;
+    --num: #098658;
+    /* buttons (hunkwise inset action bar) */
+    --btn-accept-bg: #2a7d3a;
+    --btn-accept-fg: #eafbf0;
+    --btn-accept-bd: rgba(42,125,58,0.55);
+    --btn-sec-bg: #e6e8eb;
+    --btn-sec-fg: #33373d;
+    --btn-sec-bd: rgba(60,64,72,0.28);
+    --shadow: 0 6px 20px rgba(20,30,45,0.16);
+    --mono: ui-monospace, "SF Mono", "Menlo", "Cascadia Code", "Consolas", monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page-bg: #101317;
+      --panel-bg: #191d23;
+      --fg: #d7dde5;
+      --muted: #8b95a3;
+      --faint: #667081;
+      --accent: #4a9eff;
+      --border: #272d35;
+      --good: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --ed-bg: #1e1e1e;
+      --ed-fg: #d4d4d4;
+      --ed-gutter: #858585;
+      --ed-active: #262626;
+      --ins-bg: rgba(35,134,54,0.20);
+      --ins-stripe: #2ea043;
+      --del-bg: rgba(248,81,73,0.16);
+      --del-stripe: #f85149;
+      --codelens: #4daafc;
+      --kw: #569cd6;
+      --str: #ce9178;
+      --fn: #dcdcaa;
+      --typ: #4ec9b0;
+      --num: #b5cea8;
+      --btn-accept-bg: #2a7d3a;
+      --btn-accept-fg: #d4f0da;
+      --btn-accept-bd: rgba(63,185,80,0.35);
+      --btn-sec-bg: #3a3d41;
+      --btn-sec-fg: #cccccc;
+      --btn-sec-bd: rgba(128,128,128,0.4);
+      --shadow: 0 8px 26px rgba(0,0,0,0.55);
+    }
+  }
+  :root[data-theme="light"] {
+    --page-bg: #e9edf2; --panel-bg: #ffffff; --fg: #1b2530; --muted: #586472; --faint: #8894a3;
+    --accent: #1f6fb2; --border: #d3dae2; --good:#1a7f37; --warn:#9a6700; --bad:#b3261e;
+    --ed-bg:#ffffff; --ed-fg:#383a42; --ed-gutter:#237893; --ed-active:#f4f6f8;
+    --ins-bg:rgba(46,160,67,0.13); --ins-stripe:#2ea043; --del-bg:rgba(203,36,49,0.11); --del-stripe:#cf222e;
+    --codelens:#1a72c4; --kw:#0000ff; --str:#a31515; --fn:#795e26; --typ:#267f99; --num:#098658;
+    --btn-accept-bg:#2a7d3a; --btn-accept-fg:#eafbf0; --btn-accept-bd:rgba(42,125,58,0.55);
+    --btn-sec-bg:#e6e8eb; --btn-sec-fg:#33373d; --btn-sec-bd:rgba(60,64,72,0.28);
+    --shadow:0 6px 20px rgba(20,30,45,0.16);
+  }
+  :root[data-theme="dark"] {
+    --page-bg:#101317; --panel-bg:#191d23; --fg:#d7dde5; --muted:#8b95a3; --faint:#667081;
+    --accent:#4a9eff; --border:#272d35; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --ed-bg:#1e1e1e; --ed-fg:#d4d4d4; --ed-gutter:#858585; --ed-active:#262626;
+    --ins-bg:rgba(35,134,54,0.20); --ins-stripe:#2ea043; --del-bg:rgba(248,81,73,0.16); --del-stripe:#f85149;
+    --codelens:#4daafc; --kw:#569cd6; --str:#ce9178; --fn:#dcdcaa; --typ:#4ec9b0; --num:#b5cea8;
+    --btn-accept-bg:#2a7d3a; --btn-accept-fg:#d4f0da; --btn-accept-bd:rgba(63,185,80,0.35);
+    --btn-sec-bg:#3a3d41; --btn-sec-fg:#cccccc; --btn-sec-bd:rgba(128,128,128,0.4);
+    --shadow:0 8px 26px rgba(0,0,0,0.55);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page-bg); color: var(--fg);
+    font-family: var(--sans); line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 24px 64px; }
+
+  header { margin-bottom: 8px; }
+  .eyebrow {
+    font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 650; margin: 0 0 10px;
+  }
+  h1 { font-size: clamp(24px, 3.4vw, 34px); line-height: 1.15; margin: 0 0 12px; text-wrap: balance; font-weight: 700; letter-spacing: -0.01em; }
+  .lede { max-width: 68ch; color: var(--muted); font-size: 16px; margin: 0; }
+  .disclaimer {
+    margin-top: 16px; font-size: 13px; color: var(--muted);
+    border-left: 3px solid var(--warn); padding: 8px 0 8px 14px; background: color-mix(in srgb, var(--warn) 8%, transparent);
+    border-radius: 0 6px 6px 0;
+  }
+  .disclaimer strong { color: var(--fg); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 34px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+
+  .col-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .col-head h2 { font-size: 17px; margin: 0; font-weight: 680; letter-spacing: -0.01em; }
+  .tag { font-size: 11px; font-weight: 650; letter-spacing: 0.04em; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+  .tag.exp { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
+  .tag.stable { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); border: 1px solid color-mix(in srgb, var(--good) 30%, transparent); }
+  .col-sub { font-size: 13.5px; color: var(--muted); margin: 0 0 14px; }
+  .col-sub code { font-family: var(--mono); font-size: 12.5px; background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 5px; border-radius: 4px; color: var(--fg); }
+
+  /* editor chrome */
+  .editor { background: var(--ed-bg); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
+  .tabbar { display: flex; align-items: center; background: color-mix(in srgb, var(--ed-bg) 92%, var(--fg) 8%); border-bottom: 1px solid var(--border); font-size: 12px; }
+  .tab { display: flex; align-items: center; gap: 7px; padding: 7px 14px; color: var(--ed-fg); background: var(--ed-bg); border-right: 1px solid var(--border); }
+  .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .tab.muted { color: var(--faint); background: transparent; }
+  .code { font-family: var(--mono); font-size: 13px; padding: 10px 0 16px; position: relative; overflow-x: auto; }
+  .ln { display: grid; grid-template-columns: 26px 30px 1fr; align-items: center; min-height: 20px; white-space: pre; }
+  .ln .sign { text-align: center; color: var(--faint); font-weight: 700; }
+  .ln .no { text-align: right; padding-right: 12px; color: var(--ed-gutter); opacity: 0.8; font-variant-numeric: tabular-nums; }
+  .ln .src { color: var(--ed-fg); padding-right: 16px; }
+  .ln.ins { background: var(--ins-bg); box-shadow: inset 3px 0 0 var(--ins-stripe); }
+  .ln.ins .sign { color: var(--ins-stripe); }
+  .ln.del { background: var(--del-bg); box-shadow: inset 3px 0 0 var(--del-stripe); }
+  .ln.del .sign { color: var(--del-stripe); }
+
+  .kw { color: var(--kw); } .str { color: var(--str); } .fn { color: var(--fn); } .typ { color: var(--typ); } .num { color: var(--num); }
+
+  /* stable: CodeLens text-link row */
+  .codelens-row { display: grid; grid-template-columns: 26px 30px 1fr; min-height: 22px; }
+  .codelens-row .lens { grid-column: 3; display: flex; gap: 16px; align-items: center; font-family: var(--sans); font-size: 12px; padding-top: 2px; }
+  .lens a { color: var(--codelens); text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+  .lens a:hover { text-decoration: underline; }
+  .lens a:focus-visible { outline: 2px solid var(--codelens); outline-offset: 2px; border-radius: 3px; }
+  .lens .ico { font-size: 11px; }
+  .lens-origin { grid-column: 3; font-family: var(--sans); font-size: 10.5px; letter-spacing: 0.03em; color: var(--faint); text-transform: uppercase; padding-bottom: 1px; }
+
+  /* experimental: floating inset button bar + deleted-lines webview inset */
+  .hunk { position: relative; }
+  .inset-del { margin: 2px 12px 2px 56px; border-radius: 5px; border: 1px dashed color-mix(in srgb, var(--del-stripe) 55%, transparent); background: var(--del-bg); overflow: hidden; position: relative; }
+  .inset-del .il { font-family: var(--mono); font-size: 13px; white-space: pre; padding: 0 10px; color: var(--ed-fg); min-height: 20px; line-height: 20px; }
+  .inset-badge { position: absolute; top: -8px; right: 8px; font-family: var(--sans); font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--del-stripe); background: var(--ed-bg); padding: 0 6px; border-radius: 4px; border: 1px solid color-mix(in srgb, var(--del-stripe) 40%, transparent); }
+  .actionbar { position: absolute; right: 16px; top: -12px; display: inline-flex; gap: 5px; z-index: 3; box-shadow: var(--shadow); border-radius: 4px; }
+  .actionbar button { font-family: var(--sans); font-size: 11px; height: 22px; padding: 0 9px; border-radius: 3px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--btn-sec-bd); background: var(--btn-sec-bg); color: var(--btn-sec-fg); }
+  .actionbar button.accept { background: var(--btn-accept-bg); color: var(--btn-accept-fg); border-color: var(--btn-accept-bd); font-weight: 600; }
+  .actionbar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .float-note { position: absolute; right: 16px; top: 14px; font-family: var(--sans); font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); }
+
+  .readout { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .readout b { color: var(--fg); font-weight: 620; }
+
+  /* comparison */
+  .compare { margin-top: 42px; }
+  .compare h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .compare .hint { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; }
+  .tblwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-bg); }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 650; }
+  tbody th { font-weight: 600; color: var(--fg); width: 30%; }
+  tr:last-child td, tr:last-child th { border-bottom: none; }
+  td .mono { font-family: var(--mono); font-size: 12.5px; }
+  .yes { color: var(--good); font-weight: 650; } .no { color: var(--bad); font-weight: 650; }
+  .col-exp-h { color: var(--warn); } .col-stb-h { color: var(--good); }
+  footer { margin-top: 34px; font-size: 12.5px; color: var(--faint); }
+  footer code { font-family: var(--mono); }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Interactive review · rendering paths</p>
+    <h1>Approve / deny flow: experimental API vs. stable API</h1>
+    <p class="lede">The same two-line change, reviewed two ways. Both flows accept or reject
+      a single hunk — the difference is <em>where the controls live</em> and <em>what draws
+      them</em>. That difference decides whether the extension can ship to the Marketplace.</p>
+    <p class="disclaimer"><strong>These are faithful mockups, not live screenshots.</strong>
+      They're reconstructed from the extensions' actual rendering code — hunkwise's
+      <code style="font-family:var(--mono)">decorationManager.ts</code> (the inset button bar &amp; red deleted-block) and
+      <code style="font-family:var(--mono)">diffCodeLens.ts</code> (the CodeLens actions) — styled in VS Code's own theme tokens.
+      A headless environment can't run VS Code to capture the real thing.</p>
+  </header>
+
+  <div class="grid">
+    <!-- STABLE / CODELENS -->
+    <section>
+      <div class="col-head">
+        <h2>Stable API</h2>
+        <span class="tag stable">Marketplace-safe · Cline / Continue / hunkwise fallback</span>
+      </div>
+      <p class="col-sub">Actions are <b>CodeLens</b> — clickable text links VS Code renders on
+        their own line above the hunk. API: <code>vscode.CodeLensProvider</code> (stable).</p>
+
+      <div class="editor" aria-label="Stable API review mockup">
+        <div class="tabbar">
+          <span class="tab"><span class="dot"></span>greeting.ts</span>
+          <span class="tab muted">baseline ↔ working</span>
+        </div>
+        <div class="code">
+          <div class="ln"><span class="sign"></span><span class="no">1</span><span class="src"><span class="kw">export</span> <span class="kw">function</span> <span class="fn">formatGreeting</span>(name: <span class="typ">string</span>) {</span></div>
+          <div class="ln"><span class="sign"></span><span class="no">2</span><span class="src">  <span class="kw">const</span> trimmed = name.<span class="fn">trim</span>();</span></div>
+
+          <div class="codelens-row"><span class="lens-origin">CodeLens</span></div>
+          <div class="codelens-row"><span class="lens">
+            <a href="#" onclick="return false"><span class="ico">✓</span> Accept</a>
+            <a href="#" onclick="return false"><span class="ico">✕</span> Discard</a>
+          </span></div>
+
+          <div class="ln del"><span class="sign">-</span><span class="no">3</span><span class="src">  <span class="kw">if</span> (trimmed === <span class="str">""</span>) <span class="kw">return</span> <span class="str">"Hello!"</span>;</span></div>
+          <div class="ln del"><span class="sign">-</span><span class="no">4</span><span class="src">  <span class="kw">return</span> <span class="str">"Hello, "</span> + trimmed + <span class="str">"."</span>;</span></div>
+          <div class="ln ins"><span class="sign">+</span><span class="no">3</span><span class="src">  <span class="kw">if</span> (!trimmed) <span class="kw">return</span> <span class="str">"Hello there!"</span>;</span></div>
+          <div class="ln ins"><span class="sign">+</span><span class="no">4</span><span class="src">  <span class="kw">return</span> <span class="str">`Hello, ${trimmed}!`</span>;</span></div>
+          <div class="ln"><span class="sign"></span><span class="no">5</span><span class="src">}</span></div>
+        </div>
+      </div>
+      <p class="readout"><b>What you're seeing:</b> a native diff view (removed + added lines),
+        with accept/discard as text-link CodeLens on a dedicated line. Plain, keyboard-reachable,
+        and shippable — but the actions sit on their own line and can't float over the code.</p>
+    </section>
+
+    <!-- EXPERIMENTAL / editorInsets -->
+    <section>
+      <div class="col-head">
+        <h2>Experimental API</h2>
+        <span class="tag exp">Proposed · hunkwise default</span>
+      </div>
+      <p class="col-sub">Actions are a <b>floating button bar</b>; deleted lines render as a
+        webview block — both inside the normal editor. API: <code>editorInsets</code> (proposed, #85682).</p>
+
+      <div class="editor" aria-label="Experimental API review mockup">
+        <div class="tabbar">
+          <span class="tab"><span class="dot"></span>greeting.ts</span>
+        </div>
+        <div class="code">
+          <div class="ln"><span class="sign"></span><span class="no">1</span><span class="src"><span class="kw">export</span> <span class="kw">function</span> <span class="fn">formatGreeting</span>(name: <span class="typ">string</span>) {</span></div>
+          <div class="ln"><span class="sign"></span><span class="no">2</span><span class="src">  <span class="kw">const</span> trimmed = name.<span class="fn">trim</span>();</span></div>
+
+          <div class="inset-del">
+            <span class="inset-badge">webview inset</span>
+            <div class="il">  <span class="kw" style="opacity:.85">if</span> (trimmed === <span class="str" style="opacity:.85">""</span>) return <span class="str" style="opacity:.85">"Hello!"</span>;</div>
+            <div class="il">  return <span class="str" style="opacity:.85">"Hello, "</span> + trimmed + <span class="str" style="opacity:.85">"."</span>;</div>
+          </div>
+
+          <div class="hunk">
+            <div class="actionbar">
+              <button class="accept" onclick="return false">✓ Accept</button>
+              <button onclick="return false">↺ Discard</button>
+            </div>
+            <span class="float-note">floats over buffer</span>
+            <div class="ln ins"><span class="sign">+</span><span class="no">3</span><span class="src">  <span class="kw">if</span> (!trimmed) <span class="kw">return</span> <span class="str">"Hello there!"</span>;</span></div>
+            <div class="ln ins"><span class="sign">+</span><span class="no">4</span><span class="src">  <span class="kw">return</span> <span class="str">`Hello, ${trimmed}!`</span>;</span></div>
+          </div>
+          <div class="ln"><span class="sign"></span><span class="no">5</span><span class="src">}</span></div>
+        </div>
+      </div>
+      <p class="readout"><b>What you're seeing:</b> you stay in the real file. Removed lines
+        appear as a red inline widget and the accept/discard buttons hover right on the hunk —
+        the slicker feel. Cost: it uses a proposed API, so <b>no Marketplace</b>.</p>
+    </section>
+  </div>
+
+  <!-- COMPARISON TABLE -->
+  <section class="compare">
+    <h2>Where they diverge</h2>
+    <p class="hint">Same capability set (per-hunk accept/reject, auto-advance, multi-file). These are the deltas that actually matter.</p>
+    <div class="tblwrap">
+      <table>
+        <thead>
+          <tr><th>Dimension</th><th class="col-stb-h">Stable (CodeLens)</th><th class="col-exp-h">Experimental (editorInsets)</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>Accept / reject control</th><td>Text-link CodeLens, on its own line</td><td>Real buttons in a floating bar, on the hunk</td></tr>
+          <tr><th>Deleted lines shown as</th><td>Rows in the native diff editor</td><td>An inline webview block in the normal editor</td></tr>
+          <tr><th>Lives in</th><td>Native diff editor / decorated editor</td><td>The normal editor buffer you're already in</td></tr>
+          <tr><th>Draws with</th><td class="mono">CodeLensProvider · TextEditorDecorationType</td><td class="mono">createWebviewTextEditorInset</td></tr>
+          <tr><th>Marketplace-shippable</th><td><span class="yes">Yes</span></td><td><span class="no">No</span> — proposed API</td></tr>
+          <tr><th>Install</th><td>Normal install</td><td>Insiders, or <span class="mono">argv.json</span> flag; flaky on Linux</td></tr>
+          <tr><th>Feel</th><td>Functional, slightly detached</td><td>Closest to "Cursor classic" inline</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="readout" style="margin-top:18px"><b>Takeaway for us:</b> the stable path delivers the
+      full review-flow capability and can ship. The experimental path only adds inline polish —
+      the floating buttons and in-buffer deleted block. Recommended: build on the stable path,
+      keep <code style="font-family:var(--mono)">editorInsets</code> as an optional enhanced mode.</p>
+  </section>
+
+  <footer>
+    Mockups derived from <code>molon/hunkwise</code> (v0.0.29) source and Cline/Continue's
+    stable-API approach. Colors use VS Code Light+/Dark+ theme tokens. Toggle your theme — both are designed.
+  </footer>
+</div>

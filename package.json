@@ -1,0 +1,97 @@
+{
+  "name": "vsc-interactive-review",
+  "publisher": "davemackey",
+  "displayName": "Interactive Review",
+  "description": "Walk a queue of pending AI edits — per-hunk accept/reject review flow (stable API, forked from molon/hunkwise).",
+  "version": "0.0.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/davemackey/vsc-interactive-review"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "icon": "media/icon.png",
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hunkwise.enable",
+        "title": "hunkwise: Enable"
+      },
+      {
+        "command": "hunkwise.disable",
+        "title": "hunkwise: Disable"
+      },
+      {
+        "command": "hunkwise.openSettings",
+        "title": "hunkwise: Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "hunkwise.refresh",
+        "title": "hunkwise: Refresh State",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "hunkwise.refresh",
+          "when": "view == hunkwiseToolbar",
+          "group": "navigation"
+        },
+        {
+          "command": "hunkwise.openSettings",
+          "when": "view == hunkwiseToolbar",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "hunkwisePanel",
+          "title": "hunkwise",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "hunkwisePanel": [
+        {
+          "id": "hunkwiseToolbar",
+          "name": "hunkwise",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "rm -rf out-test && tsc -p ./tsconfig.test.json && mkdir -p out-test/node_modules/vscode && cp out-test/test/__mocks__/vscode.js out-test/node_modules/vscode/index.js && node --test out-test/test/*.test.js",
+    "test:integration": "npm run compile && tsc -p ./tsconfig.integration.json && vscode-test"
+  },
+  "devDependencies": {
+    "@types/diff": "^5.x",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.37",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "typescript": "^5.x"
+  },
+  "dependencies": {
+    "diff": "^5.2.0",
+    "ignore": "^7.0.5"
+  }
+}

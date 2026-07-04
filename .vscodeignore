@@ -1,0 +1,15 @@
+.vscode/**
+.claude/**
+src/**
+out-test/**
+out-integration/**
+.vscode-test/**
+docs/**
+skills/**
+node_modules/**
+!node_modules/ignore/**
+!node_modules/diff/**
+*.vsix
+tsconfig*.json
+package-lock.json
+README.zh.md
