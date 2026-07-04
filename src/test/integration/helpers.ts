@@ -107,7 +107,7 @@ export function cleanWorkspace(): void {
 }
 
 export function getReviewPanel(): any {
-  const ext = vscode.extensions.getExtension('molon.hunkwise');
+  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
   if (api && typeof api.getReviewPanel === 'function') {
@@ -117,7 +117,7 @@ export function getReviewPanel(): any {
 }
 
 export function getStateManager(): any {
-  const ext = vscode.extensions.getExtension('molon.hunkwise');
+  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
   if (api && typeof api.getStateManager === 'function') {
@@ -127,7 +127,7 @@ export function getStateManager(): any {
 }
 
 export function getFileWatcher(): any {
-  const ext = vscode.extensions.getExtension('molon.hunkwise');
+  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
   if (api && typeof api.getFileWatcher === 'function') {

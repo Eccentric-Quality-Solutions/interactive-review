@@ -1,7 +1,8 @@
 # hunkwise — Evaluation
 
 *Deep read of [hunkwise](https://github.com/molon/hunkwise) as a base for this project.
-Source cloned at [reference/hunkwise/](reference/hunkwise/) (v0.0.29, MIT). Companion to
+Source: [github.com/molon/hunkwise](https://github.com/molon/hunkwise) (v0.0.29, MIT),
+cloned locally under `reference/hunkwise/`. Companion to
 [prior-art-and-alternatives.md](prior-art-and-alternatives.md) and the
 [review-flow model](interactive-review-model.md).*
 
@@ -169,8 +170,8 @@ Open decision that gates scaffolding: **fork hunkwise vs. build fresh** (both st
 
 ## Sources
 
-- [hunkwise repo](https://github.com/molon/hunkwise) · local clone
-  [reference/hunkwise/](reference/hunkwise/) · [FAQ / Linux note](https://github.com/molon/hunkwise/issues/20)
+- [hunkwise repo](https://github.com/molon/hunkwise) · local clone under `reference/hunkwise/`
+  · [FAQ / Linux note](https://github.com/molon/hunkwise/issues/20)
 - [VS Code: Using Proposed API](https://code.visualstudio.com/api/advanced-topics/using-proposed-api)
   · `editorInsets` = VS Code issue #85682 (`createWebviewTextEditorInset`), still proposed on
   `main`, Jul 2026.

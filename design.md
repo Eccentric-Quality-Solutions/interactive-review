@@ -75,7 +75,8 @@ status:  open ──(all hunks dispositioned)──▶ complete ──(user clos
 ## 4a. Phase 0 — status (2026-07-04): DONE (fork established, stable-only, compiles)
 
 - Forked `molon/hunkwise` into repo root (buildable subset: `src/`, `media/`, configs,
-  `LICENSE`). Pristine reference retained at [reference/hunkwise/](reference/hunkwise/).
+  `LICENSE`). Pristine upstream: [github.com/molon/hunkwise](https://github.com/molon/hunkwise)
+  (cloned locally under `reference/hunkwise/`).
 - **Removed the proposed API:** deleted `decorationManager.ts` (sole `editorInsets` user) and
   `vscode.proposed.editorInsets.d.ts`; unwired `DecorationManager` from `extension.ts`; dropped
   `enabledApiProposals` from `package.json`. The stable `DiffCodeLensProvider` path is untouched
