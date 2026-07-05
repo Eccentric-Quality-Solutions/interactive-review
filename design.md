@@ -208,6 +208,30 @@ reactive monitor as a first-class v1 surface, revisit whether Linux needs a `fs.
 fallback in `FileWatcher`. If the trigger model is snapshot-on-command (§5 #2), the reactive
 watcher is off the critical path and this is moot.
 
+## 4d. Phase 2/3 — status (2026-07-05): the flow's closure DONE
+
+Audit finding: the fork **already** provides the whole multi-file review *surface*
+(files→hunks tree, per-file/per-hunk/batch accept-reject) and **within-file**
+auto-advance (`revealNextHunk` after accept/discard). So Phase 2's stated exit
+criterion ("review a multi-file change end to end") was already met by the fork, like
+Phase 1. The genuine gap was **the flow's two missing pieces**, both now built:
+
+- **Review-complete terminal state** (`be8f227`). `StateManager.reviewComplete` =
+  session saw ≥1 pending file and drained to zero (distinct from idle). Latched at the
+  mutation source so it holds for every caller. Surfaced as a status-bar item
+  ("N to review" → "Review complete") and a panel badge. 5 integration tests.
+- **Cross-file advance** (`068d741`). `ReviewPanel.advanceToNextFile`: resolving a
+  file's last hunk opens the next reviewing file at its first hunk; codeLens
+  accept/discard now walk across files. 3 integration tests.
+
+**Deliberately NOT built** (per pragmatic scoping): no `Changeset`/`FileEntry`/`Hunk`
+typed model — snapshot-on-command already bounds the reviewing set, so completion is a
+boolean, not a model. No persistent per-hunk disposition (`pending|accepted|rejected`)
+— resolution stays destructive (accept folds baseline, reject reverts); retained
+disposition would be reimplementing the resolution engine for features (summary stats,
+un-accept) the MVP doesn't have. Revisit only if a concrete feature demands it. Suite:
+**75 passing / 1 pending / 0 failing**.
+
 ## 5. Open decisions
 
 1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).
