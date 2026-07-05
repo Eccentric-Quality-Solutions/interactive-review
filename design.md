@@ -76,12 +76,12 @@ status:  open ──(all hunks dispositioned)──▶ complete ──(user clos
 
 - Forked `molon/hunkwise` into repo root (buildable subset: `src/`, `media/`, configs,
   `LICENSE`). Pristine upstream: [github.com/molon/hunkwise](https://github.com/molon/hunkwise)
-  (cloned locally under `reference/hunkwise/`).
+  (cloned locally alongside this repo at `../hunkwise-reference/`).
 - **Removed the proposed API:** deleted `decorationManager.ts` (sole `editorInsets` user) and
   `vscode.proposed.editorInsets.d.ts`; unwired `DecorationManager` from `extension.ts`; dropped
   `enabledApiProposals` from `package.json`. The stable `DiffCodeLensProvider` path is untouched
   and remains the review surface.
-- **Rebranded** `package.json` → `davemackey.vsc-interactive-review` / "Interactive Review",
+- **Rebranded** `package.json` → `eccentricqualitysolutions.vsc-interactive-review` / "Interactive Review",
   v0.0.1. Scoped `tsconfig` to `src/**` (was globbing the reference clone).
 - **Verifies:** `npm run compile` clean; `72/73` unit tests pass.
 
@@ -90,11 +90,47 @@ status:  open ──(all hunks dispositioned)──▶ complete ──(user clos
 filesystem behavior; fails on Linux. We didn't touch the relevant files. Investigate later.
 
 **Follow-ups before real feature work:**
-- **Confirm publisher id** — `davemackey` is a placeholder inferred from the email; change if wrong.
-- **Rename internal ids** (mechanical sweep): `hunkwise.*` command ids, `hunkwiseToolbar` /
-  `hunkwisePanel` view ids, `hunkwise-baseline` URI scheme, and the `.vscode/hunkwise/` state dir.
-  Kept as-is this pass to land a compiling fork first.
-- Add our own `README.md` / fork `NOTICE` (retain hunkwise MIT attribution — `LICENSE` kept).
+- **Publisher id** — set to `eccentricqualitysolutions` (2026-07-05).
+- **Rename internal ids** — DONE (2026-07-05). Two passes:
+  (1) *contract ids:* `hunkwise.*` commands → `interactiveReview.*`; views
+  `hunkwisePanel`/`hunkwiseToolbar` → `interactiveReview*`; scheme `hunkwise-baseline` →
+  `interactive-review-baseline`; state dir `.vscode/hunkwise/` → `.vscode/interactive-review/`
+  (+ `.gitignore` entry/marker); webview text.
+  (2) *internal identifiers* (per user, no hunkwise left in code): `HunkwiseGit`→`BaselineGit`
+  (`hunkwiseGit.ts`→`baselineGit.ts`), `hunkwiseDir`→`stateDir`, `HUNKWISE_ENTRY`→`IGNORE_ENTRY`,
+  `hunkwiseGitEnv`→`baselineGitEnv`, `enable/disableHunkwise`→`enable/disableReview`,
+  `__hunkwiseTestRoot`→`__reviewTestRoot`, `isActiveHunkwiseDiffTab`→`isActiveReviewDiffTab`,
+  test temp-dir prefixes, labels & comments. Only `molon/hunkwise` (attribution) kept.
+  Verified: compile clean; unit 72/73; integration review-loop suites 100% pass.
+- **Attribution** — DONE (2026-07-05). `LICENSE` now carries both molon's (original) and
+  Eccentric Quality Solutions' (modifications) MIT copyright; added `README.md` with a prominent
+  Credits section stating this is a fork of molon/hunkwise and what changed.
+
+## 4b. Phase 1 — status (2026-07-05): DONE (inherited from fork, verified)
+
+Phase 1's stable path (baseline `hunkwise-baseline:` content provider → `computeHunks` diff
+engine → native diff editor via `TabInputTextDiff` → `$(check) Accept` / `$(x) Discard`
+CodeLens → `WorkspaceEdit` apply + baseline update) is **already implemented by the fork** —
+no new code needed. Verification exercised the real extension in headless VS Code:
+
+- **Exit criterion MET:** accept/reject a hunk → baseline updates correctly. All review-loop
+  integration tests pass: `diff editor` suite (CodeLens visibility, accept-by-file-scheme,
+  last-hunk-closes-tab), hunk navigation (accept/discard jumps to next hunk; last hunk exits
+  reviewing), and baseline-update edge cases (empty file, new file null→content, restore).
+- **Unit:** 72/73 (the 1 fail = known macOS-only Unicode NFC/NFD test, not ours).
+- **Integration:** 50 passing / 1 pending / **17 failing** — see known-issue below.
+
+**Known issue — 17 integration failures in the continuous-monitor layer (pre-existing, not a
+fork regression):** all 17 are in `fileWatcher` / `gitignoreManager` / branch-switch tests
+(ignore ×11, startup ×2, rename ×2, filewatch ×1, branchSwitch ×1) — code the Phase 0 fork
+never touched. Two causes: (a) Linux `fs.watch` timing/coalescing differs from the macOS fs
+hunkwise was built on → 10 of 17 are `Condition not met within timeout`; (b) the persistent
+on-disk integration workspace (`src/test/integration/workspace/`, plus accumulated
+`.vscode-test/user-data/`) leaks state across runs → order-dependent assertion failures (e.g.
+`clearOnBranchSwitch` reads a prior test's persisted `true`). **Not in Phase 1 scope** (review
+loop, not the monitor), but **must be triaged before Phase 2**, which builds directly on the
+multi-file monitor these tests cover. Fix direction: isolate each test's workspace + settings,
+and make `waitForCondition` robust to Linux watch latency.
 
 ## 5. Open decisions
 

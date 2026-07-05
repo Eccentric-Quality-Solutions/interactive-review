@@ -16,28 +16,28 @@ export function registerCommands(
   onStateChanged: () => void
 ): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('hunkwise.enable', () =>
-      enableHunkwise(stateManager, fileWatcher, reviewPanel, onStateChanged)
+    vscode.commands.registerCommand('interactiveReview.enable', () =>
+      enableReview(stateManager, fileWatcher, reviewPanel, onStateChanged)
     ),
-    vscode.commands.registerCommand('hunkwise.disable', () =>
-      disableHunkwise(stateManager, onStateChanged)
+    vscode.commands.registerCommand('interactiveReview.disable', () =>
+      disableReview(stateManager, onStateChanged)
     ),
-    vscode.commands.registerCommand('hunkwise.setIgnorePatterns', async (patterns: string[]) => {
+    vscode.commands.registerCommand('interactiveReview.setIgnorePatterns', async (patterns: string[]) => {
       stateManager.setIgnorePatterns(patterns);
       onStateChanged();
       await stateManager.syncIgnoreState((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
       onStateChanged();
     }),
-    vscode.commands.registerCommand('hunkwise.setRespectGitignore', async (value: boolean) => {
+    vscode.commands.registerCommand('interactiveReview.setRespectGitignore', async (value: boolean) => {
       stateManager.setRespectGitignore(value);
       onStateChanged();
       await stateManager.syncIgnoreState((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
       onStateChanged();
     }),
-    vscode.commands.registerCommand('hunkwise.setClearOnBranchSwitch', (value: boolean) => {
+    vscode.commands.registerCommand('interactiveReview.setClearOnBranchSwitch', (value: boolean) => {
       stateManager.setClearOnBranchSwitch(value);
     }),
-    vscode.commands.registerCommand('hunkwise.clearHunks', async () => {
+    vscode.commands.registerCommand('interactiveReview.clearHunks', async () => {
       await stateManager.clearHunksOnBranchSwitch(
         (fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)
       );
@@ -46,7 +46,7 @@ export function registerCommands(
   );
 }
 
-async function enableHunkwise(
+async function enableReview(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
   reviewPanel: ReviewPanel,
@@ -69,7 +69,7 @@ async function enableHunkwise(
   onStateChanged();
 }
 
-async function disableHunkwise(
+async function disableReview(
   stateManager: StateManager,
   onStateChanged: () => void
 ): Promise<void> {

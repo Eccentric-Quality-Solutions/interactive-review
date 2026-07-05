@@ -3,13 +3,13 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 import { acceptHunk, discardHunk } from '../../commands';
 import { computeHunks, hunkId } from '../../diffEngine';
 
-suite('hunkwise diff editor integration', function () {
+suite('interactive-review diff editor integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -19,19 +19,19 @@ suite('hunkwise diff editor integration', function () {
   teardown(async function () {
     // Close all editors to clean up diff tabs
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
   /**
-   * Helper: create a file, enable hunkwise, then modify externally to produce hunks.
+   * Helper: create a file, enable interactive-review, then modify externally to produce hunks.
    */
   async function setupReviewingFile(filename: string, baseline: string, modified: string): Promise<string> {
     const root = getWorkspaceRoot();
     const filePath = path.join(root, filename);
 
     writeFileExternally(filePath, baseline);
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) === baseline, 5000);
@@ -47,7 +47,7 @@ suite('hunkwise diff editor integration', function () {
   // ── useDiffEditor setting ──────────────────────────────────────────────────
 
   test('useDiffEditor setting persists and defaults to false', async () => {
-    await enableHunkwise();
+    await enableReview();
     const sm = getStateManager();
     assert.strictEqual(sm.useDiffEditor, false, 'useDiffEditor should default to false');
 
@@ -59,7 +59,7 @@ suite('hunkwise diff editor integration', function () {
   });
 
   test('showInlineDecorations setting persists and defaults to true', async () => {
-    await enableHunkwise();
+    await enableReview();
     const sm = getStateManager();
     assert.strictEqual(sm.showInlineDecorations, true, 'showInlineDecorations should default to true');
 
@@ -83,8 +83,8 @@ suite('hunkwise diff editor integration', function () {
     const fileState = sm.getFile(filePath);
     assert.ok(fileState);
 
-    // Open a hunkwise diff to ensure hunkwise-baseline document exists in textDocuments
-    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'hunkwise-baseline' });
+    // Open a interactive-review diff to ensure interactive-review-baseline document exists in textDocuments
+    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
     const currentUri = vscode.Uri.file(filePath);
     await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, 'test diff');
     await sleep(500);
@@ -108,7 +108,7 @@ suite('hunkwise diff editor integration', function () {
 
   // ── closeStaleTabs ────────────────────────────────────────────
 
-  test('accepting last hunk closes hunkwise diff tab', async () => {
+  test('accepting last hunk closes interactive-review diff tab', async () => {
     const filePath = await setupReviewingFile(
       'auto-close.txt',
       'original\n',
@@ -118,8 +118,8 @@ suite('hunkwise diff editor integration', function () {
     const sm = getStateManager();
     const fileState = sm.getFile(filePath)!;
 
-    // Open hunkwise diff tab
-    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'hunkwise-baseline' });
+    // Open interactive-review diff tab
+    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
     const currentUri = vscode.Uri.file(filePath);
     await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, 'test diff');
     await sleep(500);
@@ -129,7 +129,7 @@ suite('hunkwise diff editor integration', function () {
       for (const group of vscode.window.tabGroups.all) {
         for (const tab of group.tabs) {
           if (tab.input instanceof vscode.TabInputTextDiff
-            && tab.input.original.scheme === 'hunkwise-baseline'
+            && tab.input.original.scheme === 'interactive-review-baseline'
             && tab.input.modified.fsPath === filePath) {
             return true;
           }
@@ -143,11 +143,11 @@ suite('hunkwise diff editor integration', function () {
     assert.strictEqual(hunks.length, 1);
 
     // Accept via the extension's wired callback (simulating CodeLens/inset)
-    const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
+    const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
     assert.ok(ext?.isActive);
 
     // Use the CodeLens command which wires closeStaleTabs
-    await vscode.commands.executeCommand('hunkwise.codeLensAcceptHunk', filePath, hunkId(hunks[0]));
+    await vscode.commands.executeCommand('interactiveReview.codeLensAcceptHunk', filePath, hunkId(hunks[0]));
     await sleep(1000);
 
     // File should exit reviewing
@@ -160,7 +160,7 @@ suite('hunkwise diff editor integration', function () {
 
   // ── CodeLens visibility ────────────────────────────────────────────────────
 
-  test('CodeLens only appears when hunkwise diff tab is active', async () => {
+  test('CodeLens only appears when interactive-review diff tab is active', async () => {
     const filePath = await setupReviewingFile(
       'codelens-test.txt',
       'line 1\n',
@@ -177,10 +177,10 @@ suite('hunkwise diff editor integration', function () {
       'vscode.executeCodeLensProvider', vscode.Uri.file(filePath)
     );
 
-    const hunkwiseLenses = (codeLenses ?? []).filter(
-      l => l.command?.command === 'hunkwise.codeLensAcceptHunk'
-        || l.command?.command === 'hunkwise.codeLensDiscardHunk'
+    const reviewLenses = (codeLenses ?? []).filter(
+      l => l.command?.command === 'interactiveReview.codeLensAcceptHunk'
+        || l.command?.command === 'interactiveReview.codeLensDiscardHunk'
     );
-    assert.strictEqual(hunkwiseLenses.length, 0, 'No hunkwise CodeLens in normal editor');
+    assert.strictEqual(reviewLenses.length, 0, 'No interactive-review CodeLens in normal editor');
   });
 });

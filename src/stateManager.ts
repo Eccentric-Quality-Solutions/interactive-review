@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FileState } from './types';
-import { HunkwiseGit } from './hunkwiseGit';
+import { BaselineGit } from './baselineGit';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 
@@ -19,7 +19,7 @@ function logFileList(files: string[], rootPath: string | undefined): string {
 export class StateManager {
   // In-memory cache — rebuilt from git on load(), updated synchronously on mutations
   private state: Map<string, FileState> = new Map();
-  private hunkwiseDir: string | undefined;
+  private stateDir: string | undefined;
   private workspaceRoot: string | undefined;
   private _enabled: boolean = false;
   private _ignorePatterns: string[] = [...DEFAULT_IGNORE_PATTERNS];
@@ -28,7 +28,7 @@ export class StateManager {
   private _quoteRotationInterval: number = 30;
   private _useDiffEditor: boolean = false;
   private _showInlineDecorations: boolean = true;
-  private _git: HunkwiseGit | undefined;
+  private _git: BaselineGit | undefined;
 
   // Serial queue: git ops run one at a time; flush() awaits the tail
   private gitQueue: Promise<void> = Promise.resolve();
@@ -42,7 +42,7 @@ export class StateManager {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (workspaceFolders && workspaceFolders.length > 0) {
       this.workspaceRoot = workspaceFolders[0].uri.fsPath;
-      this.hunkwiseDir = path.join(this.workspaceRoot, '.vscode', 'hunkwise');
+      this.stateDir = path.join(this.workspaceRoot, '.vscode', 'interactive-review');
     }
   }
 
@@ -55,8 +55,8 @@ export class StateManager {
   get quoteRotationInterval(): number { return this._quoteRotationInterval; }
   get useDiffEditor(): boolean { return this._useDiffEditor; }
   get showInlineDecorations(): boolean { return this._showInlineDecorations; }
-  get dir(): string | undefined { return this.hunkwiseDir; }
-  get git(): HunkwiseGit | undefined { return this._git; }
+  get dir(): string | undefined { return this.stateDir; }
+  get git(): BaselineGit | undefined { return this._git; }
 
   /**
    * Walk workspace and collect files that exist on disk but are not tracked in git.
@@ -101,10 +101,10 @@ export class StateManager {
 
   // ── init / load ───────────────────────────────────────────────────────────
 
-  private ensureGit(): HunkwiseGit | undefined {
-    if (!this.hunkwiseDir || !this.workspaceRoot) return undefined;
+  private ensureGit(): BaselineGit | undefined {
+    if (!this.stateDir || !this.workspaceRoot) return undefined;
     if (!this._git) {
-      this._git = new HunkwiseGit(this.hunkwiseDir, this.workspaceRoot, log);
+      this._git = new BaselineGit(this.stateDir, this.workspaceRoot, log);
     }
     return this._git;
   }
@@ -118,8 +118,8 @@ export class StateManager {
     const g = this.ensureGit();
     if (!g) return;
 
-    // enabled state is determined by whether the hunkwise git dir exists on disk
-    const gitDir = path.join(this.hunkwiseDir!, 'git');
+    // enabled state is determined by whether the interactive-review git dir exists on disk
+    const gitDir = path.join(this.stateDir!, 'git');
     if (!fs.existsSync(gitDir)) return;
 
     this._enabled = true;
@@ -430,7 +430,7 @@ export class StateManager {
   }
 
   /**
-   * Snapshot all current workspace files into hunkwise git as baselines.
+   * Snapshot all current workspace files into interactive-review git as baselines.
    * Only snapshots files that don't already have a baseline recorded.
    * Should be called once after enable.
    */
@@ -602,7 +602,7 @@ export class StateManager {
     // intentional to avoid flooding the user with false positives when:
     // - ignore rules changed and previously-ignored files are now un-ignored
     // - a large number of files become visible at once
-    // Genuine new files created while hunkwise is running are caught by
+    // Genuine new files created while interactive-review is running are caught by
     // FileWatcher.onDidCreate, not this path. This is intentionally consistent
     // with the onDiskChange fallback which also silently adopts content.
     const trackedSet = new Set(trackedFiles);
@@ -697,7 +697,7 @@ export class StateManager {
   }
 
   /**
-   * Reset extension to disabled state (called when hunkwiseDir is deleted externally).
+   * Reset extension to disabled state (called when stateDir is deleted externally).
    */
   resetToDisabled(): void {
     this._enabled = false;

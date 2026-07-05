@@ -21,10 +21,10 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
     if (!this.stateManager.enabled) return [];
 
     // Only show CodeLenses when:
-    // 1. A hunkwise diff tab for this file is the active tab in some group
+    // 1. A interactive-review diff tab for this file is the active tab in some group
     // 2. No normal editor (viewColumn defined) for this file is visible
     //    (avoids duplicate actions when split-view shows both diff + normal editor)
-    if (!this.isActiveHunkwiseDiffTab(document.uri)) return [];
+    if (!this.isActiveReviewDiffTab(document.uri)) return [];
     if (this.hasVisibleNormalEditor(document.uri)) return [];
 
     const fileState = this.stateManager.getFile(document.uri.fsPath);
@@ -44,12 +44,12 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
       lenses.push(
         new vscode.CodeLens(range, {
           title: '$(check) Accept',
-          command: 'hunkwise.codeLensAcceptHunk',
+          command: 'interactiveReview.codeLensAcceptHunk',
           arguments: [document.uri.fsPath, id],
         }),
         new vscode.CodeLens(range, {
           title: '$(x) Discard',
-          command: 'hunkwise.codeLensDiscardHunk',
+          command: 'interactiveReview.codeLensDiscardHunk',
           arguments: [document.uri.fsPath, id],
         }),
       );
@@ -67,12 +67,12 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
     );
   }
 
-  private isActiveHunkwiseDiffTab(uri: vscode.Uri): boolean {
+  private isActiveReviewDiffTab(uri: vscode.Uri): boolean {
     const fsPath = uri.fsPath;
     for (const group of vscode.window.tabGroups.all) {
       const active = group.activeTab;
       if (active?.input instanceof vscode.TabInputTextDiff) {
-        if (active.input.original.scheme === 'hunkwise-baseline'
+        if (active.input.original.scheme === 'interactive-review-baseline'
           && active.input.modified.fsPath === fsPath) {
           return true;
         }

@@ -1,6 +1,6 @@
 {
   "name": "vsc-interactive-review",
-  "publisher": "davemackey",
+  "publisher": "eccentricqualitysolutions",
   "displayName": "Interactive Review",
   "description": "Walk a queue of pending AI edits — per-hunk accept/reject review flow (stable API, forked from molon/hunkwise).",
   "version": "0.0.1",
@@ -23,34 +23,34 @@
   "contributes": {
     "commands": [
       {
-        "command": "hunkwise.enable",
-        "title": "hunkwise: Enable"
+        "command": "interactiveReview.enable",
+        "title": "Interactive Review: Enable"
       },
       {
-        "command": "hunkwise.disable",
-        "title": "hunkwise: Disable"
+        "command": "interactiveReview.disable",
+        "title": "Interactive Review: Disable"
       },
       {
-        "command": "hunkwise.openSettings",
-        "title": "hunkwise: Settings",
+        "command": "interactiveReview.openSettings",
+        "title": "Interactive Review: Settings",
         "icon": "$(settings-gear)"
       },
       {
-        "command": "hunkwise.refresh",
-        "title": "hunkwise: Refresh State",
+        "command": "interactiveReview.refresh",
+        "title": "Interactive Review: Refresh State",
         "icon": "$(refresh)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "hunkwise.refresh",
-          "when": "view == hunkwiseToolbar",
+          "command": "interactiveReview.refresh",
+          "when": "view == interactiveReviewToolbar",
           "group": "navigation"
         },
         {
-          "command": "hunkwise.openSettings",
-          "when": "view == hunkwiseToolbar",
+          "command": "interactiveReview.openSettings",
+          "when": "view == interactiveReviewToolbar",
           "group": "navigation"
         }
       ]
@@ -58,17 +58,17 @@
     "viewsContainers": {
       "panel": [
         {
-          "id": "hunkwisePanel",
-          "title": "hunkwise",
+          "id": "interactiveReviewPanel",
+          "title": "Interactive Review",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "hunkwisePanel": [
+      "interactiveReviewPanel": [
         {
-          "id": "hunkwiseToolbar",
-          "name": "hunkwise",
+          "id": "interactiveReviewToolbar",
+          "name": "Interactive Review",
           "type": "webview"
         }
       ]

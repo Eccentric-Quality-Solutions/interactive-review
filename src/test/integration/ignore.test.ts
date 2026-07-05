@@ -4,14 +4,14 @@ import * as path from 'path';
 import assert from 'assert';
 import { execSync } from 'child_process';
 import {
-  getWorkspaceRoot, hunkwiseGitEnv, gitListTracked,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  getWorkspaceRoot, baselineGitEnv, gitListTracked,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, writeFileViaVSCode, cleanWorkspace,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise ignore/gitignore integration', function () {
+suite('interactive-review ignore/gitignore integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -19,14 +19,14 @@ suite('hunkwise ignore/gitignore integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
   test('files in a directory added to .gitignore are removed from tracking', async () => {
     const root = getWorkspaceRoot();
 
-    // Create files before enabling hunkwise (they become baselines)
+    // Create files before enabling interactive-review (they become baselines)
     const dirPath = path.join(root, 'mydir');
     const fileA = path.join(dirPath, 'a.txt');
     const fileB = path.join(dirPath, 'b.txt');
@@ -35,7 +35,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(fileB, 'content b\n');
     writeFileExternally(fileOutside, 'keep me\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     // Wait for all files to be tracked
     const relA = path.relative(root, fileA);
@@ -71,7 +71,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(logFile, 'log content\n');
     writeFileExternally(txtFile, 'readme content\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const relLog = path.relative(root, logFile);
     const relTxt = path.relative(root, txtFile);
@@ -107,7 +107,7 @@ suite('hunkwise ignore/gitignore integration', function () {
 
     // Wait for .gitignore to be picked up by the file watcher
     await sleep(300);
-    await enableHunkwise();
+    await enableReview();
 
     const relIgnored = path.relative(root, ignoredFile);
     const relNormal = path.relative(root, normalFile);
@@ -145,7 +145,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(deepFile, 'deep content\n');
     writeFileExternally(topFile, 'main content\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const relDeep = path.relative(root, deepFile);
     const relTop = path.relative(root, topFile);
@@ -169,7 +169,7 @@ suite('hunkwise ignore/gitignore integration', function () {
 
   test('ignorePatterns changed externally in settings.json triggers sync on reload', async () => {
     const root = getWorkspaceRoot();
-    const settingsPath = path.join(root, '.vscode', 'hunkwise', 'settings.json');
+    const settingsPath = path.join(root, '.vscode', 'interactive-review', 'settings.json');
 
     // Create files
     const ignoredFile = path.join(root, 'logs', 'app.log');
@@ -177,7 +177,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(ignoredFile, 'log data\n');
     writeFileExternally(normalFile, 'index data\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const relIgnored = path.relative(root, ignoredFile);
     const relNormal = path.relative(root, normalFile);
@@ -193,7 +193,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     settings.ignorePatterns = ['.git', 'logs'];
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
 
-    // Wait for fs.watch on hunkwise dir to detect settings.json change and trigger syncIgnore
+    // Wait for fs.watch on interactive-review dir to detect settings.json change and trigger syncIgnore
     await waitForCondition(() => {
       const tracked = gitListTracked(root);
       return !tracked.includes(relIgnored);
@@ -216,16 +216,16 @@ suite('hunkwise ignore/gitignore integration', function () {
     // Also create files in the ignored dir (on disk but should not be tracked)
     writeFileExternally(path.join(root, 'stale-dir', 'old.txt'), 'stale data\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     // normal.txt should be tracked, stale-dir/old.txt should not
     await waitForCondition(() => gitListTracked(root).includes('normal.txt'), 8000);
     let tracked = gitListTracked(root);
     assert.ok(!tracked.includes('stale-dir/old.txt'), 'ignored file should not be tracked on enable');
 
-    // Simulate a "previous session" leaving stale data in the hunkwise git repo:
+    // Simulate a "previous session" leaving stale data in the interactive-review git repo:
     // Inject stale-dir/old.txt directly into the git index, bypassing StateManager.
-    const env = hunkwiseGitEnv(root);
+    const env = baselineGitEnv(root);
     const hash = execSync('git hash-object -w --stdin', {
       cwd: root, env, encoding: 'utf-8', input: 'stale data\n',
     }).trim();
@@ -239,7 +239,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     assert.ok(tracked.includes('stale-dir/old.txt'), 'stale file should be in git after injection');
 
     // Trigger syncIgnoreState (as activation would do on restart)
-    await vscode.commands.executeCommand('hunkwise.setRespectGitignore', true);
+    await vscode.commands.executeCommand('interactiveReview.setRespectGitignore', true);
 
     await waitForCondition(() => {
       return !gitListTracked(root).includes('stale-dir/old.txt');
@@ -266,7 +266,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(path.join(root, 'build-output.log'), 'log data\n');
     writeFileExternally(path.join(root, 'src', 'index.ts'), 'source\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     await waitForCondition(() => {
       const t = gitListTracked(root);
@@ -285,10 +285,10 @@ suite('hunkwise ignore/gitignore integration', function () {
   test('syncIgnoreState removes in-memory reviewing state for newly-ignored files without git baseline', async () => {
     const root = getWorkspaceRoot();
 
-    // Create a file and enable hunkwise so it gets a baseline
+    // Create a file and enable interactive-review so it gets a baseline
     writeFileExternally(path.join(root, 'keep.txt'), 'keep\n');
     writeFileExternally(path.join(root, 'tmpdir', 'tracked.txt'), 'original\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => {
       const t = gitListTracked(root);
       return t.includes('keep.txt') && t.includes('tmpdir/tracked.txt');
@@ -325,14 +325,14 @@ suite('hunkwise ignore/gitignore integration', function () {
   test('externally created files in gitignored directory are not tracked or stored in git', async () => {
     const root = getWorkspaceRoot();
 
-    // Set up .gitignore with a directory pattern BEFORE enabling hunkwise
+    // Set up .gitignore with a directory pattern BEFORE enabling interactive-review
     writeFileExternally(path.join(root, '.gitignore'), '.vscode-test/\n');
     await sleep(300);
 
     // Create a normal file that should be tracked
     writeFileExternally(path.join(root, 'normal.txt'), 'normal content\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('normal.txt'), 8000);
 
     // Now externally create files under the ignored directory
@@ -350,7 +350,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     );
     await sleep(500);
 
-    // Verify: none of these files should appear in hunkwise git
+    // Verify: none of these files should appear in interactive-review git
     const tracked = gitListTracked(root);
     assert.ok(!tracked.includes('.vscode-test/user-data/Session Storage/LOG'),
       `Session Storage/LOG should NOT be tracked (tracked: ${tracked.join(', ')})`);
@@ -370,7 +370,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(path.join(root, 'dist', 'app.js'), 'app code\n');
     writeFileExternally(path.join(root, 'keep.txt'), 'keep\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => {
       const tracked = gitListTracked(root);
       return tracked.includes('dist/app.js') && tracked.includes('keep.txt');
@@ -407,7 +407,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     // A .tmp file NOT in src/ should be tracked (rule scoped to src/)
     writeFileExternally(path.join(root, 'root.tmp'), 'root temp\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('keep.txt'), 8000);
 
     const tracked = gitListTracked(root);
@@ -430,7 +430,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(path.join(root, 'données', 'résumé.txt'), 'french\n');
     writeFileExternally(path.join(root, 'normal.txt'), 'normal\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     // All files should be tracked (shouldIgnore must not reject non-ASCII paths)
     await waitForCondition(() => {
@@ -453,7 +453,7 @@ suite('hunkwise ignore/gitignore integration', function () {
     writeFileExternally(path.join(root, 'src', 'app.ts'), 'code\n');
     writeFileExternally(path.join(root, 'src', 'debug.tmp'), 'temp\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('src/debug.tmp'), 8000);
 
     // Now add a nested .gitignore that ignores *.tmp

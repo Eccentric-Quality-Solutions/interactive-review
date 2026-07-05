@@ -193,19 +193,19 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
   }): Promise<void> {
     switch (msg.command) {
       case 'enable':
-        await vscode.commands.executeCommand('hunkwise.enable');
+        await vscode.commands.executeCommand('interactiveReview.enable');
         break;
       case 'disable':
-        await vscode.commands.executeCommand('hunkwise.disable');
+        await vscode.commands.executeCommand('interactiveReview.disable');
         break;
       case 'setIgnorePatterns':
         if (msg.folders !== undefined) {
-          await vscode.commands.executeCommand('hunkwise.setIgnorePatterns', msg.folders);
+          await vscode.commands.executeCommand('interactiveReview.setIgnorePatterns', msg.folders);
         }
         break;
       case 'setRespectGitignore':
         if (msg.value !== undefined) {
-          await vscode.commands.executeCommand('hunkwise.setRespectGitignore', msg.value);
+          await vscode.commands.executeCommand('interactiveReview.setRespectGitignore', msg.value);
         }
         break;
       case 'setClearOnBranchSwitch':
@@ -293,7 +293,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       case 'openDeletedDiff':
         if (msg.filePath) {
           const fileName = path.basename(msg.filePath);
-          const baselineUri = vscode.Uri.file(msg.filePath).with({ scheme: 'hunkwise-baseline' });
+          const baselineUri = vscode.Uri.file(msg.filePath).with({ scheme: 'interactive-review-baseline' });
           const emptyUri = vscode.Uri.from({ scheme: 'untitled', path: msg.filePath + '.deleted' });
           await vscode.commands.executeCommand('vscode.diff', baselineUri, emptyUri, `${fileName} (deleted)`);
         }
@@ -323,10 +323,10 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
 
   private async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
     const fileName = path.basename(filePath);
-    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'hunkwise-baseline' });
+    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
     const currentUri = vscode.Uri.file(filePath);
 
-    await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, `${fileName} (hunkwise)`);
+    await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, `${fileName} (interactive-review)`);
 
     // Jump to the target hunk position in the diff editor's modified side.
     // Prefer the embedded editor (viewColumn undefined) over a normal editor for the same file.

@@ -10,7 +10,7 @@ import { initLog, log } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
   initLog();
-  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
+  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   log(`activate v${ext?.packageJSON?.version ?? '?'}`);
   const stateManager = new StateManager();
   stateManager.onRollback = () => onStateChanged();
@@ -19,7 +19,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   const baselineChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
   context.subscriptions.push(
     baselineChangeEmitter,
-    vscode.workspace.registerTextDocumentContentProvider('hunkwise-baseline', {
+    vscode.workspace.registerTextDocumentContentProvider('interactive-review-baseline', {
       onDidChange: baselineChangeEmitter.event,
       provideTextDocumentContent(uri: vscode.Uri): string {
         const filePath = uri.fsPath;
@@ -40,20 +40,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
 
   /** Notify the diff editor that a specific file's baseline changed (only after accept). */
   function fireBaselineChange(filePath: string): void {
-    baselineChangeEmitter.fire(vscode.Uri.file(filePath).with({ scheme: 'hunkwise-baseline' }));
+    baselineChangeEmitter.fire(vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' }));
   }
 
   /**
    * Close tabs for files that are no longer in reviewing state.
-   * - Hunkwise diff tabs: always close; reopen normal editor if file still exists on disk
+   * - Interactive Review diff tabs: always close; reopen normal editor if file still exists on disk
    * - Normal tabs for deleted files: close (new file was discarded)
    */
   async function closeStaleTabs(): Promise<void> {
     for (const group of vscode.window.tabGroups.all) {
       for (const tab of group.tabs) {
-        // Hunkwise diff tab (normal file or deleted file)
+        // Interactive Review diff tab (normal file or deleted file)
         if (tab.input instanceof vscode.TabInputTextDiff
-          && tab.input.original.scheme === 'hunkwise-baseline') {
+          && tab.input.original.scheme === 'interactive-review-baseline') {
           // For deleted files, modified is untitled:path.deleted; extract real path from original
           const filePath = tab.input.modified.scheme === 'file'
             ? tab.input.modified.fsPath
@@ -112,7 +112,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
 
   reviewPanel = new ReviewPanel(context, stateManager, fileWatcher, onStateChanged, fireBaselineChange, closeStaleTabs);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('hunkwiseToolbar', reviewPanel)
+    vscode.window.registerWebviewViewProvider('interactiveReviewToolbar', reviewPanel)
   );
 
   registerCommands(context, stateManager, fileWatcher, reviewPanel, onStateChanged);
@@ -122,19 +122,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   context.subscriptions.push(
     diffCodeLensProvider,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, diffCodeLensProvider),
-    vscode.commands.registerCommand('hunkwise.codeLensAcceptHunk', (filePath: string, hId: string) => {
+    vscode.commands.registerCommand('interactiveReview.codeLensAcceptHunk', (filePath: string, hId: string) => {
       acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); void closeStaleTabs().catch(err => log(`closeStaleTabs: ${err}`)); }, 'codeLens');
     }),
-    vscode.commands.registerCommand('hunkwise.codeLensDiscardHunk', (filePath: string, hId: string) => {
+    vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
       discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); void closeStaleTabs().catch(err => log(`closeStaleTabs: ${err}`)); }, 'codeLens');
     }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('hunkwise.openSettings', () => {
+    vscode.commands.registerCommand('interactiveReview.openSettings', () => {
       reviewPanel?.openSettings();
     }),
-    vscode.commands.registerCommand('hunkwise.refresh', async () => {
+    vscode.commands.registerCommand('interactiveReview.refresh', async () => {
       if (!stateManager.enabled) return;
       reviewPanel?.setLoading(true);
       try {
@@ -170,17 +170,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     onStateChanged();
   }
 
-  // ── Watch .vscode/hunkwise/git/ for deletion ────────────────────────────────
+  // ── Watch .vscode/interactive-review/git/ for deletion ────────────────────────────────
   // Detects: git dir deleted → reset to disabled; settings.json changed → reload patterns.
-  const hunkwiseDir = stateManager.dir;
-  if (hunkwiseDir) {
-    const gitDir = path.join(hunkwiseDir, 'git');
+  const stateDir = stateManager.dir;
+  if (stateDir) {
+    const gitDir = path.join(stateDir, 'git');
     let settingsWatcher: fs.FSWatcher | undefined;
 
     const startSettingsWatch = () => {
-      if (!fs.existsSync(hunkwiseDir)) return;
+      if (!fs.existsSync(stateDir)) return;
       try {
-        settingsWatcher = fs.watch(hunkwiseDir, { persistent: false }, (_eventType, filename) => {
+        settingsWatcher = fs.watch(stateDir, { persistent: false }, (_eventType, filename) => {
           if (filename === 'settings.json') {
             stateManager.reloadIgnorePatterns();
             syncIgnore();

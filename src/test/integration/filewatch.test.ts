@@ -4,13 +4,13 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise file watcher integration', function () {
+suite('interactive-review file watcher integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -18,7 +18,7 @@ suite('hunkwise file watcher integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
@@ -31,7 +31,7 @@ suite('hunkwise file watcher integration', function () {
     writeFileExternally(fileA, 'content a\n');
     writeFileExternally(fileB, 'content b\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const relA = path.relative(root, fileA);
     const relB = path.relative(root, fileB);
@@ -50,12 +50,12 @@ suite('hunkwise file watcher integration', function () {
     const root = getWorkspaceRoot();
 
     writeFileExternally(path.join(root, 'file.txt'), 'hello\n');
-    await enableHunkwise();
+    await enableReview();
 
-    const gitDir = path.join(root, '.vscode', 'hunkwise', 'git');
+    const gitDir = path.join(root, '.vscode', 'interactive-review', 'git');
     await waitForCondition(() => fs.existsSync(gitDir), 5000);
 
-    await disableHunkwise();
+    await disableReview();
 
     // Git dir should be removed
     assert.ok(!fs.existsSync(gitDir), 'Git directory should be removed after disable');
@@ -63,7 +63,7 @@ suite('hunkwise file watcher integration', function () {
 
   test('external file creation is tracked with null baseline (not in git)', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     // Create a file externally after enable
     const filePath = path.join(root, 'new-external.txt');
@@ -94,7 +94,7 @@ suite('hunkwise file watcher integration', function () {
     const filePath = path.join(root, 'modify-me.txt');
     writeFileExternally(filePath, 'original\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -113,7 +113,7 @@ suite('hunkwise file watcher integration', function () {
 
   test('external file deletion of new file (null baseline) cleans up state', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     // Create a file externally → null baseline (new file, not in git)
     const filePath = path.join(root, 'will-delete.txt');
@@ -140,17 +140,17 @@ suite('hunkwise file watcher integration', function () {
 
     writeFileExternally(path.join(root, 'persist.txt'), 'persist\n');
 
-    await enableHunkwise();
+    await enableReview();
     const rel = 'persist.txt';
     await waitForCondition(() => gitListTracked(root).includes(rel), 5000);
 
-    await disableHunkwise();
+    await disableReview();
 
     // Modify the file while disabled
     writeFileExternally(path.join(root, 'persist.txt'), 'modified while disabled\n');
 
     // Re-enable
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes(rel), 5000);
 
     // Baseline should be the current content (since we re-snapshotted)
@@ -161,7 +161,7 @@ suite('hunkwise file watcher integration', function () {
 
   test('multiple files created simultaneously are all tracked in memory', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
@@ -189,7 +189,7 @@ suite('hunkwise file watcher integration', function () {
 
   test('refresh preserves externally created new files (null baseline)', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     // Create a file externally after enable — simulates Finder drag-in
     const filePath = path.join(root, 'finder-file.txt');
@@ -205,7 +205,7 @@ suite('hunkwise file watcher integration', function () {
     }, 8000);
 
     // Execute the refresh command (same as clicking the refresh button in the panel)
-    await vscode.commands.executeCommand('hunkwise.refresh');
+    await vscode.commands.executeCommand('interactiveReview.refresh');
 
     // After refresh, the new file should still be in reviewing state with null baseline
     const fileState = sm.getFile(filePath);
@@ -216,7 +216,7 @@ suite('hunkwise file watcher integration', function () {
 
   test('refresh preserves binary files detected by FileWatcher as new', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     // Create a binary file externally (e.g. .xlsx dragged from Finder)
     const binaryFile = path.join(root, 'report.xlsx');
@@ -233,7 +233,7 @@ suite('hunkwise file watcher integration', function () {
     }, 8000);
 
     // Execute refresh
-    await vscode.commands.executeCommand('hunkwise.refresh');
+    await vscode.commands.executeCommand('interactiveReview.refresh');
 
     // Binary file should STILL be in state — consistent with onDiskCreate behavior
     const fileState = sm.getFile(binaryFile);
@@ -244,7 +244,7 @@ suite('hunkwise file watcher integration', function () {
 
   test('externally created empty files enter reviewing with null baseline', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     const emptyFile = path.join(root, 'empty.txt');
     writeFileExternally(emptyFile, '');

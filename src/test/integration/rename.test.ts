@@ -4,14 +4,14 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, renameFileViaVSCode, deleteFileViaVSCode, cleanWorkspace,
   getStateManager,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise rename integration', function () {
+suite('interactive-review rename integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -19,13 +19,13 @@ suite('hunkwise rename integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
   test('rename a new file preserves tracking under new path', async () => {
     const root = getWorkspaceRoot();
-    await enableHunkwise();
+    await enableReview();
 
     // Externally create a new file → triggers review with null baseline
     const oldPath = path.join(root, 'new-file.txt');
@@ -66,7 +66,7 @@ suite('hunkwise rename integration', function () {
     const filePath = path.join(root, 'reviewing-file.txt');
     writeFileExternally(filePath, 'original content\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 8000);
@@ -110,7 +110,7 @@ suite('hunkwise rename integration', function () {
     const filePath = path.join(root, 'to-delete.txt');
     writeFileExternally(filePath, 'delete me\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 8000);
@@ -120,7 +120,7 @@ suite('hunkwise rename integration', function () {
 
     await waitForCondition(() => !gitListTracked(root).includes(rel), 5000);
 
-    // Verify: file is no longer tracked in hunkwise git
+    // Verify: file is no longer tracked in interactive-review git
     const tracked = gitListTracked(root);
     assert.ok(!tracked.includes(rel), `Deleted file "${rel}" should not be tracked`);
 

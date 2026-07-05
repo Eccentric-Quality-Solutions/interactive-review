@@ -4,14 +4,14 @@ import * as path from 'path';
 import assert from 'assert';
 import { execSync } from 'child_process';
 import {
-  getWorkspaceRoot, hunkwiseGitEnv, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  getWorkspaceRoot, baselineGitEnv, gitListTracked, gitGetBaseline,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getReviewPanel, getStateManager,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise startup & loading integration', function () {
+suite('interactive-review startup & loading integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -19,7 +19,7 @@ suite('hunkwise startup & loading integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
@@ -30,8 +30,8 @@ suite('hunkwise startup & loading integration', function () {
     writeFileExternally(path.join(root, 'a.txt'), 'content a\n');
     writeFileExternally(path.join(root, 'b.txt'), 'content b\n');
 
-    // Enable hunkwise (creates git repo with baselines)
-    await enableHunkwise();
+    // Enable interactive-review (creates git repo with baselines)
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('a.txt'), 5000);
 
     // At this point the extension is active and startup sync has already run.
@@ -59,8 +59,8 @@ suite('hunkwise startup & loading integration', function () {
     writeFileExternally(path.join(root, 'keep.txt'), 'keep\n');
     writeFileExternally(path.join(root, 'ignored-dir', 'stale.txt'), 'stale\n');
 
-    // Enable hunkwise
-    await enableHunkwise();
+    // Enable interactive-review
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('keep.txt'), 5000);
 
     // Verify ignored file is not tracked
@@ -68,7 +68,7 @@ suite('hunkwise startup & loading integration', function () {
     assert.ok(!tracked.includes('ignored-dir/stale.txt'), 'ignored file should not be tracked');
 
     // Inject stale file directly into git index (simulating leftover from previous session)
-    const env = hunkwiseGitEnv(root);
+    const env = baselineGitEnv(root);
     const hash = execSync('git hash-object -w --stdin', {
       cwd: root, env, encoding: 'utf-8', input: 'stale\n',
     }).trim();
@@ -82,7 +82,7 @@ suite('hunkwise startup & loading integration', function () {
     assert.ok(tracked.includes('ignored-dir/stale.txt'), 'stale file should be in git after injection');
 
     // Trigger syncIgnoreState (simulating what startup sync does)
-    await vscode.commands.executeCommand('hunkwise.setRespectGitignore', true);
+    await vscode.commands.executeCommand('interactiveReview.setRespectGitignore', true);
 
     // Wait for sync to complete and stale file to be removed
     await waitForCondition(() => {
@@ -112,12 +112,12 @@ suite('hunkwise startup & loading integration', function () {
 
     // Create a normal file and enable
     writeFileExternally(path.join(root, 'keep.txt'), 'keep\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('keep.txt'), 5000);
 
-    // Inject 500 stale files directly into hunkwise git index,
+    // Inject 500 stale files directly into interactive-review git index,
     // simulating files tracked before a directory was added to .gitignore.
-    const env = hunkwiseGitEnv(root);
+    const env = baselineGitEnv(root);
     const hash = execSync('git hash-object -w --stdin', {
       cwd: root, env, encoding: 'utf-8', input: 'stale content\n',
     }).trim();
@@ -138,7 +138,7 @@ suite('hunkwise startup & loading integration', function () {
 
     // Trigger syncIgnoreState — this must complete within the test timeout (30s).
     const start = Date.now();
-    await vscode.commands.executeCommand('hunkwise.setRespectGitignore', true);
+    await vscode.commands.executeCommand('interactiveReview.setRespectGitignore', true);
 
     await waitForCondition(() => {
       const t = gitListTracked(root);
@@ -164,7 +164,7 @@ suite('hunkwise startup & loading integration', function () {
     // Create files and enable — baselines match disk content
     writeFileExternally(path.join(root, 'unchanged.txt'), 'same\n');
     writeFileExternally(path.join(root, 'will-change.txt'), 'original\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('unchanged.txt'), 5000);
     await waitForCondition(() => gitListTracked(root).includes('will-change.txt'), 5000);
 
@@ -172,13 +172,13 @@ suite('hunkwise startup & loading integration', function () {
     writeFileExternally(path.join(root, 'will-change.txt'), 'modified\n');
 
     // Disable and re-enable to trigger load() from scratch
-    await disableHunkwise();
+    await disableReview();
 
     // Re-inject baselines into git before re-enable (simulate persistent state)
     // We need to manually set up the git repo since disable destroyed it
     writeFileExternally(path.join(root, 'unchanged.txt'), 'same\n');
     writeFileExternally(path.join(root, 'will-change.txt'), 'modified\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('unchanged.txt'), 5000);
 
     // Now modify will-change.txt again to create a real diff
@@ -201,20 +201,20 @@ suite('hunkwise startup & loading integration', function () {
 
   test('corrupted git dir (HEAD missing) is re-initialized on enable', async () => {
     const root = getWorkspaceRoot();
-    const hunkwiseDir = path.join(root, '.vscode', 'hunkwise');
-    const gitDir = path.join(hunkwiseDir, 'git');
+    const stateDir = path.join(root, '.vscode', 'interactive-review');
+    const gitDir = path.join(stateDir, 'git');
 
-    // Create a file and enable hunkwise normally
+    // Create a file and enable interactive-review normally
     writeFileExternally(path.join(root, 'recover.txt'), 'hello\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('recover.txt'), 5000);
 
     // Verify baseline was stored
     const baseline = gitGetBaseline(root, 'recover.txt');
     assert.strictEqual(baseline, 'hello\n', 'baseline should be stored');
 
-    // Disable hunkwise (cleans git dir)
-    await disableHunkwise();
+    // Disable interactive-review (cleans git dir)
+    await disableReview();
     assert.ok(!fs.existsSync(gitDir), 'git dir should be removed after disable');
 
     // Simulate a corrupted git dir: directory exists but HEAD is missing
@@ -225,7 +225,7 @@ suite('hunkwise startup & loading integration', function () {
     assert.ok(!fs.existsSync(path.join(gitDir, 'HEAD')), 'HEAD should NOT exist (corrupted)');
 
     // Re-enable — initGit should detect corruption and re-initialize
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('recover.txt'), 5000);
 
     // Verify the git repo is valid now
@@ -241,11 +241,11 @@ suite('hunkwise startup & loading integration', function () {
 
     // Create a file and enable
     writeFileExternally(path.join(root, 'test.txt'), 'test\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('test.txt'), 5000);
 
-    // Corrupt the hunkwise git index to force syncIgnoreState to potentially fail
-    const gitIndexPath = path.join(root, '.vscode', 'hunkwise', 'git', 'index');
+    // Corrupt the interactive-review git index to force syncIgnoreState to potentially fail
+    const gitIndexPath = path.join(root, '.vscode', 'interactive-review', 'git', 'index');
     if (fs.existsSync(gitIndexPath)) {
       // Write garbage to the index file
       fs.writeFileSync(gitIndexPath, 'corrupted-data');
@@ -253,7 +253,7 @@ suite('hunkwise startup & loading integration', function () {
 
     // Trigger syncIgnoreState — this should not hang even if git operations fail
     try {
-      await vscode.commands.executeCommand('hunkwise.setRespectGitignore', true);
+      await vscode.commands.executeCommand('interactiveReview.setRespectGitignore', true);
     } catch {
       // Command itself might throw, that's fine
     }

@@ -9,10 +9,10 @@ export function getWorkspaceRoot(): string {
   return folders[0].uri.fsPath;
 }
 
-export function hunkwiseGitEnv(root: string): NodeJS.ProcessEnv {
+export function baselineGitEnv(root: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    GIT_DIR: path.join(root, '.vscode', 'hunkwise', 'git'),
+    GIT_DIR: path.join(root, '.vscode', 'interactive-review', 'git'),
     GIT_WORK_TREE: root,
     GIT_TERMINAL_PROMPT: '0',
   };
@@ -22,7 +22,7 @@ export function gitListTracked(root: string): string[] {
   try {
     const out = execSync('git -c core.quotepath=false ls-tree HEAD --name-only -r', {
       cwd: root,
-      env: hunkwiseGitEnv(root),
+      env: baselineGitEnv(root),
       encoding: 'utf-8',
     });
     return out.split('\n').map(l => l.trim()).filter(Boolean);
@@ -35,7 +35,7 @@ export function gitGetBaseline(root: string, relPath: string): string | undefine
   try {
     return execSync(`git show ":${relPath}"`, {
       cwd: root,
-      env: hunkwiseGitEnv(root),
+      env: baselineGitEnv(root),
       encoding: 'utf-8',
     });
   } catch {
@@ -56,16 +56,16 @@ export async function waitForCondition(fn: () => boolean, timeoutMs = 5000, inte
   throw new Error('Condition not met within timeout');
 }
 
-export async function enableHunkwise(): Promise<void> {
-  await vscode.commands.executeCommand('hunkwise.enable');
+export async function enableReview(): Promise<void> {
+  await vscode.commands.executeCommand('interactiveReview.enable');
   const root = getWorkspaceRoot();
-  const gitDir = path.join(root, '.vscode', 'hunkwise', 'git');
+  const gitDir = path.join(root, '.vscode', 'interactive-review', 'git');
   await waitForCondition(() => fs.existsSync(gitDir));
   await sleep(200);
 }
 
-export async function disableHunkwise(): Promise<void> {
-  await vscode.commands.executeCommand('hunkwise.disable');
+export async function disableReview(): Promise<void> {
+  await vscode.commands.executeCommand('interactiveReview.disable');
   await sleep(100);
 }
 
@@ -100,14 +100,14 @@ export function cleanWorkspace(): void {
     if (entry === '.vscode' || entry === '.gitkeep') continue;
     fs.rmSync(path.join(root, entry), { recursive: true, force: true });
   }
-  const hunkwiseDir = path.join(root, '.vscode', 'hunkwise');
-  if (fs.existsSync(hunkwiseDir)) {
-    fs.rmSync(hunkwiseDir, { recursive: true, force: true });
+  const stateDir = path.join(root, '.vscode', 'interactive-review');
+  if (fs.existsSync(stateDir)) {
+    fs.rmSync(stateDir, { recursive: true, force: true });
   }
 }
 
 export function getReviewPanel(): any {
-  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
+  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
   if (api && typeof api.getReviewPanel === 'function') {
@@ -117,7 +117,7 @@ export function getReviewPanel(): any {
 }
 
 export function getStateManager(): any {
-  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
+  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
   if (api && typeof api.getStateManager === 'function') {
@@ -127,7 +127,7 @@ export function getStateManager(): any {
 }
 
 export function getFileWatcher(): any {
-  const ext = vscode.extensions.getExtension('davemackey.vsc-interactive-review');
+  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
   if (api && typeof api.getFileWatcher === 'function') {

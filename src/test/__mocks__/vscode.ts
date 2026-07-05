@@ -5,7 +5,7 @@ declare const global: Record<string, unknown>;
 
 export const workspace = {
   get workspaceFolders() {
-    const root = global.__hunkwiseTestRoot as string | undefined;
+    const root = global.__reviewTestRoot as string | undefined;
     if (!root) return undefined;
     return [{ uri: { fsPath: root } }];
   },

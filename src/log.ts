@@ -4,7 +4,7 @@ let channel: vscode.OutputChannel | undefined;
 
 export function initLog(): void {
   if (!channel) {
-    channel = vscode.window.createOutputChannel('Hunkwise');
+    channel = vscode.window.createOutputChannel('Interactive Review');
   }
 }
 

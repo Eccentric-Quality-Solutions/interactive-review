@@ -31,7 +31,7 @@ const SPLASH_QUOTES = [
   "The only good surprise is no surprise.",
   "Blame is a feature, not a bug.",
   "Change is inevitable. Reviewing it is optional — but wise.",
-  "If it compiles, it's done. If it diffs, it's hunkwise.",
+  "If it compiles, it's done. If it diffs, it's under review.",
   "Even Linus reviews his own patches.",
   "In the beginning was the diff, and the diff was good.",
   "You can't unsee a hunk once you've seen it.",
@@ -312,7 +312,7 @@ function renderSettingsScreen(state) {
 
   // Protected system rule — always enforced, cannot be removed
   const protectedRow = el('div', 'pattern-row-inner pattern-row-protected');
-  protectedRow.appendChild(el('span', 'pattern-text', '.vscode/hunkwise'));
+  protectedRow.appendChild(el('span', 'pattern-text', '.vscode/interactive-review'));
   protectedRow.appendChild(el('span', 'pattern-lock', '🔒'));
   patternList.appendChild(protectedRow);
 
@@ -357,8 +357,8 @@ function renderSettingsScreen(state) {
   // ── Disable ──
   const disableSection = el('div', 'settings-section settings-section-danger');
   disableSection.appendChild(el('div', 'settings-section-title', 'Danger Zone'));
-  disableSection.appendChild(el('p', 'settings-section-desc', 'Disables hunkwise and clears all tracked state for this project.'));
-  disableSection.appendChild(btn('Disable hunkwise', 'btn-disable', () => {
+  disableSection.appendChild(el('p', 'settings-section-desc', 'Disables Interactive Review and clears all tracked state for this project.'));
+  disableSection.appendChild(btn('Disable Interactive Review', 'btn-disable', () => {
     vscode.postMessage({ command: 'disable' });
   }));
   body.appendChild(disableSection);

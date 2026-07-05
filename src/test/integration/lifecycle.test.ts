@@ -4,13 +4,13 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise lifecycle integration', function () {
+suite('interactive-review lifecycle integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -18,19 +18,19 @@ suite('hunkwise lifecycle integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
-  test('enable creates hunkwise git directory and settings', async () => {
+  test('enable creates interactive-review git directory and settings', async () => {
     const root = getWorkspaceRoot();
-    const hunkwiseDir = path.join(root, '.vscode', 'hunkwise');
-    const gitDir = path.join(hunkwiseDir, 'git');
-    const settingsPath = path.join(hunkwiseDir, 'settings.json');
+    const stateDir = path.join(root, '.vscode', 'interactive-review');
+    const gitDir = path.join(stateDir, 'git');
+    const settingsPath = path.join(stateDir, 'settings.json');
 
     assert.ok(!fs.existsSync(gitDir), 'Git dir should not exist before enable');
 
-    await enableHunkwise();
+    await enableReview();
 
     assert.ok(fs.existsSync(gitDir), 'Git dir should exist after enable');
     assert.ok(fs.existsSync(settingsPath), 'Settings file should exist after enable');
@@ -43,15 +43,15 @@ suite('hunkwise lifecycle integration', function () {
 
   test('disable removes git directory but preserves settings', async () => {
     const root = getWorkspaceRoot();
-    const hunkwiseDir = path.join(root, '.vscode', 'hunkwise');
-    const gitDir = path.join(hunkwiseDir, 'git');
-    const settingsPath = path.join(hunkwiseDir, 'settings.json');
+    const stateDir = path.join(root, '.vscode', 'interactive-review');
+    const gitDir = path.join(stateDir, 'git');
+    const settingsPath = path.join(stateDir, 'settings.json');
 
-    await enableHunkwise();
+    await enableReview();
     assert.ok(fs.existsSync(gitDir), 'Git dir should exist after enable');
     assert.ok(fs.existsSync(settingsPath), 'Settings should exist');
 
-    await disableHunkwise();
+    await disableReview();
 
     assert.ok(!fs.existsSync(gitDir), 'Git dir should be removed after disable');
     // Settings file is preserved so re-enable remembers user preferences
@@ -63,33 +63,33 @@ suite('hunkwise lifecycle integration', function () {
     writeFileExternally(path.join(root, 'cycle.txt'), 'cycle content\n');
 
     // First enable
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('cycle.txt'), 5000);
 
     // Disable
-    await disableHunkwise();
+    await disableReview();
 
     // Second enable
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('cycle.txt'), 5000);
 
     const baseline = gitGetBaseline(root, 'cycle.txt');
     assert.strictEqual(baseline, 'cycle content\n', 'Baseline should match file content after re-enable');
   });
 
-  test('.gitignore is auto-created/updated with hunkwise entry on enable', async () => {
+  test('.gitignore is auto-created/updated with interactive-review entry on enable', async () => {
     const root = getWorkspaceRoot();
     const gitignorePath = path.join(root, '.gitignore');
 
     // No .gitignore initially
     assert.ok(!fs.existsSync(gitignorePath), '.gitignore should not exist initially');
 
-    await enableHunkwise();
+    await enableReview();
 
-    // upsertGitignore should have created .gitignore with hunkwise entry
+    // upsertGitignore should have created .gitignore with interactive-review entry
     if (fs.existsSync(gitignorePath)) {
       const content = fs.readFileSync(gitignorePath, 'utf-8');
-      assert.ok(content.includes('.vscode/hunkwise'), '.gitignore should contain hunkwise entry');
+      assert.ok(content.includes('.vscode/interactive-review'), '.gitignore should contain interactive-review entry');
     }
     // Note: if .gitignore wasn't created, that's also acceptable
     // (upsertGitignore is non-fatal)
@@ -97,11 +97,11 @@ suite('hunkwise lifecycle integration', function () {
 
   test('setIgnorePatterns persists to settings.json', async () => {
     const root = getWorkspaceRoot();
-    const settingsPath = path.join(root, '.vscode', 'hunkwise', 'settings.json');
+    const settingsPath = path.join(root, '.vscode', 'interactive-review', 'settings.json');
 
-    await enableHunkwise();
+    await enableReview();
 
-    await vscode.commands.executeCommand('hunkwise.setIgnorePatterns', ['.git', 'node_modules', '*.tmp']);
+    await vscode.commands.executeCommand('interactiveReview.setIgnorePatterns', ['.git', 'node_modules', '*.tmp']);
     await sleep(200);
 
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -110,11 +110,11 @@ suite('hunkwise lifecycle integration', function () {
 
   test('setRespectGitignore persists to settings.json', async () => {
     const root = getWorkspaceRoot();
-    const settingsPath = path.join(root, '.vscode', 'hunkwise', 'settings.json');
+    const settingsPath = path.join(root, '.vscode', 'interactive-review', 'settings.json');
 
-    await enableHunkwise();
+    await enableReview();
 
-    await vscode.commands.executeCommand('hunkwise.setRespectGitignore', false);
+    await vscode.commands.executeCommand('interactiveReview.setRespectGitignore', false);
     await sleep(200);
 
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -123,11 +123,11 @@ suite('hunkwise lifecycle integration', function () {
 
   test('setClearOnBranchSwitch persists to settings.json', async () => {
     const root = getWorkspaceRoot();
-    const settingsPath = path.join(root, '.vscode', 'hunkwise', 'settings.json');
+    const settingsPath = path.join(root, '.vscode', 'interactive-review', 'settings.json');
 
-    await enableHunkwise();
+    await enableReview();
 
-    await vscode.commands.executeCommand('hunkwise.setClearOnBranchSwitch', true);
+    await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', true);
     await sleep(200);
 
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -137,9 +137,9 @@ suite('hunkwise lifecycle integration', function () {
   test('clearHunks command clears reviewing files and updates baselines', async () => {
     const root = getWorkspaceRoot();
 
-    // Create a file, enable hunkwise (snapshots baseline), then modify externally
+    // Create a file, enable interactive-review (snapshots baseline), then modify externally
     writeFileExternally(path.join(root, 'hello.txt'), 'original\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('hello.txt'));
 
     // Modify externally to enter reviewing state
@@ -150,7 +150,7 @@ suite('hunkwise lifecycle integration', function () {
     assert.strictEqual(gitGetBaseline(root, 'hello.txt'), 'original\n');
 
     // Now clear hunks (simulates branch switch)
-    await vscode.commands.executeCommand('hunkwise.clearHunks');
+    await vscode.commands.executeCommand('interactiveReview.clearHunks');
     await sleep(500);
 
     // Verify: baseline updated to current disk content
@@ -168,7 +168,7 @@ suite('hunkwise lifecycle integration', function () {
     // Create a normal file
     writeFileExternally(path.join(root, 'normal.txt'), 'normal\n');
 
-    await enableHunkwise();
+    await enableReview();
 
     await waitForCondition(() => gitListTracked(root).includes('normal.txt'), 5000);
     await sleep(300);

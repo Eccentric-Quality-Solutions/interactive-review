@@ -4,13 +4,13 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise clearOnBranchSwitch integration', function () {
+suite('interactive-review clearOnBranchSwitch integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -18,7 +18,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
@@ -30,7 +30,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     writeFileExternally(path.join(root, 'b.txt'), 'original-b\n');
     writeFileExternally(path.join(root, 'c.txt'), 'original-c\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('a.txt'));
     await waitForCondition(() => gitListTracked(root).includes('b.txt'));
     await waitForCondition(() => gitListTracked(root).includes('c.txt'));
@@ -57,7 +57,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     }
 
     // Clear hunks (simulates branch switch)
-    await vscode.commands.executeCommand('hunkwise.clearHunks');
+    await vscode.commands.executeCommand('interactiveReview.clearHunks');
     await sleep(500);
 
     // All baselines should be updated to current disk content
@@ -81,7 +81,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     writeFileExternally(path.join(root, 'doomed.txt'), 'will be deleted\n');
     writeFileExternally(path.join(root, 'survives.txt'), 'original\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('doomed.txt'));
     await waitForCondition(() => gitListTracked(root).includes('survives.txt'));
 
@@ -94,7 +94,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     await sleep(1500);
 
     // Now clear hunks
-    await vscode.commands.executeCommand('hunkwise.clearHunks');
+    await vscode.commands.executeCommand('interactiveReview.clearHunks');
     await sleep(500);
 
     // doomed.txt should be removed from git tracking (file doesn't exist)
@@ -112,13 +112,13 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     // Create a file but don't modify it (stays idle, not reviewing)
     writeFileExternally(path.join(root, 'idle.txt'), 'idle content\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('idle.txt'));
 
     const baselineBefore = gitGetBaseline(root, 'idle.txt');
 
     // Clear hunks — nothing should change
-    await vscode.commands.executeCommand('hunkwise.clearHunks');
+    await vscode.commands.executeCommand('interactiveReview.clearHunks');
     await sleep(300);
 
     const baselineAfter = gitGetBaseline(root, 'idle.txt');
@@ -132,7 +132,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     writeFileExternally(path.join(root, 'idle.txt'), 'idle\n');
     writeFileExternally(path.join(root, 'active.txt'), 'original\n');
 
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('idle.txt'));
     await waitForCondition(() => gitListTracked(root).includes('active.txt'));
 
@@ -150,7 +150,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     assert.ok(activeState && activeState.status === 'reviewing', 'active.txt should be reviewing');
 
     // Clear hunks
-    await vscode.commands.executeCommand('hunkwise.clearHunks');
+    await vscode.commands.executeCommand('interactiveReview.clearHunks');
     await sleep(500);
 
     // idle.txt baseline should be unchanged
@@ -161,9 +161,9 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
 
   test('setClearOnBranchSwitch persists and can be toggled', async () => {
     const root = getWorkspaceRoot();
-    const settingsPath = path.join(root, '.vscode', 'hunkwise', 'settings.json');
+    const settingsPath = path.join(root, '.vscode', 'interactive-review', 'settings.json');
 
-    await enableHunkwise();
+    await enableReview();
 
     // Default should be false
     const sm = getStateManager();
@@ -172,7 +172,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
       'clearOnBranchSwitch should default to false');
 
     // Set to true
-    await vscode.commands.executeCommand('hunkwise.setClearOnBranchSwitch', true);
+    await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', true);
     await sleep(200);
 
     let settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -180,7 +180,7 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
     assert.strictEqual(sm.clearOnBranchSwitch, true);
 
     // Toggle back to false
-    await vscode.commands.executeCommand('hunkwise.setClearOnBranchSwitch', false);
+    await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', false);
     await sleep(200);
 
     settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -190,17 +190,17 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
 
   test('clearOnBranchSwitch setting survives disable-enable cycle', async () => {
     const root = getWorkspaceRoot();
-    const settingsPath = path.join(root, '.vscode', 'hunkwise', 'settings.json');
+    const settingsPath = path.join(root, '.vscode', 'interactive-review', 'settings.json');
 
-    await enableHunkwise();
+    await enableReview();
 
     // Set clearOnBranchSwitch to true
-    await vscode.commands.executeCommand('hunkwise.setClearOnBranchSwitch', true);
+    await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', true);
     await sleep(200);
 
     // Disable and re-enable
-    await disableHunkwise();
-    await enableHunkwise();
+    await disableReview();
+    await enableReview();
 
     // Setting should be preserved
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -230,11 +230,11 @@ suite('hunkwise clearOnBranchSwitch integration', function () {
 
     // If we get here, the workspace has .git/HEAD and the watcher should be active
     writeFileExternally(path.join(root, 'branch-test.txt'), 'before-switch\n');
-    await enableHunkwise();
+    await enableReview();
     await waitForCondition(() => gitListTracked(root).includes('branch-test.txt'));
 
     // Enable clearOnBranchSwitch
-    await vscode.commands.executeCommand('hunkwise.setClearOnBranchSwitch', true);
+    await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', true);
     await sleep(200);
 
     // Modify file to enter reviewing

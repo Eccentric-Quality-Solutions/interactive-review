@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { HunkwiseGit } from '../hunkwiseGit';
+import { BaselineGit } from '../baselineGit';
 
 let tmpDir: string;
-let hunkwiseDir: string;
-let git: HunkwiseGit;
+let stateDir: string;
+let git: BaselineGit;
 
 before(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-test-'));
-  hunkwiseDir = path.join(tmpDir, '.vscode', 'hunkwise');
-  git = new HunkwiseGit(hunkwiseDir, tmpDir);
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-test-'));
+  stateDir = path.join(tmpDir, '.vscode', 'interactive-review');
+  git = new BaselineGit(stateDir, tmpDir);
   await git.initGit();
 });
 
@@ -20,15 +20,15 @@ after(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('HunkwiseGit', () => {
+describe('BaselineGit', () => {
   describe('initGit', () => {
     it('creates the git directory', () => {
-      assert.ok(fs.existsSync(path.join(hunkwiseDir, 'git')));
+      assert.ok(fs.existsSync(path.join(stateDir, 'git')));
     });
 
     it('is idempotent — calling twice does not throw', async () => {
       await git.initGit();
-      assert.ok(fs.existsSync(path.join(hunkwiseDir, 'git')));
+      assert.ok(fs.existsSync(path.join(stateDir, 'git')));
     });
   });
 
@@ -222,8 +222,8 @@ describe('HunkwiseGit', () => {
     });
 
     it('renamed file appears in listTrackedFiles with new path', async () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-rename-list-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-rename-list-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       await g2.initGit();
       const oldPath = path.join(dir2, 'a.txt');
       const newPath = path.join(dir2, 'b.txt');
@@ -239,8 +239,8 @@ describe('HunkwiseGit', () => {
   describe('listTrackedFiles', () => {
     it('returns empty when nothing tracked', async () => {
       // fresh instance to avoid interference
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-list-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-list-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       await g2.initGit();
       const files = await g2.listTrackedFiles();
       assert.deepEqual(files, []);
@@ -248,9 +248,9 @@ describe('HunkwiseGit', () => {
     });
 
     it('returns tracked file paths', async () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-list2-'));
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-list2-'));
       const root = dir2;
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), root);
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), root);
       await g2.initGit();
       const f1 = path.join(root, 'a.txt');
       const f2 = path.join(root, 'b.txt');
@@ -265,9 +265,9 @@ describe('HunkwiseGit', () => {
     });
 
     it('handles non-ASCII file paths correctly', async () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-nonascii-'));
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-nonascii-'));
       const root = dir2;
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), root);
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), root);
       await g2.initGit();
       const f1 = path.join(root, 'メール一覧.xlsx');
       const f2 = path.join(root, 'sub', '日本語ファイル.txt');
@@ -289,9 +289,9 @@ describe('HunkwiseGit', () => {
       // On macOS, readdir may return NFD paths while git ls-tree returns NFC.
       // Both snapshot (which stores NFD from filesystem) and listTrackedFiles (NFC from git)
       // must agree on paths so that Set/Map lookups match.
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-nfc-'));
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-nfc-'));
       const root = dir2;
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), root);
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), root);
       await g2.initGit();
       // が in NFD = か (U+304B) + combining dakuten (U+3099)
       const nfdName = '\u304b\u3099\u30c8\u3099.txt'; // がド.txt in NFD
@@ -316,9 +316,9 @@ describe('HunkwiseGit', () => {
     });
 
     it('renameFile handles directory renames', async () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-dirren-'));
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-dirren-'));
       const root = dir2;
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), root);
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), root);
       await g2.initGit();
       const oldDir = path.join(root, 'oldDir');
       const newDir = path.join(root, 'newDir');
@@ -344,8 +344,8 @@ describe('HunkwiseGit', () => {
 
   describe('settings', () => {
     it('returns defaults when no settings file exists', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-settings-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       const s = g2.loadSettings();
       const expectedDefaults = process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'];
       assert.deepEqual(s.ignorePatterns, expectedDefaults);
@@ -354,8 +354,8 @@ describe('HunkwiseGit', () => {
     });
 
     it('round-trips settings', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-settings2-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings2-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       g2.saveSettings({ ignorePatterns: ['node_modules', 'dist'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 60, useDiffEditor: false, showInlineDecorations: true });
       const s = g2.loadSettings();
       assert.deepEqual(s.ignorePatterns, ['node_modules', 'dist']);
@@ -365,8 +365,8 @@ describe('HunkwiseGit', () => {
     });
 
     it('round-trips quoteRotationInterval set to 0', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-settings-qri0-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings-qri0-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       g2.saveSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 0, useDiffEditor: false, showInlineDecorations: true });
       const s = g2.loadSettings();
       assert.equal(s.quoteRotationInterval, 0);
@@ -374,8 +374,8 @@ describe('HunkwiseGit', () => {
     });
 
     it('round-trips quoteRotationInterval with custom value', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-settings-qri-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings-qri-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       g2.saveSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 30, useDiffEditor: false, showInlineDecorations: true });
       const s = g2.loadSettings();
       assert.equal(s.quoteRotationInterval, 30);
@@ -383,26 +383,26 @@ describe('HunkwiseGit', () => {
     });
 
     it('loadSettings defaults quoteRotationInterval when missing from file', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-settings-qri-missing-'));
-      fs.mkdirSync(path.join(dir2, '.vscode', 'hunkwise'), { recursive: true });
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings-qri-missing-'));
+      fs.mkdirSync(path.join(dir2, '.vscode', 'interactive-review'), { recursive: true });
       fs.writeFileSync(
-        path.join(dir2, '.vscode', 'hunkwise', 'settings.json'),
+        path.join(dir2, '.vscode', 'interactive-review', 'settings.json'),
         JSON.stringify({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false }),
         'utf-8'
       );
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       const s = g2.loadSettings();
       assert.equal(s.quoteRotationInterval, 30);
       fs.rmSync(dir2, { recursive: true, force: true });
     });
 
     it('mergeDefaultSettings fills missing fields', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-merge-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-merge-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       // Write partial settings (no respectGitignore, no quoteRotationInterval)
-      fs.mkdirSync(path.join(dir2, '.vscode', 'hunkwise'), { recursive: true });
+      fs.mkdirSync(path.join(dir2, '.vscode', 'interactive-review'), { recursive: true });
       fs.writeFileSync(
-        path.join(dir2, '.vscode', 'hunkwise', 'settings.json'),
+        path.join(dir2, '.vscode', 'interactive-review', 'settings.json'),
         JSON.stringify({ ignorePatterns: ['dist'] }),
         'utf-8'
       );
@@ -416,8 +416,8 @@ describe('HunkwiseGit', () => {
     });
 
     it('mergeDefaultSettings preserves all existing fields', () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-merge2-'));
-      const g2 = new HunkwiseGit(path.join(dir2, '.vscode', 'hunkwise'), dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-merge2-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
       g2.saveSettings({ ignorePatterns: ['custom'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 30, useDiffEditor: false, showInlineDecorations: true });
       const merged = g2.mergeDefaultSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 60, useDiffEditor: false, showInlineDecorations: true });
       assert.deepEqual(merged.ignorePatterns, ['custom']);
@@ -429,9 +429,9 @@ describe('HunkwiseGit', () => {
 
   describe('destroyGit', () => {
     it('removes the git directory', async () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-destroy-'));
-      const hDir = path.join(dir2, '.vscode', 'hunkwise');
-      const g2 = new HunkwiseGit(hDir, dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-destroy-'));
+      const hDir = path.join(dir2, '.vscode', 'interactive-review');
+      const g2 = new BaselineGit(hDir, dir2);
       await g2.initGit();
       assert.ok(fs.existsSync(path.join(hDir, 'git')));
       g2.destroyGit();
@@ -440,9 +440,9 @@ describe('HunkwiseGit', () => {
     });
 
     it('preserves settings.json after destroy', async () => {
-      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hunkwise-destroy2-'));
-      const hDir = path.join(dir2, '.vscode', 'hunkwise');
-      const g2 = new HunkwiseGit(hDir, dir2);
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-destroy2-'));
+      const hDir = path.join(dir2, '.vscode', 'interactive-review');
+      const g2 = new BaselineGit(hDir, dir2);
       await g2.initGit();
       g2.saveSettings({ ignorePatterns: ['dist'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 60, useDiffEditor: false, showInlineDecorations: true });
       g2.destroyGit();

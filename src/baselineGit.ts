@@ -25,23 +25,23 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 /**
- * Manages all hunkwise persistent state via:
- *   .vscode/hunkwise/settings.json  — enabled flag + ignorePatterns
- *   .vscode/hunkwise/git/           — private git repo storing baselines
+ * Manages all interactive-review persistent state via:
+ *   .vscode/interactive-review/settings.json  — enabled flag + ignorePatterns
+ *   .vscode/interactive-review/git/           — private git repo storing baselines
  *
  * The git repo uses the workspace root as its work tree but keeps all git
- * metadata inside the hunkwise directory, so it never touches the project's
+ * metadata inside the interactive-review directory, so it never touches the project's
  * own .git and works even when the project has no git at all.
  *
- *   GIT_DIR       = <hunkwiseDir>/git
+ *   GIT_DIR       = <stateDir>/git
  *   GIT_WORK_TREE = <workspaceRoot>
  *
  * Each tracked file has exactly one entry in the single HEAD commit.
  * Every mutation (snapshot / remove) rewrites that commit via --amend so
  * the repo always has at most one commit and stays compact.
  */
-export class HunkwiseGit {
-  private hunkwiseDir: string;
+export class BaselineGit {
+  private stateDir: string;
   private gitDir: string;
   private workTree: string;
   private gitInitialized = false;
@@ -49,11 +49,11 @@ export class HunkwiseGit {
   private initPromise: Promise<void> | undefined;
   private log: (message: string) => void;
 
-  constructor(hunkwiseDir: string, workspaceRoot: string, logger?: (message: string) => void) {
-    this.hunkwiseDir = hunkwiseDir;
-    this.gitDir = path.join(hunkwiseDir, 'git');
+  constructor(stateDir: string, workspaceRoot: string, logger?: (message: string) => void) {
+    this.stateDir = stateDir;
+    this.gitDir = path.join(stateDir, 'git');
     this.workTree = workspaceRoot;
-    this.log = logger ?? ((msg: string) => console.warn(`[hunkwise] ${msg}`));
+    this.log = logger ?? ((msg: string) => console.warn(`[interactive-review] ${msg}`));
   }
 
   // ── env / low-level git ───────────────────────────────────────────────────
@@ -79,7 +79,7 @@ export class HunkwiseGit {
   // ── settings.json ─────────────────────────────────────────────────────────
 
   private get settingsPath(): string {
-    return path.join(this.hunkwiseDir, 'settings.json');
+    return path.join(this.stateDir, 'settings.json');
   }
 
   loadSettings(): Settings {
@@ -107,7 +107,7 @@ export class HunkwiseGit {
 
   saveSettings(settings: Settings): void {
     try {
-      fs.mkdirSync(this.hunkwiseDir, { recursive: true });
+      fs.mkdirSync(this.stateDir, { recursive: true });
       fs.writeFileSync(this.settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
     } catch (err) {
       this.log(`saveSettings failed: ${err}`);
@@ -159,9 +159,9 @@ export class HunkwiseGit {
       fs.mkdirSync(this.gitDir, { recursive: true });
       await this.git(['init']);
       if (this.destroyed) return;
-      await this.git(['config', 'user.email', 'hunkwise@localhost']);
+      await this.git(['config', 'user.email', 'interactive-review@localhost']);
       if (this.destroyed) return;
-      await this.git(['config', 'user.name', 'hunkwise']);
+      await this.git(['config', 'user.name', 'interactive-review']);
     }
     if (this.destroyed) return;
     this.gitInitialized = true;
@@ -326,7 +326,7 @@ export class HunkwiseGit {
     if (await this.hasHead()) {
       await this.git(['commit', '--amend', '--no-edit', '--allow-empty']);
     } else {
-      await this.git(['commit', '-m', 'hunkwise baselines']);
+      await this.git(['commit', '-m', 'interactive-review baselines']);
     }
   }
 

@@ -3,14 +3,14 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 import { discardAllFiles, discardFileByPath } from '../../commands';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise delete & restore integration', function () {
+suite('interactive-review delete & restore integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -18,7 +18,7 @@ suite('hunkwise delete & restore integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
@@ -28,7 +28,7 @@ suite('hunkwise delete & restore integration', function () {
 
     // Create file before enable → becomes baseline
     writeFileExternally(filePath, 'original content\n');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -72,7 +72,7 @@ suite('hunkwise delete & restore integration', function () {
     const filePath = path.join(root, 'single-delete.txt');
 
     writeFileExternally(filePath, 'single file content\n');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -104,7 +104,7 @@ suite('hunkwise delete & restore integration', function () {
 
     // Create file before enable → becomes baseline
     writeFileExternally(filePath, 'baseline content\n');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -140,7 +140,7 @@ suite('hunkwise delete & restore integration', function () {
 
     // Create file with content before enable → becomes baseline
     writeFileExternally(filePath, 'has content\n');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -182,7 +182,7 @@ suite('hunkwise delete & restore integration', function () {
     const filePath = path.join(root, 'partial-restore.txt');
 
     writeFileExternally(filePath, 'original\n');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -214,7 +214,7 @@ suite('hunkwise delete & restore integration', function () {
     const root = getWorkspaceRoot();
     const filePath = path.join(root, 'new-discard.txt');
 
-    await enableHunkwise();
+    await enableReview();
 
     // Create file externally → null baseline (new file)
     writeFileExternally(filePath, 'new file content\n');
@@ -243,7 +243,7 @@ suite('hunkwise delete & restore integration', function () {
 
     // Create empty file before enable → snapshotted as '' baseline
     writeFileExternally(filePath, '');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -275,7 +275,7 @@ suite('hunkwise delete & restore integration', function () {
     const root = getWorkspaceRoot();
     const filePath = path.join(root, 'new-accept.txt');
 
-    await enableHunkwise();
+    await enableReview();
 
     // Create file externally → null baseline
     writeFileExternally(filePath, 'accepted content\n');
@@ -307,7 +307,7 @@ suite('hunkwise delete & restore integration', function () {
 
     // Create file before enable → becomes baseline
     writeFileExternally(filePath, 'initial\n');
-    await enableHunkwise();
+    await enableReview();
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
@@ -343,7 +343,7 @@ suite('hunkwise delete & restore integration', function () {
 
     // Create file before enable → becomes baseline in git
     writeFileExternally(filePath, 'will be deleted\n');
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);

@@ -3,7 +3,7 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
-  sleep, waitForCondition, enableHunkwise, disableHunkwise,
+  sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 import { acceptHunk, discardHunk } from '../../commands';
@@ -11,7 +11,7 @@ import { computeHunks, hunkId } from '../../diffEngine';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
-suite('hunkwise hunk navigation integration', function () {
+suite('interactive-review hunk navigation integration', function () {
   this.timeout(30000);
 
   setup(function () {
@@ -19,12 +19,12 @@ suite('hunkwise hunk navigation integration', function () {
   });
 
   teardown(async function () {
-    try { await disableHunkwise(); } catch { /* ignore */ }
+    try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
 
   /**
-   * Helper: create a file with baseline content, enable hunkwise, then modify
+   * Helper: create a file with baseline content, enable interactive-review, then modify
    * externally to produce multiple hunks. Returns the file path.
    */
   async function setupMultiHunkFile(): Promise<string> {
@@ -45,7 +45,7 @@ suite('hunkwise hunk navigation integration', function () {
     ].join('\n') + '\n';
 
     writeFileExternally(filePath, baseline);
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     // Wait for baseline to match the original content (not just exist)
@@ -154,7 +154,7 @@ suite('hunkwise hunk navigation integration', function () {
     // Create a file with a single hunk
     const baseline = 'original line\n';
     writeFileExternally(filePath, baseline);
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
@@ -192,7 +192,7 @@ suite('hunkwise hunk navigation integration', function () {
 
     const baseline = 'original line\n';
     writeFileExternally(filePath, baseline);
-    await enableHunkwise();
+    await enableReview();
 
     const rel = path.relative(root, filePath);
     await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);

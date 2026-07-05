@@ -214,9 +214,9 @@ export class FileWatcher {
   shouldIgnore(filePath: string, isDirectory?: boolean): boolean {
     if (!filePath) return false;
 
-    const hunkwiseDir = this.stateManager.dir;
-    if (hunkwiseDir && filePath.startsWith(hunkwiseDir + path.sep)) return true;
-    if (hunkwiseDir && filePath === hunkwiseDir) return true;
+    const stateDir = this.stateManager.dir;
+    if (stateDir && filePath.startsWith(stateDir + path.sep)) return true;
+    if (stateDir && filePath === stateDir) return true;
 
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!rootPath) return false;
@@ -292,7 +292,7 @@ export class FileWatcher {
     const gitBaseline = await git.getBaseline(filePath);
     log(`onDiskCreate(${basename}): gitBaseline=${gitBaseline !== undefined ? `'${gitBaseline.length} chars'` : 'undefined'}`);
     if (gitBaseline !== undefined) {
-      // Hunkwise already has a baseline — treat as a change
+      // Interactive Review already has a baseline — treat as a change
       log(`onDiskCreate(${basename}): has baseline, enterReviewing as change`);
       this.enterReviewing(filePath, gitBaseline, diskContent);
       return;
@@ -438,7 +438,7 @@ export class FileWatcher {
       return;
     }
 
-    // External change — compare against hunkwise baseline
+    // External change — compare against interactive-review baseline
     const gitBaseline = await git.getBaseline(filePath);
     if (gitBaseline === undefined) {
       // No baseline in git — silently adopt current content as baseline rather than
@@ -446,7 +446,7 @@ export class FileWatcher {
       // - ignore rules just changed (file newly un-ignored, not actually new)
       // - syncIgnoreState hasn't finished its git queue yet
       // - first enable where snapshotWorkspace is still in progress
-      // Genuine new files created while hunkwise is running are caught by onDidCreate,
+      // Genuine new files created while interactive-review is running are caught by onDidCreate,
       // not this path. This is intentionally consistent with syncIgnoreState's toAdd
       // behavior which also silently snapshots.
       this.stateManager.snapshotFile(filePath, diskContent);
