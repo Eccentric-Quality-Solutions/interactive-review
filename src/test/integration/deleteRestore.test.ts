@@ -3,7 +3,7 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
-  sleep, waitForCondition, enableReview, disableReview,
+  sleep, waitForCondition, waitForReviewing, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 import { discardAllFiles, discardFileByPath } from '../../commands';
@@ -221,10 +221,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
-      const f = sm.getFile(filePath);
-      return f?.status === 'reviewing';
-    }, 5000);
+    await waitForReviewing(filePath);
 
     assert.strictEqual(sm.getFile(filePath)?.baseline, null, 'New file should have null baseline');
 

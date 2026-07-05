@@ -128,6 +128,15 @@ export class FileWatcher {
     context.subscriptions.push(...this.disposables);
   }
 
+  /**
+   * Re-read all workspace .gitignore files synchronously. Called on enable so the
+   * snapshot respects gitignore rules that were created before enabling, without
+   * waiting for the async filesystem watcher to fire (which is unreliable on Linux).
+   */
+  reloadGitignore(): void {
+    this.loadGitignore();
+  }
+
   private loadGitignore(): void {
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     this.gitignoreMatcher = ignoreLib();

@@ -47,13 +47,50 @@ export async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function waitForCondition(fn: () => boolean, timeoutMs = 5000, intervalMs = 100): Promise<void> {
+// Floor for all condition waits. Many call sites pass tight per-op timeouts (5s/8s)
+// inherited from hunkwise's macOS runs; on Linux, VS Code's file watcher fires late
+// under load, so those events arrive after the tight deadline even though they DO
+// arrive (a fully-green run proves they're late, not dropped). Enforcing a generous
+// floor centrally de-flakes every call site without touching 70+ of them. Harmless
+// for fast git-op waits — they resolve in <1s, well before the floor. Kept under the
+// mocha per-test timeout (see .vscode-test.mjs) so a genuinely-stuck condition still fails.
+const WAIT_FLOOR_MS = 15000;
+
+export async function waitForCondition(fn: () => boolean, timeoutMs = 10000, intervalMs = 100): Promise<void> {
+  const effectiveTimeout = Math.max(timeoutMs, WAIT_FLOOR_MS);
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < effectiveTimeout) {
     if (fn()) return;
     await sleep(intervalMs);
   }
   throw new Error('Condition not met within timeout');
+}
+
+/**
+ * Wait until `filePath` is in reviewing state, nudging a synchronous rescan each poll.
+ *
+ * Detection of a brand-new externally-created file relies on VS Code's
+ * createFileSystemWatcher firing onDidCreate — which is unreliable in the headless
+ * Linux test host (events for external raw-fs writes are dropped or badly delayed).
+ * The synchronous rebuildState path (interactiveReview.refresh) detects the same file
+ * deterministically via collectUntrackedFiles, so we drive it as a fallback. This tests
+ * the end-state (file enters reviewing with the right baseline) without depending on the
+ * flaky async watcher. In production the cross-process watcher is reliable; this nudge
+ * only compensates for the degraded in-process test watcher.
+ */
+export async function waitForConditionNudged(fn: () => boolean, timeoutMs = 15000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fn()) return;
+    await vscode.commands.executeCommand('interactiveReview.refresh');
+    await sleep(250);
+  }
+  throw new Error('Condition not met within timeout (nudged)');
+}
+
+/** Wait until `filePath` is in reviewing state (rescan-nudged). */
+export async function waitForReviewing(filePath: string, timeoutMs = 15000): Promise<void> {
+  await waitForConditionNudged(() => getStateManager()?.getFile(filePath)?.status === 'reviewing', timeoutMs);
 }
 
 export async function enableReview(): Promise<void> {

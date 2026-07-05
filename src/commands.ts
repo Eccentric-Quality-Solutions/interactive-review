@@ -60,6 +60,10 @@ async function enableReview(
       (async () => {
         await stateManager.setEnabled(true);
         try { upsertGitignore(); } catch (err) { log(`upsertGitignore failed: ${err}`); }
+        // Re-read .gitignore synchronously so a gitignore file that existed before
+        // enabling is honored by the snapshot below, rather than depending on the
+        // async file watcher having already fired (unreliable on Linux).
+        fileWatcher.reloadGitignore();
         await stateManager.snapshotWorkspace((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
       })(),
     ]);

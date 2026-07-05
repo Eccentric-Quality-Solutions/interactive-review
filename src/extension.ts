@@ -175,21 +175,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   const stateDir = stateManager.dir;
   if (stateDir) {
     const gitDir = path.join(stateDir, 'git');
+    const settingsPath = path.join(stateDir, 'settings.json');
     let settingsWatcher: fs.FSWatcher | undefined;
+    // mtime of settings.json as last seen by the poll fallback. Seeded to the
+    // current value so we only react to changes made after activation.
+    let lastSettingsMtimeMs: number | undefined;
+    try { lastSettingsMtimeMs = fs.statSync(settingsPath).mtimeMs; } catch { /* no settings yet */ }
+
+    const onSettingsChanged = () => {
+      stateManager.reloadIgnorePatterns();
+      syncIgnore();
+    };
 
     const startSettingsWatch = () => {
       if (!fs.existsSync(stateDir)) return;
       try {
         settingsWatcher = fs.watch(stateDir, { persistent: false }, (_eventType, filename) => {
           if (filename === 'settings.json') {
-            stateManager.reloadIgnorePatterns();
-            syncIgnore();
+            try { lastSettingsMtimeMs = fs.statSync(settingsPath).mtimeMs; } catch { /* deleted */ }
+            onSettingsChanged();
           }
         });
       } catch (err) { log(`settings watch failed: ${err}`); }
     };
 
-    // Poll for git dir existence — detect external deletion
+    // Poll for git dir existence — detect external deletion.
+    // Also poll settings.json mtime as a fallback: fs.watch does not reliably
+    // fire for external writes on Linux, so the watcher above can miss changes.
     const pollInterval = setInterval(() => {
       const gitExists = fs.existsSync(gitDir);
       if (!gitExists && stateManager.enabled) {
@@ -198,8 +210,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
         settingsWatcher = undefined;
         stateManager.resetToDisabled();
         onStateChanged();
-      } else if (gitExists && stateManager.enabled && !settingsWatcher) {
-        startSettingsWatch();
+        return;
+      }
+      if (gitExists && stateManager.enabled) {
+        if (!settingsWatcher) startSettingsWatch();
+        // Fallback: detect settings.json changes the fs.watch may have dropped.
+        try {
+          const mtime = fs.statSync(settingsPath).mtimeMs;
+          if (lastSettingsMtimeMs !== undefined && mtime !== lastSettingsMtimeMs) {
+            lastSettingsMtimeMs = mtime;
+            onSettingsChanged();
+          } else if (lastSettingsMtimeMs === undefined) {
+            lastSettingsMtimeMs = mtime;
+          }
+        } catch { /* settings.json not present yet */ }
       }
     }, 1000);
 

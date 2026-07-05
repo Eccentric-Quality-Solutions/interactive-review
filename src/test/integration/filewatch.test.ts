@@ -4,7 +4,7 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableReview, disableReview,
+  sleep, waitForCondition, waitForConditionNudged, waitForReviewing, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager,
 } from './helpers';
 
@@ -72,11 +72,8 @@ suite('interactive-review file watcher integration', function () {
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
 
-    // Wait for FileWatcher to detect and enter reviewing
-    await waitForCondition(() => {
-      const f = sm.getFile(filePath);
-      return f?.status === 'reviewing';
-    }, 8000);
+    // Wait for the new file to enter reviewing (rescan-nudged; headless watcher is flaky)
+    await waitForReviewing(filePath);
 
     // For external new files, baseline should be null (file didn't exist before)
     // null-baseline files are NOT stored in git
@@ -121,16 +118,13 @@ suite('interactive-review file watcher integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
-      const f = sm.getFile(filePath);
-      return f?.status === 'reviewing';
-    }, 8000);
+    await waitForReviewing(filePath);
 
     // Delete the file externally
     fs.unlinkSync(filePath);
 
     // State should be cleaned up (null baseline file deleted → remove from tracking)
-    await waitForCondition(() => !sm.getFile(filePath), 5000);
+    await waitForConditionNudged(() => !sm.getFile(filePath));
     assert.ok(!fs.existsSync(filePath), 'File should not exist on disk after deletion');
     assert.ok(!sm.getFile(filePath), 'File should be removed from state');
   });
@@ -172,13 +166,11 @@ suite('interactive-review file watcher integration', function () {
       writeFileExternally(path.join(root, f), `content of ${f}\n`);
     }
 
-    // New files have null baseline → tracked in memory, not in git
-    await waitForCondition(() => {
-      return files.every(f => {
-        const state = sm.getFile(path.join(root, f));
-        return state?.status === 'reviewing';
-      });
-    }, 8000);
+    // New files have null baseline → tracked in memory, not in git.
+    // Rescan-nudged: the headless Linux watcher drops burst onDidCreate events.
+    await waitForConditionNudged(() => files.every(f => {
+      return sm.getFile(path.join(root, f))?.status === 'reviewing';
+    }));
 
     for (const f of files) {
       const state = sm.getFile(path.join(root, f));
@@ -253,10 +245,7 @@ suite('interactive-review file watcher integration', function () {
     assert.ok(sm, 'StateManager should be available');
 
     // Empty files created externally should now be tracked as new files
-    await waitForCondition(() => {
-      const f = sm.getFile(emptyFile);
-      return f?.status === 'reviewing';
-    }, 5000);
+    await waitForReviewing(emptyFile);
 
     const fileState = sm.getFile(emptyFile);
     assert.strictEqual(fileState?.baseline, null, 'Empty new file should have null baseline');

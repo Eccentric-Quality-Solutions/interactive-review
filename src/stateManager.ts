@@ -415,7 +415,12 @@ export class StateManager {
       const g = this.ensureGit();
       if (!g) return;
       await g.initGit();
-      const merged = g.mergeDefaultSettings(this.currentSettings());
+      // Base the merge on persisted settings (loadSettings applies DEFAULT_SETTINGS
+      // for an absent file or missing fields), NOT on currentSettings() — the latter
+      // reflects stale in-memory values that survive across enable/disable cycles in a
+      // long-lived host, so a fresh enable would silently inherit a prior session's
+      // settings instead of resetting to disk/defaults.
+      const merged = g.mergeDefaultSettings(g.loadSettings());
       this._ignorePatterns = merged.ignorePatterns;
       this._respectGitignore = merged.respectGitignore;
       this._clearOnBranchSwitch = merged.clearOnBranchSwitch;

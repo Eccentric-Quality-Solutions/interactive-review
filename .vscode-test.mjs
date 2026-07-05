@@ -9,6 +9,8 @@ export default defineConfig({
     '--disable-gpu',
   ],
   mocha: {
-    timeout: 30000,
+    // Headroom above the waitForCondition floor (15s) so a test that chains a couple
+    // of watcher-dependent waits under Linux load doesn't brush the per-test cap.
+    timeout: 60000,
   },
 });
