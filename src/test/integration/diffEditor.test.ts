@@ -160,27 +160,50 @@ suite('interactive-review diff editor integration', function () {
 
   // ── CodeLens visibility ────────────────────────────────────────────────────
 
-  test('CodeLens only appears when interactive-review diff tab is active', async () => {
+  /** Per-hunk CodeLens contributed by the provider for a file. */
+  async function reviewLensesFor(filePath: string): Promise<vscode.CodeLens[]> {
+    const codeLenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+      'vscode.executeCodeLensProvider', vscode.Uri.file(filePath)
+    );
+    return (codeLenses ?? []).filter(
+      l => l.command?.command === 'interactiveReview.codeLensAcceptHunk'
+        || l.command?.command === 'interactiveReview.codeLensDiscardHunk'
+    );
+  }
+
+  test('diff surface: no CodeLens in a stray normal editor (only the diff tab carries them)', async () => {
     const filePath = await setupReviewingFile(
       'codelens-test.txt',
       'line 1\n',
       'changed line 1\n'
     );
+    // Diff surface, so the decorations surface is inactive.
+    getStateManager().setUseDiffEditor(true);
 
-    // Open normal editor first — no CodeLens expected
+    // Open a stray normal editor (no diff tab) — no CodeLens expected on the diff surface.
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     await vscode.window.showTextDocument(doc);
     await sleep(300);
 
-    // Get CodeLens from the provider
-    const codeLenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
-      'vscode.executeCodeLensProvider', vscode.Uri.file(filePath)
-    );
+    assert.strictEqual((await reviewLensesFor(filePath)).length, 0,
+      'no interactive-review CodeLens in a stray normal editor on the diff surface');
+  });
 
-    const reviewLenses = (codeLenses ?? []).filter(
-      l => l.command?.command === 'interactiveReview.codeLensAcceptHunk'
-        || l.command?.command === 'interactiveReview.codeLensDiscardHunk'
+  test('decorations surface: per-hunk CodeLens appear on the normal editor (parity)', async () => {
+    const filePath = await setupReviewingFile(
+      'codelens-decorations.txt',
+      'line 1\n',
+      'changed line 1\n'
     );
-    assert.strictEqual(reviewLenses.length, 0, 'No interactive-review CodeLens in normal editor');
+    // Decorations surface: the normal editor is the review surface.
+    getStateManager().setUseDiffEditor(false);
+    getStateManager().setShowInlineDecorations(true);
+
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+    await vscode.window.showTextDocument(doc);
+    await sleep(300);
+
+    assert.strictEqual((await reviewLensesFor(filePath)).length, 2,
+      'accept + discard CodeLens render on the normal editor in decorations mode');
   });
 });

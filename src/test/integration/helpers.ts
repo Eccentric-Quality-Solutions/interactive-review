@@ -175,3 +175,13 @@ export function getFileWatcher(): any {
   }
   return undefined;
 }
+
+export function getInlineDecorations(): any {
+  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
+  if (!ext || !ext.isActive) return undefined;
+  const api = ext.exports;
+  if (api && typeof api.getInlineDecorations === 'function') {
+    return api.getInlineDecorations();
+  }
+  return undefined;
+}
