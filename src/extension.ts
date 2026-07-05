@@ -108,6 +108,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     }
   }
 
+  /**
+   * After a hunk is resolved via CodeLens, close the resolved file's stale diff tab,
+   * then auto-advance to the next reviewing file (cross-file walk). Sequenced so the
+   * resolved tab is gone before the next file opens.
+   */
+  function walkAfterResolve(filePath: string): void {
+    void closeStaleTabs()
+      .then(() => reviewPanel?.advanceToNextFile(filePath))
+      .catch(err => log(`walkAfterResolve: ${err}`));
+  }
+
   let syncIgnore: () => void;
   const fileWatcher = new FileWatcher(stateManager, onStateChanged, () => syncIgnore());
   syncIgnore = () => stateManager.syncIgnoreState((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)).then(onStateChanged);
@@ -150,10 +161,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     diffCodeLensProvider,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, diffCodeLensProvider),
     vscode.commands.registerCommand('interactiveReview.codeLensAcceptHunk', (filePath: string, hId: string) => {
-      acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); void closeStaleTabs().catch(err => log(`closeStaleTabs: ${err}`)); }, 'codeLens');
+      acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); walkAfterResolve(filePath); }, 'codeLens');
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
-      discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); void closeStaleTabs().catch(err => log(`closeStaleTabs: ${err}`)); }, 'codeLens');
+      discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
     }),
   );
 

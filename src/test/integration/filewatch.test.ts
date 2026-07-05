@@ -219,10 +219,10 @@ suite('interactive-review file watcher integration', function () {
     assert.ok(sm, 'StateManager should be available');
 
     // Wait for FileWatcher to detect and enter reviewing with null baseline
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(binaryFile);
       return f?.status === 'reviewing' && f?.baseline === null;
-    }, 8000);
+    });
 
     // Execute refresh
     await vscode.commands.executeCommand('interactiveReview.refresh');

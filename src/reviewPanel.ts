@@ -350,6 +350,44 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Cross-file advance: after a file's last hunk is resolved, open the next
+   * reviewing file at its first hunk so the user keeps walking the queue across
+   * files without returning to the panel. Together with the existing within-file
+   * revealNextHunk, this makes the whole changeset a single walkable queue.
+   *
+   * No-op if the just-resolved file still has pending hunks (within-file advance
+   * handled it), or if no reviewing files remain (the review-complete state
+   * surfaces closure instead).
+   */
+  async advanceToNextFile(resolvedFilePath: string): Promise<void> {
+    if (this.stateManager.getFile(resolvedFilePath)?.status === 'reviewing') return;
+
+    // First remaining reviewing file, in the same sorted order the panel shows,
+    // so the walk proceeds top-down through the queue deterministically.
+    const next = Array.from(this.stateManager.getAllFiles().entries())
+      .filter(([, s]) => s.status === 'reviewing')
+      .map(([fp]) => fp)
+      .sort((a, b) => a.localeCompare(b))[0];
+    if (!next) return;
+
+    if (this.stateManager.useDiffEditor) {
+      await this.openDiffEditor(next);
+      return;
+    }
+    // Normal-editor surface: open and jump to the first hunk.
+    const editor = await vscode.window.showTextDocument(vscode.Uri.file(next));
+    const fileState = this.stateManager.getFile(next);
+    if (fileState) {
+      const first = computeHunks(fileState.baseline, editor.document.getText())[0];
+      if (first) {
+        const pos = new vscode.Position(Math.max(0, first.newStart - 1), 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      }
+    }
+  }
+
   private getHtml(webview: vscode.Webview): string {
     const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaPath, 'panel.css'));
