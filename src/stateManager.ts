@@ -28,6 +28,9 @@ export class StateManager {
   private _quoteRotationInterval: number = 30;
   private _useDiffEditor: boolean = false;
   private _showInlineDecorations: boolean = true;
+  // Latched true once the current review session has seen ≥1 reviewing file; reset
+  // when a session opens/closes. Drives reviewComplete (see noteReviewActivity).
+  private _sawReviewingFiles: boolean = false;
   private _git: BaselineGit | undefined;
 
   // Serial queue: git ops run one at a time; flush() awaits the tail
@@ -49,6 +52,34 @@ export class StateManager {
   // ── accessors ─────────────────────────────────────────────────────────────
 
   get enabled(): boolean { return this._enabled; }
+
+  /** Number of files currently in reviewing state. */
+  get reviewingCount(): number {
+    let n = 0;
+    for (const fs of this.state.values()) if (fs.status === 'reviewing') n++;
+    return n;
+  }
+
+  /**
+   * Review-complete = the current review session had pending files and has now
+   * drained them all. This is the "closure" the review-flow model demands. With
+   * snapshot-on-command, a session opens on enable and its file set is bounded by
+   * the snapshot; when the last hunk is dispositioned the set empties → complete.
+   * Distinct from "enabled with nothing to review" (never had files → not complete).
+   */
+  get reviewComplete(): boolean {
+    return this._enabled && this._sawReviewingFiles && this.reviewingCount === 0;
+  }
+
+  /**
+   * Record whether the session has seen pending work. Called from the single
+   * state-change funnel (extension.onStateChanged) so completion can be detected
+   * without threading a flag through every mutation path. Latches true; reset only
+   * when a new session opens (setEnabled) so a drain-to-zero reads as complete.
+   */
+  noteReviewActivity(): void {
+    if (this.reviewingCount > 0) this._sawReviewingFiles = true;
+  }
   get ignorePatterns(): string[] { return this._ignorePatterns; }
   get respectGitignore(): boolean { return this._respectGitignore; }
   get clearOnBranchSwitch(): boolean { return this._clearOnBranchSwitch; }
@@ -190,6 +221,7 @@ export class StateManager {
         this.state.set(fp, { status: 'reviewing', baseline: null });
       }
     }
+    this.noteReviewActivity();
   }
 
   /**
@@ -240,6 +272,7 @@ export class StateManager {
     for (const fp of untrackedFiles) {
       this.state.set(fp, { status: 'reviewing', baseline: null });
     }
+    this.noteReviewActivity();
 
     // Compare old vs new state
     const added: string[] = [];
@@ -287,6 +320,9 @@ export class StateManager {
     // Clone old state so callers mutating the FileState object don't corrupt the rollback snapshot
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
     this.state.set(filePath, state);
+    // Latch review activity at the mutation point so reviewComplete works regardless
+    // of whether the caller routes through the extension's onStateChanged funnel.
+    if (state.status === 'reviewing') this._sawReviewingFiles = true;
     if (!skipSnapshot && this._git && state.baseline !== null) {
       const g = this._git;
       const baseline = state.baseline;
@@ -411,6 +447,9 @@ export class StateManager {
 
   async setEnabled(value: boolean): Promise<void> {
     this._enabled = value;
+    // A new session (open on enable, teardown on disable) starts fresh: no
+    // pending work seen yet, so a subsequent drain-to-zero reads as complete.
+    this._sawReviewingFiles = false;
     if (value) {
       const g = this.ensureGit();
       if (!g) return;
@@ -706,6 +745,7 @@ export class StateManager {
    */
   resetToDisabled(): void {
     this._enabled = false;
+    this._sawReviewingFiles = false;
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
     this._useDiffEditor = false;
     this._showInlineDecorations = true;

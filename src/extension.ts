@@ -32,10 +32,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   let reviewPanel: ReviewPanel | undefined;
   let diffCodeLensProvider: DiffCodeLensProvider | undefined;
 
-  // State-changed callback — refresh the review panel and CodeLens actions.
+  // Status bar: surfaces "N to review" while walking the queue and "Review complete"
+  // as the terminal closure state (the review-flow model's whole point). Clicking it
+  // focuses the review panel.
+  const reviewStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  reviewStatusBar.command = 'interactiveReviewToolbar.focus';
+  context.subscriptions.push(reviewStatusBar);
+
+  function updateStatusBar(): void {
+    if (!stateManager.enabled) { reviewStatusBar.hide(); return; }
+    if (stateManager.reviewComplete) {
+      reviewStatusBar.text = '$(check-all) Review complete';
+      reviewStatusBar.tooltip = 'All changes reviewed';
+      reviewStatusBar.show();
+      return;
+    }
+    const n = stateManager.reviewingCount;
+    if (n > 0) {
+      reviewStatusBar.text = `$(git-compare) ${n} file${n === 1 ? '' : 's'} to review`;
+      reviewStatusBar.tooltip = 'Interactive Review — pending changes';
+      reviewStatusBar.show();
+      return;
+    }
+    reviewStatusBar.hide();
+  }
+
+  // State-changed callback — the single funnel for UI refresh after any mutation.
   function onStateChanged(): void {
+    stateManager.noteReviewActivity();
     reviewPanel?.refresh();
     diffCodeLensProvider?.fire();
+    updateStatusBar();
   }
 
   /** Notify the diff editor that a specific file's baseline changed (only after accept). */

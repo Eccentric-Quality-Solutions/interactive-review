@@ -26,6 +26,7 @@ interface PanelState {
   totalFiles: number;
   totalAdded: number;
   totalRemoved: number;
+  reviewComplete: boolean;
   files: PanelFile[];
 }
 
@@ -180,6 +181,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       totalFiles: files.length,
       totalAdded,
       totalRemoved,
+      reviewComplete: this.stateManager.reviewComplete,
       files,
     };
   }

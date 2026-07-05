@@ -210,9 +210,13 @@ watcher is off the critical path and this is moot.
 
 ## 5. Open decisions
 
-1. **Fork hunkwise vs. build fresh** — blocks Phase 0. Fork inherits the solved Layer A + tests
-   but needs editorInsets stripped/optionalized and architectural surgery for the changeset
-   boundary; fresh is clean/shippable but reimplements ~6.5k LOC. *(Pending user call.)*
-2. **Trigger model** — explicit command vs. agent hook vs. both (§3).
+1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).
+2. **Trigger model** — **RESOLVED (2026-07-05): snapshot-on-command.** "Begin review" explicitly
+   snapshots the baseline now and bounds the changeset, using the reliable synchronous
+   `snapshotWorkspace` path. The always-on reactive file watcher is demoted to a *secondary*
+   signal (updates an open changeset when it happens to fire), not the trigger — which matches
+   the [interactive-review model](interactive-review-model.md) and sidesteps the Linux watcher
+   unreliability the triage found (§4c.1). An agent-callable hook to mark turn boundaries stays
+   possible as an additive enhancement later, but is not v1-required.
 3. **Primary surface** — native diff editor (robust) vs. in-file decorations (closer feel,
-   more limited without insets).
+   more limited without insets). *(Still open — decide during Phase 2/4.)*

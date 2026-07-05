@@ -139,11 +139,28 @@ function render(state) {
   }
 
   if (state.totalFiles === 0) {
-    renderIdleScreen(state.quoteRotationInterval);
+    // Terminal closure state: the session had pending changes and drained them all.
+    // Distinct from the idle splash (enabled but nothing was ever pending).
+    if (state.reviewComplete) {
+      renderCompleteScreen();
+    } else {
+      renderIdleScreen(state.quoteRotationInterval);
+    }
     return;
   }
 
   renderReviewScreen(state);
+}
+
+function renderCompleteScreen() {
+  if (!app) return;
+  const screen = el('div', 'splash-screen');
+  const badge = el('div', 'complete-badge');
+  badge.textContent = '✓';
+  screen.appendChild(badge);
+  screen.appendChild(el('p', 'splash-tagline', 'Review complete'));
+  screen.appendChild(el('p', 'complete-subtitle', 'All changes reviewed.'));
+  app.appendChild(screen);
 }
 
 function renderSetupScreen() {
