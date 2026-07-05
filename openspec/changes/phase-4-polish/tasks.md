@@ -1,0 +1,39 @@
+## 1. Review commands + keyboard walk (`review-keybindings`)
+
+- [x] 1.1 Add a `resolveHunkAtCursor(editor)` helper (compute hunks for the active editor's doc, find the hunk containing the cursor) in `src/commands.ts`
+- [x] 1.2 Register palette commands `interactiveReview.acceptHunk` / `rejectHunk` / `acceptFile` / `rejectFile` wrapping the existing accept/reject functions, resolving target from the active editor + cursor
+- [x] 1.3 Implement `interactiveReview.nextHunk` / `prevHunk`: move to the adjacent pending hunk in the active editor; at the end call the existing `reviewPanel.advanceToNextFile`
+- [x] 1.4 Set a context key `interactiveReview.inReview` via `setContext` when the active editor is a reviewing file (update on `onStateChanged` + active-editor change)
+- [x] 1.5 Contribute `commands` (with titles) and default `keybindings` in `package.json`, gated by `when: "interactiveReview.inReview && editorTextFocus"`; add `enablement`/`when` so commands are hidden when review is disabled
+- [x] 1.6 Give the panel's reject affordance equal weight to accept (symmetry) and confirm both are single-undo
+- [x] 1.7 Integration tests: accept/reject via command; next advances across files; keybinding context gating
+
+## 2. Partial-hunk actions (`partial-hunk-actions`)
+
+- [ ] 2.1 Add range-scoped resolution in `src/diffEngine.ts`: given a hunk + a line range, split into applied vs remaining added lines
+- [ ] 2.2 Implement `acceptSelection` in `src/commands.ts` — fold only the selected added lines into the baseline, leave the rest pending
+- [ ] 2.3 Implement `rejectSelection` — revert only the selected added lines to baseline; fall back to whole-hunk reject for pure-removal hunks
+- [ ] 2.4 Recompute hunks after a partial action; reuse the `remainingHunks === 0 → exitReviewing` branch so counts/status/advance stay correct
+- [ ] 2.5 Register `interactiveReview.acceptSelection` / `rejectSelection` commands + keybindings
+- [ ] 2.6 Integration tests: partial accept of a mixed hunk; partial reject; selection spanning a hunk boundary; partial action that completes the file
+
+## 3. Inline decorations surface (`inline-decorations-surface`)
+
+- [ ] 3.1 Add an `InlineDecorations` module: a `TextEditorDecorationType` for pending added lines, refreshed on `onStateChanged` and `onDidChangeTextDocument`
+- [ ] 3.2 Wire `openFile` so that when `useDiffEditor === false && showInlineDecorations === true` the file opens in the normal editor with decorations instead of the diff editor
+- [ ] 3.3 Extend `DiffCodeLensProvider` with a "Show N removed lines" CodeLens that peeks the baseline slice at the hunk
+- [ ] 3.4 Confirm per-hunk accept/reject CodeLens work identically in decorations mode (parity)
+- [ ] 3.5 Integration tests: added lines decorated in the normal editor; surface selection honors settings; accept clears the decoration
+
+## 4. Trigger UX (`review-trigger-ux`)
+
+- [ ] 4.1 Change `package.json` command `title`s: `interactiveReview.enable` → "Begin review", `interactiveReview.disable` → "End review" (keep command IDs stable)
+- [ ] 4.2 Update the panel setup-screen text to read as beginning/ending a bounded review
+- [ ] 4.3 Document `interactiveReview.enable` as the agent-callable begin-review hook (invocable via `executeCommand`); verify it opens a bounded session non-interactively
+- [ ] 4.4 Integration test: begin-review snapshots + opens a session; end-review tears down; agent-invoked begin opens a walkable session
+
+## 5. Finalize
+
+- [ ] 5.1 Run unit + integration suites; keep the suite green (no new flakiness)
+- [ ] 5.2 Update root `design.md` §4 (Phase 4 status) and resolve §5 #3 (primary surface) with the shipped decision
+- [ ] 5.3 Manual UI pass: keyboard-walk a multi-file changeset to completion in both surfaces

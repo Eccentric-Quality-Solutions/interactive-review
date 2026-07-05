@@ -3,7 +3,7 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
-  sleep, waitForCondition, waitForReviewing, enableReview, disableReview,
+  sleep, waitForCondition, waitForConditionNudged, waitForReviewing, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 import { discardAllFiles, discardFileByPath } from '../../commands';
@@ -40,7 +40,7 @@ suite('interactive-review delete & restore integration', function () {
     // Wait for FileWatcher to detect deletion and enter reviewing
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -61,7 +61,7 @@ suite('interactive-review delete & restore integration', function () {
     assert.strictEqual(restored, 'original content\n', 'Restored content should match baseline');
 
     // File should no longer be in reviewing state
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return !f || f.status !== 'reviewing';
     }, 5000);
@@ -82,7 +82,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -114,7 +114,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -124,7 +124,7 @@ suite('interactive-review delete & restore integration', function () {
 
     // FileWatcher.onDiskCreate should detect the restore and exit reviewing
     // because baseline matches restored content (no diff)
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return !f || f.status !== 'reviewing';
     }, 5000);
@@ -150,7 +150,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -168,7 +168,7 @@ suite('interactive-review delete & restore integration', function () {
 
     // Now external tool writes content → should show as change from empty baseline
     writeFileExternally(filePath, 'new content\n');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -192,7 +192,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -252,7 +252,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);
@@ -279,7 +279,7 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing';
     }, 5000);

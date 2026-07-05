@@ -362,22 +362,35 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
    */
   async advanceToNextFile(resolvedFilePath: string): Promise<void> {
     if (this.stateManager.getFile(resolvedFilePath)?.status === 'reviewing') return;
+    // resolvedFilePath has already exited reviewing, so it won't be a candidate.
+    await this.openNextReviewingFile(resolvedFilePath);
+  }
 
-    // First remaining reviewing file, in the same sorted order the panel shows,
-    // so the walk proceeds top-down through the queue deterministically.
-    const next = Array.from(this.stateManager.getAllFiles().entries())
-      .filter(([, s]) => s.status === 'reviewing')
+  /**
+   * Open the next reviewing file after `fromPath` (sorted order, wrapping, excluding
+   * `fromPath` itself) at its first hunk. Returns false if there is no other reviewing
+   * file. Used both by post-resolution cross-file advance and by keyboard next-hunk
+   * navigation past the last hunk of a file that is still being reviewed.
+   */
+  async openNextReviewingFile(fromPath: string): Promise<boolean> {
+    const others = Array.from(this.stateManager.getAllFiles().entries())
+      .filter(([fp, s]) => s.status === 'reviewing' && fp !== fromPath)
       .map(([fp]) => fp)
-      .sort((a, b) => a.localeCompare(b))[0];
-    if (!next) return;
+      .sort((a, b) => a.localeCompare(b));
+    if (others.length === 0) return false;
+    const next = others.find(fp => fp.localeCompare(fromPath) > 0) ?? others[0];
+    await this.openReviewingFile(next);
+    return true;
+  }
 
+  /** Open a reviewing file in the configured surface (diff or normal editor) at its first hunk. */
+  private async openReviewingFile(filePath: string): Promise<void> {
     if (this.stateManager.useDiffEditor) {
-      await this.openDiffEditor(next);
+      await this.openDiffEditor(filePath);
       return;
     }
-    // Normal-editor surface: open and jump to the first hunk.
-    const editor = await vscode.window.showTextDocument(vscode.Uri.file(next));
-    const fileState = this.stateManager.getFile(next);
+    const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+    const fileState = this.stateManager.getFile(filePath);
     if (fileState) {
       const first = computeHunks(fileState.baseline, editor.document.getText())[0];
       if (first) {

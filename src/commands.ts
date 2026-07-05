@@ -4,9 +4,52 @@ import * as path from 'path';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
-import { computeHunks, hunkId } from './diffEngine';
+import { computeHunks, hunkId, ParsedHunk } from './diffEngine';
+import { FileState } from './types';
 import { upsertGitignore } from './gitignoreManager';
 import { log } from './log';
+
+// ── Cursor-based resolution for keyboard-driven review ─────────────────────────
+// Keybindings carry no arguments, so accept/reject/navigate commands resolve their
+// target from the active editor and cursor position rather than a hunk id.
+
+/** The active editor, if it is a file currently being reviewed. */
+export function activeReviewTarget(stateManager: StateManager):
+  { editor: vscode.TextEditor; filePath: string; fileState: FileState } | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.scheme !== 'file') return undefined;
+  const filePath = editor.document.uri.fsPath;
+  const fileState = stateManager.getFile(filePath);
+  if (!fileState || fileState.status !== 'reviewing') return undefined;
+  return { editor, filePath, fileState };
+}
+
+/** Pending hunk containing the cursor, else the first hunk at/after it, else the first. */
+export function hunkAtCursor(editor: vscode.TextEditor, fileState: FileState): ParsedHunk | undefined {
+  const hunks = computeHunks(fileState.baseline, editor.document.getText());
+  if (hunks.length === 0) return undefined;
+  const line = editor.selection.active.line + 1; // computeHunks newStart is 1-based
+  return hunks.find(h => line >= h.newStart && line < h.newStart + Math.max(1, h.newLines))
+    ?? hunks.find(h => h.newStart >= line)
+    ?? hunks[0];
+}
+
+/** Neighbouring pending hunk for keyboard navigation (dir 1 = next, -1 = previous). */
+export function neighbourHunk(editor: vscode.TextEditor, fileState: FileState, dir: 1 | -1): ParsedHunk | undefined {
+  const hunks = computeHunks(fileState.baseline, editor.document.getText());
+  if (hunks.length === 0) return undefined;
+  const line = editor.selection.active.line + 1;
+  if (dir === 1) return hunks.find(h => h.newStart > line);
+  const before = hunks.filter(h => h.newStart < line);
+  return before.length ? before[before.length - 1] : undefined;
+}
+
+/** Move the cursor to a hunk and center it in view. */
+export function revealHunk(editor: vscode.TextEditor, hunk: ParsedHunk): void {
+  const pos = new vscode.Position(Math.max(0, hunk.newStart - 1), 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+}
 
 export function registerCommands(
   context: vscode.ExtensionContext,

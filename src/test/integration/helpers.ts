@@ -79,8 +79,11 @@ export async function waitForCondition(fn: () => boolean, timeoutMs = 10000, int
  * only compensates for the degraded in-process test watcher.
  */
 export async function waitForConditionNudged(fn: () => boolean, timeoutMs = 15000): Promise<void> {
+  // Floor as in waitForCondition: call sites inherit tight 5s timeouts, but under
+  // full-suite load the queued refreshes need longer to converge.
+  const effectiveTimeout = Math.max(timeoutMs, WAIT_FLOOR_MS);
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < effectiveTimeout) {
     if (fn()) return;
     await vscode.commands.executeCommand('interactiveReview.refresh');
     await sleep(250);

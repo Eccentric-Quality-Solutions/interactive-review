@@ -4,8 +4,12 @@ import * as path from 'path';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
-import { registerCommands, acceptHunk, discardHunk } from './commands';
+import {
+  registerCommands, acceptHunk, discardHunk, acceptFileByPath, discardFileByPath,
+  activeReviewTarget, hunkAtCursor, neighbourHunk, revealHunk,
+} from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
+import { hunkId } from './diffEngine';
 import { initLog, log } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
@@ -57,12 +61,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     reviewStatusBar.hide();
   }
 
+  // Gates the review keybindings: true when the active editor is a reviewing file,
+  // so accept/reject/next/prev keys stay inert everywhere else.
+  function updateInReviewContext(): void {
+    const editor = vscode.window.activeTextEditor;
+    const inReview = !!editor
+      && editor.document.uri.scheme === 'file'
+      && stateManager.getFile(editor.document.uri.fsPath)?.status === 'reviewing';
+    void vscode.commands.executeCommand('setContext', 'interactiveReview.inReview', inReview);
+  }
+
   // State-changed callback — the single funnel for UI refresh after any mutation.
   function onStateChanged(): void {
     stateManager.noteReviewActivity();
     reviewPanel?.refresh();
     diffCodeLensProvider?.fire();
     updateStatusBar();
+    updateInReviewContext();
   }
 
   /** Notify the diff editor that a specific file's baseline changed (only after accept). */
@@ -141,6 +156,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     }),
     vscode.window.onDidChangeActiveTextEditor(() => {
       diffCodeLensProvider?.fire();
+      updateInReviewContext();
     }),
     vscode.workspace.onDidChangeTextDocument(e => {
       if (e.document.uri.scheme !== 'file') return;
@@ -165,6 +181,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
       discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
+    }),
+  );
+
+  // ── Keyboard-driven review: cursor-resolved accept/reject + navigation ──────
+  context.subscriptions.push(
+    vscode.commands.registerCommand('interactiveReview.acceptHunk', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      const hunk = hunkAtCursor(t.editor, t.fileState);
+      if (!hunk) return;
+      acceptHunk(stateManager, t.filePath, hunkId(hunk),
+        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); }, 'keybinding');
+    }),
+    vscode.commands.registerCommand('interactiveReview.rejectHunk', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      const hunk = hunkAtCursor(t.editor, t.fileState);
+      if (!hunk) return;
+      discardHunk(stateManager, fileWatcher, t.filePath, hunkId(hunk),
+        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding');
+    }),
+    vscode.commands.registerCommand('interactiveReview.acceptFile', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      acceptFileByPath(stateManager, t.filePath,
+        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); });
+    }),
+    vscode.commands.registerCommand('interactiveReview.rejectFile', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      void discardFileByPath(stateManager, fileWatcher, t.filePath,
+        () => { onStateChanged(); walkAfterResolve(t.filePath); });
+    }),
+    vscode.commands.registerCommand('interactiveReview.nextHunk', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      const next = neighbourHunk(t.editor, t.fileState, 1);
+      if (next) { revealHunk(t.editor, next); return; }
+      void reviewPanel?.openNextReviewingFile(t.filePath); // past the last hunk → next file (nav only)
+    }),
+    vscode.commands.registerCommand('interactiveReview.prevHunk', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      const prev = neighbourHunk(t.editor, t.fileState, -1);
+      if (prev) revealHunk(t.editor, prev);
     }),
   );
 

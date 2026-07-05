@@ -39,6 +39,58 @@
         "command": "interactiveReview.refresh",
         "title": "Interactive Review: Refresh State",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "interactiveReview.acceptHunk",
+        "title": "Interactive Review: Accept Hunk",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
+        "command": "interactiveReview.rejectHunk",
+        "title": "Interactive Review: Reject Hunk",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
+        "command": "interactiveReview.acceptFile",
+        "title": "Interactive Review: Accept File",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
+        "command": "interactiveReview.rejectFile",
+        "title": "Interactive Review: Reject File",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
+        "command": "interactiveReview.nextHunk",
+        "title": "Interactive Review: Next Hunk",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
+        "command": "interactiveReview.prevHunk",
+        "title": "Interactive Review: Previous Hunk",
+        "enablement": "interactiveReview.inReview"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "interactiveReview.acceptHunk",
+        "key": "alt+a",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
+        "command": "interactiveReview.rejectHunk",
+        "key": "alt+r",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
+        "command": "interactiveReview.nextHunk",
+        "key": "alt+n",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
+        "command": "interactiveReview.prevHunk",
+        "key": "alt+p",
+        "when": "interactiveReview.inReview && editorTextFocus"
       }
     ],
     "menus": {

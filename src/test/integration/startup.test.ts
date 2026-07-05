@@ -5,7 +5,7 @@ import assert from 'assert';
 import { execSync } from 'child_process';
 import {
   getWorkspaceRoot, baselineGitEnv, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableReview, disableReview,
+  sleep, waitForCondition, waitForReviewing, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getReviewPanel, getStateManager,
 } from './helpers';
 
@@ -183,7 +183,8 @@ suite('interactive-review startup & loading integration', function () {
 
     // Now modify will-change.txt again to create a real diff
     writeFileExternally(path.join(root, 'will-change.txt'), 'modified-again\n');
-    await sleep(1000);
+    // Rescan-nudged: the headless Linux watcher may miss the external modify.
+    await waitForReviewing(path.join(root, 'will-change.txt'));
 
     // Check state: only will-change.txt should be reviewing
     const sm = getStateManager();

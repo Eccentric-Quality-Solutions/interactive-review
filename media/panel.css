@@ -600,13 +600,15 @@ body {
   background: #256b31;
 }
 
+/* Reject carries equal affordance weight to accept (accept/reject symmetry): a solid
+   fill mirroring btn-review-accept, not a faint secondary. */
 .btn-review-discard {
-  background: rgba(248, 81, 73, 0.08);
-  color: #c97d7a;
-  border: 1px solid rgba(248, 81, 73, 0.25);
+  background: #a13330;
+  color: #f4dad9;
+  border: 1px solid rgba(248, 81, 73, 0.3);
 }
 .btn-review-discard:hover {
-  background: rgba(248, 81, 73, 0.15);
+  background: #8f2c29;
 }
 
 /* ── File status badges ── */
