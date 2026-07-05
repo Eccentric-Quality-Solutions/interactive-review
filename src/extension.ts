@@ -5,7 +5,7 @@ import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
 import {
-  registerCommands, acceptHunk, discardHunk, acceptFileByPath, discardFileByPath,
+  registerCommands, acceptHunk, discardHunk, rejectSelection, acceptFileByPath, discardFileByPath,
   activeReviewTarget, hunkAtCursor, neighbourHunk, revealHunk,
 } from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
@@ -200,6 +200,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       const hunk = hunkAtCursor(t.editor, t.fileState);
       if (!hunk) return;
       discardHunk(stateManager, fileWatcher, t.filePath, hunkId(hunk),
+        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding');
+    }),
+    vscode.commands.registerCommand('interactiveReview.rejectSelection', () => {
+      const t = activeReviewTarget(stateManager);
+      if (!t) return;
+      const sel = t.editor.selection;
+      void rejectSelection(stateManager, fileWatcher, t.filePath, sel.start.line, sel.end.line,
         () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding');
     }),
     vscode.commands.registerCommand('interactiveReview.acceptFile', () => {

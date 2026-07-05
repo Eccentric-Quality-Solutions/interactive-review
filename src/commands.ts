@@ -4,7 +4,7 @@ import * as path from 'path';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
-import { computeHunks, hunkId, ParsedHunk } from './diffEngine';
+import { computeHunks, hunkId, ParsedHunk, splitHunkByRange } from './diffEngine';
 import { FileState } from './types';
 import { upsertGitignore } from './gitignoreManager';
 import { log } from './log';
@@ -286,6 +286,56 @@ function revealNextHunk(filePath: string, remainingHunks: ReturnType<typeof comp
   editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
 }
 
+/**
+ * Apply a prepared WorkspaceEdit to a reviewing file under the self-edit guard, then
+ * recompute the pending hunks and advance the walk: when nothing remains, exit reviewing
+ * (deleting a fully-discarded new file from disk); otherwise reveal the next hunk. Shared
+ * by `discardHunk` and `rejectSelection` so the resolve-and-advance behaviour stays in one
+ * place. `label` names the caller for logging.
+ */
+async function applyEditAndAdvance(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  filePath: string,
+  fileState: FileState,
+  doc: vscode.TextDocument,
+  edit: vscode.WorkspaceEdit,
+  originalNewStart: number,
+  onStateChanged: () => void,
+  label: string
+): Promise<void> {
+  const basename = path.basename(filePath);
+  fileWatcher.markSelfEdit(filePath);
+  try {
+    const applied = await vscode.workspace.applyEdit(edit);
+    log(`${label}(${basename}): applyEdit=${applied}`);
+    if (!applied) {
+      log(`${label}(${basename}): applyEdit failed, aborting`);
+      return;
+    }
+    const saved = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && d.uri.fsPath === filePath);
+    if (saved) await saved.save();
+    const currentText = saved?.getText() ?? doc.getText();
+    const remainingHunks = computeHunks(fileState.baseline, currentText);
+    log(`${label}(${basename}): remainingHunks=${remainingHunks.length}`);
+    if (remainingHunks.length === 0) {
+      if (fileState.baseline === null && fs.existsSync(filePath)) {
+        // New file (didn't exist before) fully discarded — remove from disk
+        log(`${label}(${basename}): new file fully discarded, deleting`);
+        try { fs.unlinkSync(filePath); } catch (err) { log(`${label}(${basename}): unlink failed: ${err}`); }
+      }
+      log(`${label}(${basename}): no hunks left, exitReviewing`);
+      stateManager.exitReviewing(filePath);
+    } else {
+      revealNextHunk(filePath, remainingHunks, originalNewStart);
+    }
+    onStateChanged();
+    log(`${label}(${basename}): done`);
+  } finally {
+    fileWatcher.clearSelfEdit(filePath);
+  }
+}
+
 export async function discardHunk(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
@@ -328,37 +378,94 @@ export async function discardHunk(
   const replacement = originalLines.length > 0 ? originalLines.join('\n') + '\n' : '';
   log(`discardHunk(${basename}): replacing lines ${startPos.line}-${endPos.line} with ${originalLines.length} original lines`);
 
-  fileWatcher.markSelfEdit(filePath);
-  try {
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(uri, new vscode.Range(startPos, endPos), replacement);
-    const applied = await vscode.workspace.applyEdit(edit);
-    log(`discardHunk(${basename}): applyEdit=${applied}`);
-    if (!applied) {
-      log(`discardHunk(${basename}): applyEdit failed, aborting`);
-      return;
-    }
-    const saved = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && d.uri.fsPath === filePath);
-    if (saved) await saved.save();
-    log(`discardHunk(${basename}): saved, doc.scheme=${saved?.uri.scheme ?? 'N/A'}, doc.len=${saved?.getText().length ?? 'N/A'}`);
-    const currentText = saved?.getText() ?? doc.getText();
-    const remainingHunks = computeHunks(fileState.baseline, currentText);
-    log(`discardHunk(${basename}): remainingHunks=${remainingHunks.length}`);
-    if (remainingHunks.length === 0) {
-      if (fileState.baseline === null && fs.existsSync(filePath)) {
-        // New file (didn't exist before) fully discarded — remove from disk
-        log(`discardHunk(${basename}): new file fully discarded, deleting`);
-        try { fs.unlinkSync(filePath); } catch (err) { log(`discardHunk(${basename}): unlink failed: ${err}`); }
-      }
-      log(`discardHunk(${basename}): no hunks left, exitReviewing`);
-      stateManager.exitReviewing(filePath);
-    } else {
-      revealNextHunk(filePath, remainingHunks, originalNewStart);
-    }
-    onStateChanged();
-    log(`discardHunk(${basename}): done`);
-  } finally {
-    fileWatcher.clearSelfEdit(filePath);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(uri, new vscode.Range(startPos, endPos), replacement);
+  await applyEditAndAdvance(stateManager, fileWatcher, filePath, fileState, doc, edit, originalNewStart, onStateChanged, 'discardHunk');
+}
+
+/**
+ * Reject only the added lines within a line selection that fall inside a pending hunk,
+ * leaving the rest of the hunk pending. Reverting an added line means deleting it (it was
+ * not in the baseline), so this deletes the selected added lines from the document and
+ * recomputes against the unchanged baseline — deterministic, no baseline reconstruction.
+ *
+ * Fallbacks: a pure-removal hunk (no added lines) delegates to whole-hunk `discardHunk`;
+ * a selection covering no added lines is a logged no-op; a selection spanning multiple
+ * hunks resolves the hunk at the selection start only and logs that the rest are ignored.
+ *
+ * `selStartLine` / `selEndLine` are 0-based document line numbers (editor selection).
+ */
+export async function rejectSelection(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  filePath: string,
+  selStartLine: number,
+  selEndLine: number,
+  onStateChanged: () => void,
+  source: string = 'unknown'
+): Promise<void> {
+  const basename = path.basename(filePath);
+  log(`rejectSelection(${basename}): sel=${selStartLine}-${selEndLine}, source=${source}`);
+
+  const fileState = stateManager.getFile(filePath);
+  if (!fileState) { log(`rejectSelection(${basename}): no fileState, skip`); return; }
+
+  const uri = vscode.Uri.file(filePath);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const allHunks = computeHunks(fileState.baseline, doc.getText());
+  log(`rejectSelection(${basename}): total hunks=${allHunks.length}`);
+
+  // Resolve the hunk at the selection start (1-based), mirroring hunkAtCursor.
+  const startLine1 = selStartLine + 1;
+  const hunk = allHunks.find(h => startLine1 >= h.newStart && startLine1 < h.newStart + Math.max(1, h.newLines))
+    ?? allHunks.find(h => h.newStart >= startLine1);
+  if (!hunk) { log(`rejectSelection(${basename}): no hunk at selection, skip`); return; }
+
+  // Never a silent partial success: log when the selection reaches into other hunks.
+  const endLine1 = selEndLine + 1;
+  const intersected = allHunks.filter(h => {
+    const hStart = h.newStart;
+    const hEnd = h.newStart + Math.max(1, h.newLines) - 1;
+    return endLine1 >= hStart && startLine1 <= hEnd;
+  });
+  if (intersected.length > 1) {
+    log(`rejectSelection(${basename}): selection spans ${intersected.length} hunks; resolving the hunk at selection start only, ignoring ${intersected.length - 1} other(s)`);
   }
+
+  const split = splitHunkByRange(hunk, selStartLine, selEndLine);
+  if (!split.hasAddedInRange) {
+    if (hunk.newLines === 0) {
+      log(`rejectSelection(${basename}): pure-removal hunk, falling back to whole-hunk reject`);
+      await discardHunk(stateManager, fileWatcher, filePath, hunkId(hunk), onStateChanged, source);
+    } else {
+      log(`rejectSelection(${basename}): no added lines in range, no-op`);
+    }
+    return;
+  }
+
+  const originalNewStart = hunk.newStart;
+  const delStart = hunk.newStart - 1 + split.addedStartIdx; // 0-based, inclusive
+  const lastDel = hunk.newStart - 1 + split.addedEndIdx - 1; // 0-based, inclusive
+
+  // Delete whole lines including their newline. When the slice runs to the final line of
+  // the document there is no following newline to consume, so back the start up to the end
+  // of the preceding line instead (mirrors discardHunk's end-of-file handling).
+  let startPos: vscode.Position;
+  let endPos: vscode.Position;
+  if (lastDel < doc.lineCount - 1) {
+    startPos = new vscode.Position(delStart, 0);
+    endPos = new vscode.Position(lastDel + 1, 0);
+  } else if (delStart > 0) {
+    startPos = new vscode.Position(delStart - 1, doc.lineAt(delStart - 1).text.length);
+    endPos = new vscode.Position(lastDel, doc.lineAt(lastDel).text.length);
+  } else {
+    startPos = new vscode.Position(0, 0);
+    endPos = new vscode.Position(lastDel, doc.lineAt(lastDel).text.length);
+  }
+  log(`rejectSelection(${basename}): deleting added lines ${delStart}-${lastDel}`);
+
+  const edit = new vscode.WorkspaceEdit();
+  edit.delete(uri, new vscode.Range(startPos, endPos));
+  await applyEditAndAdvance(stateManager, fileWatcher, filePath, fileState, doc, edit, originalNewStart, onStateChanged, 'rejectSelection');
 }
 

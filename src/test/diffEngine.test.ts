@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHunks, hunkId } from '../diffEngine';
+import { computeHunks, hunkId, splitHunkByRange } from '../diffEngine';
 
 describe('computeHunks', () => {
   it('returns empty for identical content', () => {
@@ -197,5 +197,62 @@ describe('hunkId', () => {
     const hunks = computeHunks('a\nb\nc\n', 'a\nX\nc\n');
     const h = hunks[0];
     assert.equal(hunkId(h), `${h.newStart}:${h.newLines}:${h.oldStart}:${h.oldLines}`);
+  });
+});
+
+describe('splitHunkByRange', () => {
+  // A pure insertion of 3 lines after 'a': added lines occupy 0-based doc lines 1,2,3.
+  //   baseline: a\ne\n   current: a\nB\nC\nD\ne\n   → newStart=2, newLines=3
+  const mixed = () => computeHunks('a\ne\n', 'a\nB\nC\nD\ne\n')[0];
+
+  it('selection fully inside the added span selects that slice', () => {
+    const h = mixed();
+    // select doc lines 2..2 (0-based) → the middle added line 'C' (index 1)
+    const split = splitHunkByRange(h, 2, 2);
+    assert.equal(split.hasAddedInRange, true);
+    assert.equal(split.addedStartIdx, 1);
+    assert.equal(split.addedEndIdx, 2);
+  });
+
+  it('selection covering all added lines selects the whole slice', () => {
+    const h = mixed();
+    const split = splitHunkByRange(h, 1, 3);
+    assert.deepEqual(
+      [split.hasAddedInRange, split.addedStartIdx, split.addedEndIdx],
+      [true, 0, 3]
+    );
+  });
+
+  it('selection spanning a hunk boundary is clamped to the added span', () => {
+    const h = mixed();
+    // select from context line 0 through line 2 → clamps to added indices [0,2)
+    const split = splitHunkByRange(h, 0, 2);
+    assert.equal(split.hasAddedInRange, true);
+    assert.equal(split.addedStartIdx, 0);
+    assert.equal(split.addedEndIdx, 2);
+  });
+
+  it('selection past the end of the added span is clamped', () => {
+    const h = mixed();
+    // select from line 2 through line 9 (past EOF) → clamps to added indices [1,3)
+    const split = splitHunkByRange(h, 2, 9);
+    assert.equal(split.hasAddedInRange, true);
+    assert.equal(split.addedStartIdx, 1);
+    assert.equal(split.addedEndIdx, 3);
+  });
+
+  it('selection covering only context lines has no added lines in range', () => {
+    const h = mixed();
+    // doc line 0 is context ('a'), before the added span at 1..3
+    const split = splitHunkByRange(h, 0, 0);
+    assert.equal(split.hasAddedInRange, false);
+  });
+
+  it('pure-removal hunk (newLines === 0) has no added lines in range', () => {
+    // baseline: a\nb\nc\n  current: a\nc\n  → removal of 'b', newLines=0, newStart=2
+    const h = computeHunks('a\nb\nc\n', 'a\nc\n')[0];
+    assert.equal(h.newLines, 0);
+    const split = splitHunkByRange(h, 1, 1);
+    assert.equal(split.hasAddedInRange, false);
   });
 });

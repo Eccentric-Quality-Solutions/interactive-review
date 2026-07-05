@@ -51,6 +51,11 @@
         "enablement": "interactiveReview.inReview"
       },
       {
+        "command": "interactiveReview.rejectSelection",
+        "title": "Interactive Review: Reject Selected Lines",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
         "command": "interactiveReview.acceptFile",
         "title": "Interactive Review: Accept File",
         "enablement": "interactiveReview.inReview"
@@ -80,6 +85,11 @@
       {
         "command": "interactiveReview.rejectHunk",
         "key": "alt+r",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
+        "command": "interactiveReview.rejectSelection",
+        "key": "alt+shift+r",
         "when": "interactiveReview.inReview && editorTextFocus"
       },
       {
