@@ -15,6 +15,46 @@ export function hunkId(hunk: ParsedHunk): string {
   return `${hunk.newStart}:${hunk.newLines}:${hunk.oldStart}:${hunk.oldLines}`;
 }
 
+export interface HunkRangeSplit {
+  hasAddedInRange: boolean;
+  addedStartIdx: number; // inclusive index into hunk.addedContent
+  addedEndIdx: number;   // exclusive
+}
+
+/**
+ * Intersect a 0-based document line selection with a hunk's added-line span.
+ *
+ * A hunk's added lines occupy document lines
+ * `[newStart-1 .. newStart-1+newLines-1]` (0-based). This returns the contiguous
+ * slice of `addedContent` indices the selection covers — the lines a partial
+ * reject would delete. `hasAddedInRange` is false for a pure-removal hunk
+ * (`newLines === 0`) or a selection that touches no added lines (e.g. context
+ * only), so callers can fall back to a whole-hunk action or no-op.
+ *
+ * Pure and VS-Code-free so it can be unit-tested in isolation.
+ */
+export function splitHunkByRange(
+  hunk: ParsedHunk,
+  selStartLine: number,
+  selEndLine: number
+): HunkRangeSplit {
+  const empty: HunkRangeSplit = { hasAddedInRange: false, addedStartIdx: 0, addedEndIdx: 0 };
+  if (hunk.newLines === 0) return empty;
+
+  const addedFirst = hunk.newStart - 1;             // 0-based doc line of first added line
+  const addedLast = addedFirst + hunk.newLines - 1; // 0-based doc line of last added line
+
+  const lo = Math.max(selStartLine, addedFirst);
+  const hi = Math.min(selEndLine, addedLast);
+  if (lo > hi) return empty;
+
+  return {
+    hasAddedInRange: true,
+    addedStartIdx: lo - addedFirst,
+    addedEndIdx: hi - addedFirst + 1,
+  };
+}
+
 export function computeHunks(baseline: string | null, current: string): ParsedHunk[] {
   const changes = Diff.diffLines(baseline ?? '', current);
 

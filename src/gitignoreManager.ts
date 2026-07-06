@@ -20,7 +20,6 @@ export function upsertGitignore(): void {
   }
 
   if (content.includes(IGNORE_ENTRY)) return;
-
   const entry = content.endsWith('\n') || content.length === 0
     ? `${MARKER_COMMENT}\n${IGNORE_ENTRY}\n`
     : `\n${MARKER_COMMENT}\n${IGNORE_ENTRY}\n`;

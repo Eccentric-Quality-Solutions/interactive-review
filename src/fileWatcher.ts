@@ -307,8 +307,11 @@ export class FileWatcher {
       return;
     }
 
-    // Check if this was a manual create in VSCode (editor buffer matches disk)
-    const openDoc = vscode.workspace.textDocuments.find(d => normalizePath(d.uri.fsPath) === filePath);
+    // Check if this was a manual create in VSCode (editor buffer matches disk).
+    // Filter by scheme: a review diff's baseline side shares this fsPath.
+    const openDoc = vscode.workspace.textDocuments.find(
+      d => d.uri.scheme === 'file' && normalizePath(d.uri.fsPath) === filePath
+    );
     const bufferMatch = openDoc ? openDoc.getText() === diskContent : false;
     log(`onDiskCreate(${basename}): openDoc=${!!openDoc}, bufferMatch=${bufferMatch}`);
     if (openDoc && bufferMatch) {
@@ -439,8 +442,11 @@ export class FileWatcher {
     const git = this.stateManager.git;
     if (!git) return;
 
-    // Check if this was a manual save in VSCode (editor buffer matches disk)
-    const openDoc = vscode.workspace.textDocuments.find(d => normalizePath(d.uri.fsPath) === filePath);
+    // Check if this was a manual save in VSCode (editor buffer matches disk).
+    // Filter by scheme: a review diff's baseline side shares this fsPath.
+    const openDoc = vscode.workspace.textDocuments.find(
+      d => d.uri.scheme === 'file' && normalizePath(d.uri.fsPath) === filePath
+    );
     if (openDoc && openDoc.getText() === diskContent) {
       // User saved in VSCode — accept into baseline, no hunk
       this.stateManager.snapshotFile(filePath, diskContent);

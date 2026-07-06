@@ -20,8 +20,11 @@ const DEFAULT_SETTINGS: Settings = {
   respectGitignore: true,
   clearOnBranchSwitch: false,
   quoteRotationInterval: 30,
-  useDiffEditor: false,
-  showInlineDecorations: true,
+  // The diff editor (forced to inline/unified rendering) is the default review
+  // surface: it shows removed baseline lines in red above the added lines in
+  // green, which the stable-API inline-decorations surface cannot do.
+  useDiffEditor: true,
+  showInlineDecorations: false,
 };
 
 /**

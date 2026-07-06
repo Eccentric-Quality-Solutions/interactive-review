@@ -10,20 +10,20 @@
 
 ## 2. Partial-hunk actions (`partial-hunk-actions`)
 
-- [ ] 2.1 Add range-scoped resolution in `src/diffEngine.ts`: given a hunk + a line range, split into applied vs remaining added lines
-- [ ] 2.2 Implement `acceptSelection` in `src/commands.ts` — fold only the selected added lines into the baseline, leave the rest pending
-- [ ] 2.3 Implement `rejectSelection` — revert only the selected added lines to baseline; fall back to whole-hunk reject for pure-removal hunks
-- [ ] 2.4 Recompute hunks after a partial action; reuse the `remainingHunks === 0 → exitReviewing` branch so counts/status/advance stay correct
-- [ ] 2.5 Register `interactiveReview.acceptSelection` / `rejectSelection` commands + keybindings
-- [ ] 2.6 Integration tests: partial accept of a mixed hunk; partial reject; selection spanning a hunk boundary; partial action that completes the file
+- [x] 2.1 Add range-scoped resolution in `src/diffEngine.ts`: given a hunk + a line range, split into applied vs remaining added lines (`splitHunkByRange`)
+- [ ] 2.2 Implement `acceptSelection` in `src/commands.ts` — fold only the selected added lines into the baseline, leave the rest pending (deferred partial-accept follow-up)
+- [x] 2.3 Implement `rejectSelection` — revert only the selected added lines to baseline; fall back to whole-hunk reject for pure-removal hunks
+- [x] 2.4 Recompute hunks after a partial action; reuse the shared `applyEditAndAdvance` (counts/status/advance/exit stay correct) — done for the reject path
+- [x] 2.5 Register `interactiveReview.rejectSelection` command + keybindings — `acceptSelection` still pending with 2.2
+- [x] 2.6 Integration tests: partial reject of a mixed hunk; selection spanning a hunk boundary; partial reject completing the file (`partialReject.test.ts`) — partial-accept test pending with 2.2
 
 ## 3. Inline decorations surface (`inline-decorations-surface`)
 
-- [ ] 3.1 Add an `InlineDecorations` module: a `TextEditorDecorationType` for pending added lines, refreshed on `onStateChanged` and `onDidChangeTextDocument`
-- [ ] 3.2 Wire `openFile` so that when `useDiffEditor === false && showInlineDecorations === true` the file opens in the normal editor with decorations instead of the diff editor
-- [ ] 3.3 Extend `DiffCodeLensProvider` with a "Show N removed lines" CodeLens that peeks the baseline slice at the hunk
-- [ ] 3.4 Confirm per-hunk accept/reject CodeLens work identically in decorations mode (parity)
-- [ ] 3.5 Integration tests: added lines decorated in the normal editor; surface selection honors settings; accept clears the decoration
+- [x] 3.1 Add an `InlineDecorations` module: a `TextEditorDecorationType` for pending added lines, refreshed on `onStateChanged` and `onDidChangeTextDocument`
+- [x] 3.2 Wire `openFile` so that when `useDiffEditor === false && showInlineDecorations === true` the file opens in the normal editor with decorations instead of the diff editor
+- [x] 3.3 Extend `DiffCodeLensProvider` with a "Show N removed lines" CodeLens that peeks the baseline slice at the hunk
+- [x] 3.4 Confirm per-hunk accept/reject CodeLens work identically in decorations mode (parity)
+- [x] 3.5 Integration tests: added lines decorated in the normal editor; surface selection honors settings; accept clears the decoration
 
 ## 4. Trigger UX (`review-trigger-ux`)
 

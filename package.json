@@ -51,13 +51,31 @@
         "enablement": "interactiveReview.inReview"
       },
       {
+        "command": "interactiveReview.rejectSelection",
+        "title": "Interactive Review: Reject Selected Lines",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
+        "command": "interactiveReview.acceptSelection",
+        "title": "Interactive Review: Accept Selected Lines",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
         "command": "interactiveReview.acceptFile",
-        "title": "Interactive Review: Accept File",
+        "title": "Interactive Review: Approve File",
+        "icon": {
+          "light": "media/approve-file-light.svg",
+          "dark": "media/approve-file-dark.svg"
+        },
         "enablement": "interactiveReview.inReview"
       },
       {
         "command": "interactiveReview.rejectFile",
-        "title": "Interactive Review: Reject File",
+        "title": "Interactive Review: Revert File",
+        "icon": {
+          "light": "media/revert-file-light.svg",
+          "dark": "media/revert-file-dark.svg"
+        },
         "enablement": "interactiveReview.inReview"
       },
       {
@@ -83,6 +101,16 @@
         "when": "interactiveReview.inReview && editorTextFocus"
       },
       {
+        "command": "interactiveReview.rejectSelection",
+        "key": "alt+shift+r",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
+        "command": "interactiveReview.acceptSelection",
+        "key": "alt+shift+a",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
         "command": "interactiveReview.nextHunk",
         "key": "alt+n",
         "when": "interactiveReview.inReview && editorTextFocus"
@@ -104,6 +132,18 @@
           "command": "interactiveReview.openSettings",
           "when": "view == interactiveReviewToolbar",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "interactiveReview.acceptFile",
+          "when": "interactiveReview.inReview",
+          "group": "navigation@1"
+        },
+        {
+          "command": "interactiveReview.rejectFile",
+          "when": "interactiveReview.inReview",
+          "group": "navigation@2"
         }
       ]
     },
