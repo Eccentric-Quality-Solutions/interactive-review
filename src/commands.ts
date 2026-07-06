@@ -474,3 +474,100 @@ export async function rejectSelection(
   await applyEditAndAdvance(stateManager, fileWatcher, filePath, fileState, doc, edit, originalNewStart, onStateChanged, 'rejectSelection');
 }
 
+/**
+ * Accept only the added lines within a line selection that fall inside a pending hunk,
+ * folding them into the baseline and leaving the rest of the hunk pending. The symmetric
+ * counterpart of `rejectSelection`. Accepting an added line means it stops being flagged
+ * as a change: it is inserted into the baseline (at the hunk anchor) so
+ * `computeHunks(newBaseline, buffer)` no longer reports it. Unlike reject this never edits
+ * the buffer — the accepted content is already on disk; only the baseline advances forward,
+ * exactly as whole-hunk `acceptHunk` does. Removed lines stay in the baseline (still pending
+ * removal) and un-selected added lines stay pending, mirroring what a partial reject leaves.
+ *
+ * Fallbacks mirror `rejectSelection`: a pure-removal hunk (no added lines) delegates to
+ * whole-hunk `acceptHunk`; a selection covering no added lines is a logged no-op; a
+ * selection spanning multiple hunks resolves the hunk at the selection start only and logs
+ * that the rest are ignored.
+ *
+ * `selStartLine` / `selEndLine` are 0-based document line numbers (editor selection).
+ */
+export async function acceptSelection(
+  stateManager: StateManager,
+  filePath: string,
+  selStartLine: number,
+  selEndLine: number,
+  onStateChanged: () => void,
+  source: string = 'unknown'
+): Promise<void> {
+  const basename = path.basename(filePath);
+  log(`acceptSelection(${basename}): sel=${selStartLine}-${selEndLine}, source=${source}`);
+
+  const fileState = stateManager.getFile(filePath);
+  if (!fileState) { log(`acceptSelection(${basename}): no fileState, skip`); return; }
+
+  const uri = vscode.Uri.file(filePath);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const allHunks = computeHunks(fileState.baseline, doc.getText());
+  log(`acceptSelection(${basename}): total hunks=${allHunks.length}`);
+
+  // Resolve the hunk at the selection start (1-based), mirroring rejectSelection.
+  const startLine1 = selStartLine + 1;
+  const hunk = allHunks.find(h => startLine1 >= h.newStart && startLine1 < h.newStart + Math.max(1, h.newLines))
+    ?? allHunks.find(h => h.newStart >= startLine1);
+  if (!hunk) { log(`acceptSelection(${basename}): no hunk at selection, skip`); return; }
+
+  // Never a silent partial success: log when the selection reaches into other hunks.
+  const endLine1 = selEndLine + 1;
+  const intersected = allHunks.filter(h => {
+    const hStart = h.newStart;
+    const hEnd = h.newStart + Math.max(1, h.newLines) - 1;
+    return endLine1 >= hStart && startLine1 <= hEnd;
+  });
+  if (intersected.length > 1) {
+    log(`acceptSelection(${basename}): selection spans ${intersected.length} hunks; resolving the hunk at selection start only, ignoring ${intersected.length - 1} other(s)`);
+  }
+
+  const split = splitHunkByRange(hunk, selStartLine, selEndLine);
+  if (!split.hasAddedInRange) {
+    if (hunk.newLines === 0) {
+      log(`acceptSelection(${basename}): pure-removal hunk, falling back to whole-hunk accept`);
+      acceptHunk(stateManager, filePath, hunkId(hunk), onStateChanged, source);
+    } else {
+      log(`acceptSelection(${basename}): no added lines in range, no-op`);
+    }
+    return;
+  }
+
+  const originalNewStart = hunk.newStart;
+  const baselineLines = (fileState.baseline ?? '').split('\n');
+  const currentLines = doc.getText().split('\n');
+
+  // Fold the selected added lines into the baseline at the hunk anchor — just after the
+  // hunk's removed block (for a pure addition, oldLines === 0, so that is the insertion
+  // point itself). The re-diff realigns the accepted lines as context while any surrounding
+  // added lines and the still-present removed lines remain pending.
+  const acceptedLines = currentLines.slice(
+    hunk.newStart - 1 + split.addedStartIdx,
+    hunk.newStart - 1 + split.addedEndIdx,
+  );
+  const insertAt = hunk.oldStart - 1 + hunk.oldLines; // 0-based baseline line index
+  const newBaseline = [
+    ...baselineLines.slice(0, insertAt),
+    ...acceptedLines,
+    ...baselineLines.slice(insertAt),
+  ].join('\n');
+  log(`acceptSelection(${basename}): folding ${acceptedLines.length} added line(s) into baseline at ${insertAt}`);
+
+  const remainingHunks = computeHunks(newBaseline, doc.getText());
+  log(`acceptSelection(${basename}): remainingHunks=${remainingHunks.length}`);
+  if (remainingHunks.length === 0) {
+    log(`acceptSelection(${basename}): last change, exitReviewing`);
+    stateManager.exitReviewing(filePath, doc.getText());
+  } else {
+    stateManager.setFile(filePath, { status: 'reviewing', baseline: newBaseline });
+    revealNextHunk(filePath, remainingHunks, originalNewStart);
+  }
+  onStateChanged();
+  log(`acceptSelection(${basename}): done`);
+}
+

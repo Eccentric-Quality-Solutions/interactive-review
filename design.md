@@ -298,6 +298,29 @@ The insight: when *you* save, the open buffer equals what just hit disk. When an
 **Known fragility — the reload race.** VS Code **silently reloads a saved/clean open document when its file changes on disk** (reload prompt only for *dirty* buffers). This is the standing default: a request to prompt for clean files too ([microsoft/vscode#50472](https://github.com/microsoft/vscode/issues/50472)) was closed as a duplicate without changing the behavior. So if an agent writes to a file you have open and unmodified, two things race: VS Code's silent buffer reload
 vs. our `onDiskChange` reading `openDoc.getText()`. If the reload wins, the buffer already equals disk → the agent's edit is misread as a user save and folded into the baseline (**missed from review**). In practice `onDiskChange` usually wins (external AI edits are observed to surface reliably), but it is a genuine latent race. If it ever bites, the fix is to capture buffer content at the *start* of the debounce / compare against a pre-change snapshot rather than the possibly-reloaded live buffer — not attempted yet (no observed failure).
 
+## 4g. Phase 4 — status (2026-07-05): DONE
+
+The polish phase's four pieces all shipped: **keyboard-driven review** (`Alt+A/R`,
+`Alt+N/P`) with cursor-resolved accept/reject and whole-hunk **accept/reject symmetry**
+(`0ed0e58`); **partial-hunk reject over a line selection** (`dc09183`); an **in-file
+decorations** review surface (`3548dd4`, since demoted from default by §4e); and now the
+final gap — **partial-hunk accept** (`acceptSelection`, `Alt+Shift+A`), the symmetric
+counterpart of `rejectSelection`.
+
+**The accept/reject asymmetry that shaped the implementation.** Reject *rewrites the buffer*
+(deletes the added lines, needs a `WorkspaceEdit` + save + self-edit guard); accept *never
+touches the buffer* — the accepted content is already on disk, so it only advances the
+baseline forward, exactly like whole-hunk `acceptHunk`. So `acceptSelection` mirrors
+`acceptHunk`'s state-only shape, not `rejectSelection`'s edit machinery. The whole operation
+reduces to **inserting the selected added lines into the baseline** at the hunk anchor
+(`oldStart-1+oldLines`), then recomputing — one reconstruction covers both pure-addition and
+replacement hunks, because the removed lines stay in the baseline (still pending removal) and
+un-selected added lines stay pending, exactly as a partial reject leaves them. Fallbacks
+mirror reject: a pure-removal hunk delegates to whole-hunk `acceptHunk`; a selection with no
+added lines is a logged no-op; a multi-hunk selection resolves the start hunk only and logs
+the rest. 6 integration tests ([partialAccept.test.ts](src/test/integration/partialAccept.test.ts));
+suite **97 passing / 1 pending / 0 failing**.
+
 ## 5. Open decisions
 
 1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).

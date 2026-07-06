@@ -56,6 +56,11 @@
         "enablement": "interactiveReview.inReview"
       },
       {
+        "command": "interactiveReview.acceptSelection",
+        "title": "Interactive Review: Accept Selected Lines",
+        "enablement": "interactiveReview.inReview"
+      },
+      {
         "command": "interactiveReview.acceptFile",
         "title": "Interactive Review: Approve File",
         "icon": {
@@ -98,6 +103,11 @@
       {
         "command": "interactiveReview.rejectSelection",
         "key": "alt+shift+r",
+        "when": "interactiveReview.inReview && editorTextFocus"
+      },
+      {
+        "command": "interactiveReview.acceptSelection",
+        "key": "alt+shift+a",
         "when": "interactiveReview.inReview && editorTextFocus"
       },
       {

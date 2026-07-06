@@ -1,0 +1,10 @@
+{
+  // IDE-only project association. VS Code's TypeScript server matches a file to its
+  // nearest ancestor tsconfig.json; the repo-root tsconfig.json *excludes* src/test, so
+  // without this file these tests land in an inferred project with no @types/node and
+  // report phantom errors like TS2591 "Cannot find name 'fs'". This mirrors the compiler
+  // options the build actually uses (../../../tsconfig.integration.json) so the editor
+  // matches `vscode-test`. It is not referenced by any build script.
+  "extends": "../../../tsconfig.integration.json",
+  "include": ["**/*.ts"]
+}

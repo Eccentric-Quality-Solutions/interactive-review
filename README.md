@@ -51,11 +51,14 @@ each hunk. Keyboard shortcuts, while a review editor is focused:
 | --- | --- |
 | `Alt+A` | Accept hunk |
 | `Alt+R` | Reject hunk |
+| `Alt+Shift+A` | Accept selected lines |
 | `Alt+Shift+R` | Reject selected lines |
 | `Alt+N` / `Alt+P` | Next / previous hunk |
 
-Accepting folds the change into the baseline; rejecting restores the baseline text. When
-the last hunk across all files is resolved, the panel shows **review complete**.
+Accepting folds the change into the baseline; rejecting restores the baseline text. The
+selection actions work on messy hunks where you want only *some* of the added lines: accept
+folds the selected added lines into the baseline (the rest stay pending), reject deletes
+them. When the last hunk across all files is resolved, the panel shows **review complete**.
 
 > **Heads-up:** while enabled on the diff-editor surface, the extension sets the *global* VS
 > Code settings `diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` so

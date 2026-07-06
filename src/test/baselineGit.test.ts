@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { BaselineGit } from '../baselineGit';
+import { normalizePath } from '../pathNormalize';
 
 let tmpDir: string;
 let stateDir: string;
@@ -285,10 +286,14 @@ describe('BaselineGit', () => {
       fs.rmSync(dir2, { recursive: true, force: true });
     });
 
-    it('NFD paths from snapshot are found by listTrackedFiles as NFC', async () => {
-      // On macOS, readdir may return NFD paths while git ls-tree returns NFC.
-      // Both snapshot (which stores NFD from filesystem) and listTrackedFiles (NFC from git)
-      // must agree on paths so that Set/Map lookups match.
+    it('snapshot and listTrackedFiles agree on Unicode form (NFD→NFC on macOS, identity elsewhere)', async () => {
+      // A path can reach us as NFD (macOS readdir) while git ls-tree returns NFC. The
+      // invariant: snapshot, listTrackedFiles, getBaseline, and removeFile all agree on the
+      // *same* form so Set/Map lookups match — they must, because each routes the path
+      // through normalizePath(). That form is NFC on macOS (core.precomposeUnicode) and
+      // identity on Linux, where NFD and NFC are distinct filenames and normalizing would
+      // conflate them. This asserts the agreement, not a hard-coded form, so it passes on
+      // both platforms.
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-nfc-'));
       const root = dir2;
       const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), root);
@@ -301,15 +306,14 @@ describe('BaselineGit', () => {
       // Snapshot with NFD path (simulating filesystem path)
       await g2.snapshot(nfdPath, 'hello\n');
       const tracked = await g2.listTrackedFiles();
-      // listTrackedFiles returns NFC paths (git precompose on macOS)
-      // Our normalization ensures the snapshot was also stored as NFC
-      const nfcPath = path.join(root, nfcName);
-      assert.ok(tracked.includes(nfcPath), `tracked should include NFC path ${nfcPath}, got: ${tracked}`);
-      // getBaseline with NFD path should still work (normalized to NFC internally)
+      // listTrackedFiles reports the path in the same normalized form snapshot stored it in.
+      const expectedPath = normalizePath(nfdPath);
+      assert.ok(tracked.includes(expectedPath), `tracked should include ${expectedPath}, got: ${tracked}`);
+      // getBaseline with the original NFD path resolves (normalized internally to match).
       const baseline = await g2.getBaseline(nfdPath);
       assert.strictEqual(baseline, 'hello\n');
-      // removeFile with NFC path should work
-      await g2.removeFile(nfcPath);
+      // removeFile with the original NFD path resolves the same tracked entry.
+      await g2.removeFile(nfdPath);
       const tracked2 = await g2.listTrackedFiles();
       assert.strictEqual(tracked2.length, 0);
       fs.rmSync(dir2, { recursive: true, force: true });
