@@ -111,6 +111,11 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     this.view.webview.postMessage({ type: 'openSettings' });
   }
 
+  /** Test-visibility: the panel state that would be posted to the webview. */
+  panelStateForTest(): PanelState {
+    return this.buildPanelState();
+  }
+
   private buildPanelState(): PanelState {
     const files: PanelFile[] = [];
     let totalAdded = 0;
@@ -124,7 +129,13 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       if (!fileExists) {
         currentContent = '';
       } else {
-        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === filePath);
+        // Must filter by scheme: when a review diff is open, the baseline side is a
+        // document with the SAME fsPath but scheme 'interactive-review-baseline'. An
+        // unfiltered find can grab that baseline doc, making computeHunks see zero
+        // changes and silently drop the file from the panel.
+        const doc = vscode.workspace.textDocuments.find(
+          d => d.uri.scheme === 'file' && d.uri.fsPath === filePath
+        );
         currentContent = doc ? doc.getText() : '';
         if (!doc) {
           try { currentContent = fs.readFileSync(filePath, 'utf-8'); } catch { currentContent = ''; }
@@ -297,6 +308,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
           const fileName = path.basename(msg.filePath);
           const baselineUri = vscode.Uri.file(msg.filePath).with({ scheme: 'interactive-review-baseline' });
           const emptyUri = vscode.Uri.from({ scheme: 'untitled', path: msg.filePath + '.deleted' });
+          await this.ensureInlineDiff();
           await vscode.commands.executeCommand('vscode.diff', baselineUri, emptyUri, `${fileName} (deleted)`);
         }
         break;
@@ -323,11 +335,34 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Force the review diff to render as a single-column inline (unified) view —
+   * removed baseline lines in red directly above the added lines in green — rather
+   * than the default side-by-side panes. `vscode.diff` exposes no per-call override,
+   * so the only levers are global `diffEditor.*` settings; we nudge them (idempotent
+   * — only writes when they differ) whenever we open a review diff:
+   *   - `renderSideBySide` → false: single-column unified view.
+   *   - `codeLens` → true: the diff editor hides CodeLenses by default, which would
+   *     swallow our per-hunk Accept/Discard actions; opt back in.
+   * These are deliberately global: they also affect git and other diffs while the
+   * extension is in use.
+   */
+  private async ensureInlineDiff(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('diffEditor');
+    if (cfg.get<boolean>('renderSideBySide') !== false) {
+      await cfg.update('renderSideBySide', false, vscode.ConfigurationTarget.Global);
+    }
+    if (cfg.get<boolean>('codeLens') !== true) {
+      await cfg.update('codeLens', true, vscode.ConfigurationTarget.Global);
+    }
+  }
+
   private async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
     const fileName = path.basename(filePath);
     const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
     const currentUri = vscode.Uri.file(filePath);
 
+    await this.ensureInlineDiff();
     await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, `${fileName} (interactive-review)`);
 
     // Jump to the target hunk position in the diff editor's modified side.

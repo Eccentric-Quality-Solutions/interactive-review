@@ -4,8 +4,16 @@ src/**
 out-test/**
 out-integration/**
 .vscode-test/**
+.vscode-test.mjs
 docs/**
+openspec/**
 skills/**
+design.md
+hunkwise-evaluation.md
+interactive-review-model.md
+prior-art-and-alternatives.md
+plan.md
+review-flow-comparison.html
 node_modules/**
 !node_modules/ignore/**
 !node_modules/diff/**

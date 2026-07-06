@@ -232,6 +232,72 @@ disposition would be reimplementing the resolution engine for features (summary 
 un-accept) the MVP doesn't have. Revisit only if a concrete feature demands it. Suite:
 **75 passing / 1 pending / 0 failing**.
 
+## 4e. Primary surface — RESOLVED (2026-07-05): inline diff editor by default
+
+Settled by **dogfooding on this repo** (multi-file agent edits, reviewed live). The native
+diff editor, **forced to inline/unified rendering**, is now the default review surface:
+`useDiffEditor` defaults `true`, `showInlineDecorations` defaults `false`
+([baselineGit.ts](src/baselineGit.ts) `DEFAULT_SETTINGS`).
+
+**Why.** The decorations-only surface *cannot show removed lines inline* on stable APIs — it
+highlights added lines in place and hides removed content behind a *"Show N removed lines"*
+peek. For a tool whose pitch is *reviewing* each change deliberately, seeing what a
+modification replaced is table stakes, not a peek away. The diff editor shows removed (red) /
+added (green) natively, with no proposed APIs.
+
+**Alternatives rejected** (both attempts to get diff-editor visuals with an in-file feel):
+- *Inject commented-out old lines into the real buffer, styled red.* Breaks the core
+  invariant `hunks = diff(baseline, currentBufferText)` — the injected lines become part of
+  `currentBufferText` (diff eats its own tail) and can be saved to disk. Also no universal
+  comment syntax (Markdown/JSON/plaintext have none).
+- *Custom read-only virtual doc rendering an inline diff.* Reinvents syntax highlighting,
+  word-level diff, and hunk navigation the diff editor already provides.
+- `editorInsets` remains the only *true* in-file mechanism and stays **deferred** per the
+  stable-only charter (§4a). The charter and this UX are in tension; a future Insiders/enhanced
+  build is the place to revisit, not a decoration hack.
+
+**Implementation + tradeoff.** `ReviewPanel.ensureInlineDiff()` nudges the *global* settings
+`diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` before each
+`vscode.diff` — VS Code exposes **no per-diff override** for either. Consequence: while enabled
+on this surface, the user's *other* (git, manual) diffs also render inline with CodeLens. This
+is documented as a heads-up in [README](README.md); accept it as the cost of "always inline"
+on stable APIs.
+
+**Bug this surface flip surfaced (same-`fsPath` scheme collision).** With the diff editor as
+default, *every* reviewed file spawns a baseline document at `fileUri.with({ scheme:
+'interactive-review-baseline' })` — **same `fsPath`, different scheme**. An unfiltered
+`textDocuments.find(d => d.uri.fsPath === filePath)` in `buildPanelState` grabbed that baseline
+doc, so `computeHunks(baseline, baseline)` returned **0 hunks** and the file was silently
+dropped from the panel — making whole multi-file queues vanish the moment you opened a file in
+the diff. Latent all along; the old decorations surface never opened a diff, so it never fired.
+Fix: filter `scheme === 'file'` at every `fsPath` lookup — `buildPanelState`
+([reviewPanel.ts](src/reviewPanel.ts)), `FileWatcher` (×2), `revealNextHunk`
+([commands.ts](src/commands.ts)). Regression test: *"file stays in the panel while its review
+diff is open"* ([diffEditor.test.ts](src/test/integration/diffEditor.test.ts)), plus the two
+surface-default assertion tests updated. Suite green.
+
+**Lesson:** a same-`fsPath`/different-scheme document is a trap for any `fsPath`-only match;
+`scheme === 'file'` is the standing guard for lookups that must resolve to the editable file.
+
+## 4f. User-edit vs. AI/external-edit discrimination (2026-07-05): documented
+
+**The property:** a change you make *by hand in the editor and save* is silently adopted into the baseline (never enters the review queue); a change written *to disk out-of-band* — an AI agent, a script, a formatter — is surfaced for review. This is deliberate and desirable: the
+queue stays focused on the agent's turn, not your own in-flight edits. (Confirmed as intended behavior with the user while dogfooding.)
+
+**How it works — a heuristic, not author metadata.** VS Code exposes **no API for edit authorship**: `onDidChangeTextDocument` fires identically for user typing and for an extension's `WorkspaceEdit`. `TextDocumentChangeReason` ([microsoft/vscode#120617](https://github.com/microsoft/vscode/issues/120617), **closed** — the `userInput` value was *deliberately dropped*, shipping only `Undo`/`Redo`) exposes no user-vs-programmatic source, and a maintainer confirms none is offered ([vscode-discussions#1157](https://github.com/microsoft/vscode-discussions/discussions/1157)). So this gap is settled, not pending. The extension infers the source from a different signal: **did the change arrive through the editor buffer?**
+
+On a disk change to a not-yet-reviewing file ([fileWatcher.ts](src/fileWatcher.ts) `onDiskChange` ≈L450, and the mirror in `onDiskCreate` for new files):
+
+```
+open buffer exists AND buffer text === disk content  → user saved it here → snapshotFile()  (baseline, no hunk)
+otherwise (no buffer, or buffer is stale vs disk)     → external/AI write   → enterReviewing() (queued)
+```
+
+The insight: when *you* save, the open buffer equals what just hit disk. When an agent writes straight to disk, either the file isn't open or the buffer is **stale** relative to the new disk bytes — the equality fails, and it's treated as external. `snapshotFile` commits the content as the new baseline, so a "user save" leaves a zero diff and drops out of review. (Distinct from the `selfEditFiles` guard, which suppresses the extension's *own* accept/reject writes.)
+
+**Known fragility — the reload race.** VS Code **silently reloads a saved/clean open document when its file changes on disk** (reload prompt only for *dirty* buffers). This is the standing default: a request to prompt for clean files too ([microsoft/vscode#50472](https://github.com/microsoft/vscode/issues/50472)) was closed as a duplicate without changing the behavior. So if an agent writes to a file you have open and unmodified, two things race: VS Code's silent buffer reload
+vs. our `onDiskChange` reading `openDoc.getText()`. If the reload wins, the buffer already equals disk → the agent's edit is misread as a user save and folded into the baseline (**missed from review**). In practice `onDiskChange` usually wins (external AI edits are observed to surface reliably), but it is a genuine latent race. If it ever bites, the fix is to capture buffer content at the *start* of the debounce / compare against a pre-change snapshot rather than the possibly-reloaded live buffer — not attempted yet (no observed failure).
+
 ## 5. Open decisions
 
 1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).
@@ -243,4 +309,21 @@ un-accept) the MVP doesn't have. Revisit only if a concrete feature demands it. 
    unreliability the triage found (§4c.1). An agent-callable hook to mark turn boundaries stays
    possible as an additive enhancement later, but is not v1-required.
 3. **Primary surface** — native diff editor (robust) vs. in-file decorations (closer feel,
-   more limited without insets). *(Still open — decide during Phase 2/4.)*
+   more limited without insets). **RESOLVED (2026-07-05): inline diff editor by default** —
+   decorations can't render removed lines on stable APIs, which fails the review use case. See
+   §4e for the decision, the global-settings tradeoff, and the scheme-collision bug it exposed.
+
+## 6. Someday / maybe (parked ideas)
+
+Not committed — captured so they aren't rediscovered from scratch. Revisit only if a concrete
+need pulls one in.
+
+- **Status-bar items for file-level Approve/Revert (2026-07-05, parked — leaning no).** Explored
+  as a way to give the file-level actions a *text label* the title-bar icons can't (those are
+  icon-only). Built a mock. Parked because the status bar is **not reliably adjacent to the
+  diff** — an open terminal/panel sits between the editor and the status bar, so the items stop
+  reading as "actions for the file I'm looking at," and their value over the existing title-bar
+  buttons + panel buttons + keybindings is unclear. Would be two `StatusBarItem`s gated on
+  `interactiveReview.inReview`, reusing `acceptFile`/`rejectFile`. Reconsider only if users
+  report the title-bar icons are undiscoverable. The file-level actions themselves already ship
+  on three surfaces (title bar §4e-adjacent, panel, keybindings).

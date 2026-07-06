@@ -5,3 +5,12 @@ out-test/
 out-integration/
 .vscode-test/
 *.vsix
+# interactive-review
+.vscode/interactive-review/
+# integration-test scratch workspace: transient fixtures are created/deleted here
+# during test runs. Ignoring them keeps git clean AND stops the live extension
+# (which watches the repo) from flashing them through the review panel. The test
+# instance is rooted at this folder and reads only its own .gitignore downward, so
+# this rule never reaches it.
+/src/test/integration/workspace/*
+!/src/test/integration/workspace/.gitkeep

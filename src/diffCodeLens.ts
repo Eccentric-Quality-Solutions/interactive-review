@@ -11,7 +11,6 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
   fire(): void {
     this._onDidChangeCodeLenses.fire();
   }
-
   dispose(): void {
     this._onDidChangeCodeLenses.dispose();
   }

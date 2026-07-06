@@ -274,7 +274,12 @@ export function acceptHunk(
 
 /** Reveal the next hunk in the editor after an accept/discard operation. */
 function revealNextHunk(filePath: string, remainingHunks: ReturnType<typeof computeHunks>, originalNewStart: number): void {
-  const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.fsPath === filePath);
+  // Filter by scheme: a review diff's baseline side is a visible editor sharing this
+  // fsPath; without the guard we could reveal the next hunk in the read-only baseline
+  // pane instead of the editable file.
+  const editor = vscode.window.visibleTextEditors.find(
+    e => e.document.uri.scheme === 'file' && e.document.uri.fsPath === filePath
+  );
   if (!editor) return;
 
   // Find the first remaining hunk at or after the original position

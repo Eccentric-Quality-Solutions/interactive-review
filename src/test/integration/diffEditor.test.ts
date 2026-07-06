@@ -4,7 +4,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
+  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher, getReviewPanel,
 } from './helpers';
 import { acceptHunk, discardHunk } from '../../commands';
 import { computeHunks, hunkId } from '../../diffEngine';
@@ -46,28 +46,30 @@ suite('interactive-review diff editor integration', function () {
 
   // ── useDiffEditor setting ──────────────────────────────────────────────────
 
-  test('useDiffEditor setting persists and defaults to false', async () => {
+  test('useDiffEditor setting persists and defaults to true', async () => {
     await enableReview();
     const sm = getStateManager();
-    assert.strictEqual(sm.useDiffEditor, false, 'useDiffEditor should default to false');
-
-    sm.setUseDiffEditor(true);
-    assert.strictEqual(sm.useDiffEditor, true);
+    // The inline-forced diff editor is the default review surface (it shows removed
+    // baseline lines in red, which the inline-decorations surface cannot).
+    assert.strictEqual(sm.useDiffEditor, true, 'useDiffEditor should default to true');
 
     sm.setUseDiffEditor(false);
     assert.strictEqual(sm.useDiffEditor, false);
+
+    sm.setUseDiffEditor(true);
+    assert.strictEqual(sm.useDiffEditor, true);
   });
 
-  test('showInlineDecorations setting persists and defaults to true', async () => {
+  test('showInlineDecorations setting persists and defaults to false', async () => {
     await enableReview();
     const sm = getStateManager();
-    assert.strictEqual(sm.showInlineDecorations, true, 'showInlineDecorations should default to true');
-
-    sm.setShowInlineDecorations(false);
-    assert.strictEqual(sm.showInlineDecorations, false);
+    assert.strictEqual(sm.showInlineDecorations, false, 'showInlineDecorations should default to false');
 
     sm.setShowInlineDecorations(true);
     assert.strictEqual(sm.showInlineDecorations, true);
+
+    sm.setShowInlineDecorations(false);
+    assert.strictEqual(sm.showInlineDecorations, false);
   });
 
   // ── textDocuments scheme filtering ────────────────────────────────────────
@@ -104,6 +106,37 @@ suite('interactive-review diff editor integration', function () {
       const remaining = computeHunks(updated.baseline, doc.getText());
       assert.ok(remaining.length < hunks.length, 'Hunk count should decrease after accept');
     }
+  });
+
+  test('file stays in the panel while its review diff is open (baseline-doc scheme collision)', async () => {
+    // Regression: when a review diff is open, the baseline side is a document with the
+    // SAME fsPath but scheme 'interactive-review-baseline'. buildPanelState's unfiltered
+    // textDocuments.find() grabbed that baseline doc, so computeHunks(baseline, baseline)
+    // returned 0 hunks and the file silently vanished from the panel — which, with the
+    // diff editor as the default surface, made whole multi-file review queues disappear.
+    const filePath = await setupReviewingFile(
+      'panel-scheme.txt',
+      'line 1\nline 2\nline 3\n',
+      'line 1\nCHANGED\nline 3\n'
+    );
+
+    const panel = getReviewPanel();
+    assert.ok(panel, 'review panel should be available');
+
+    // Before opening a diff, the file is listed.
+    let listed = panel.panelStateForTest().files.some((f: any) => f.filePath === filePath);
+    assert.ok(listed, 'file should be listed in the panel before any diff opens');
+
+    // Open the review diff, creating the same-fsPath baseline document in textDocuments.
+    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
+    const currentUri = vscode.Uri.file(filePath);
+    await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, 'test diff');
+    await sleep(500);
+
+    // The file must STILL be listed, with its pending hunks intact.
+    const entry = panel.panelStateForTest().files.find((f: any) => f.filePath === filePath);
+    assert.ok(entry, 'file must remain in the panel while its review diff is open');
+    assert.ok(entry.pendingCount > 0, 'file should still report pending hunks (not 0 from the baseline doc)');
   });
 
   // ── closeStaleTabs ────────────────────────────────────────────

@@ -51,6 +51,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     if (stateManager.reviewComplete) {
       reviewStatusBar.text = '$(check-all) Review complete';
       reviewStatusBar.tooltip = 'All changes reviewed';
+      // Bright accent so the item reads at a glance instead of the dull default
+      // foreground. `charts.*` are vivid, theme-aware colors defined in every theme.
+      reviewStatusBar.color = new vscode.ThemeColor('charts.green');
       reviewStatusBar.show();
       return;
     }
@@ -58,6 +61,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     if (n > 0) {
       reviewStatusBar.text = `$(git-compare) ${n} file${n === 1 ? '' : 's'} to review`;
       reviewStatusBar.tooltip = 'Interactive Review — pending changes';
+      reviewStatusBar.color = new vscode.ThemeColor('charts.blue');
       reviewStatusBar.show();
       return;
     }
