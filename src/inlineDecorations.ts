@@ -64,6 +64,9 @@ export class InlineDecorations {
       if (hunk.newLines === 0) continue; // pure removal — no added lines to highlight
       const start = Math.max(0, hunk.newStart - 1);
       const end = start + hunk.newLines - 1;
+      // Columns are intentionally 0: addedType is isWholeLine, so every line the
+      // range touches (start..end inclusive) is highlighted in full regardless of
+      // column. No need to extend end to the last line's length.
       ranges.push(new vscode.Range(start, 0, end, 0));
     }
     editor.setDecorations(this.addedType, ranges);

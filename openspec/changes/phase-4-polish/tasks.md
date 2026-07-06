@@ -11,11 +11,11 @@
 ## 2. Partial-hunk actions (`partial-hunk-actions`)
 
 - [x] 2.1 Add range-scoped resolution in `src/diffEngine.ts`: given a hunk + a line range, split into applied vs remaining added lines (`splitHunkByRange`)
-- [ ] 2.2 Implement `acceptSelection` in `src/commands.ts` — fold only the selected added lines into the baseline, leave the rest pending (deferred partial-accept follow-up)
+- [x] 2.2 Implement `acceptSelection` in `src/commands.ts` — fold only the selected added lines into the baseline, leave the rest pending
 - [x] 2.3 Implement `rejectSelection` — revert only the selected added lines to baseline; fall back to whole-hunk reject for pure-removal hunks
-- [x] 2.4 Recompute hunks after a partial action; reuse the shared `applyEditAndAdvance` (counts/status/advance/exit stay correct) — done for the reject path
-- [x] 2.5 Register `interactiveReview.rejectSelection` command + keybindings — `acceptSelection` still pending with 2.2
-- [x] 2.6 Integration tests: partial reject of a mixed hunk; selection spanning a hunk boundary; partial reject completing the file (`partialReject.test.ts`) — partial-accept test pending with 2.2
+- [x] 2.4 Recompute hunks after a partial action; reject path reuses the shared `applyEditAndAdvance`, accept path recomputes/advances/exits inline (counts/status/advance/exit stay correct)
+- [x] 2.5 Register `interactiveReview.rejectSelection` + `interactiveReview.acceptSelection` commands + keybindings
+- [x] 2.6 Integration tests: partial reject (`partialReject.test.ts`) and partial accept (`partialAccept.test.ts`) — mixed hunk, hunk-boundary spans, multi-hunk selection, pure-removal fallback, context-only no-op, file-completing action
 
 ## 3. Inline decorations surface (`inline-decorations-surface`)
 
