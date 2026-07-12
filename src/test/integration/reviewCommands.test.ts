@@ -11,8 +11,8 @@ import {
 // ── Test suite ────────────────────────────────────────────────────────────────
 //
 // Keyboard-driven review commands resolve their target from the active editor and
-// cursor position (keybindings carry no arguments). useDiffEditor defaults false, so
-// the target is the normal editor.
+// cursor position (keybindings carry no arguments). The target is the diff editor's
+// modified side, a file-scheme editor for the reviewing file.
 
 suite('interactive-review keyboard commands', function () {
   this.timeout(30000);

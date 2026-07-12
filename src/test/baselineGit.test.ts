@@ -360,7 +360,7 @@ describe('BaselineGit', () => {
     it('round-trips settings', () => {
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings2-'));
       const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
-      g2.saveSettings({ ignorePatterns: ['node_modules', 'dist'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 60, useDiffEditor: false, showInlineDecorations: true });
+      g2.saveSettings({ ignorePatterns: ['node_modules', 'dist'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 60 });
       const s = g2.loadSettings();
       assert.deepEqual(s.ignorePatterns, ['node_modules', 'dist']);
       assert.equal(s.respectGitignore, false);
@@ -371,7 +371,7 @@ describe('BaselineGit', () => {
     it('round-trips quoteRotationInterval set to 0', () => {
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings-qri0-'));
       const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
-      g2.saveSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 0, useDiffEditor: false, showInlineDecorations: true });
+      g2.saveSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 0 });
       const s = g2.loadSettings();
       assert.equal(s.quoteRotationInterval, 0);
       fs.rmSync(dir2, { recursive: true, force: true });
@@ -380,7 +380,7 @@ describe('BaselineGit', () => {
     it('round-trips quoteRotationInterval with custom value', () => {
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-settings-qri-'));
       const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
-      g2.saveSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 30, useDiffEditor: false, showInlineDecorations: true });
+      g2.saveSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 30 });
       const s = g2.loadSettings();
       assert.equal(s.quoteRotationInterval, 30);
       fs.rmSync(dir2, { recursive: true, force: true });
@@ -410,7 +410,7 @@ describe('BaselineGit', () => {
         JSON.stringify({ ignorePatterns: ['dist'] }),
         'utf-8'
       );
-      const merged = g2.mergeDefaultSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 30, useDiffEditor: false, showInlineDecorations: true });
+      const merged = g2.mergeDefaultSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 30 });
       // Existing value preserved
       assert.deepEqual(merged.ignorePatterns, ['dist']);
       // Missing fields filled from defaults
@@ -422,8 +422,8 @@ describe('BaselineGit', () => {
     it('mergeDefaultSettings preserves all existing fields', () => {
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-merge2-'));
       const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
-      g2.saveSettings({ ignorePatterns: ['custom'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 30, useDiffEditor: false, showInlineDecorations: true });
-      const merged = g2.mergeDefaultSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 60, useDiffEditor: false, showInlineDecorations: true });
+      g2.saveSettings({ ignorePatterns: ['custom'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 30 });
+      const merged = g2.mergeDefaultSettings({ ignorePatterns: ['.git'], respectGitignore: true, clearOnBranchSwitch: false, quoteRotationInterval: 60 });
       assert.deepEqual(merged.ignorePatterns, ['custom']);
       assert.equal(merged.respectGitignore, false);
       assert.equal(merged.quoteRotationInterval, 30);
@@ -448,7 +448,7 @@ describe('BaselineGit', () => {
       const hDir = path.join(dir2, '.vscode', 'interactive-review');
       const g2 = new BaselineGit(hDir, dir2);
       await g2.initGit();
-      g2.saveSettings({ ignorePatterns: ['dist'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 60, useDiffEditor: false, showInlineDecorations: true });
+      g2.saveSettings({ ignorePatterns: ['dist'], respectGitignore: false, clearOnBranchSwitch: false, quoteRotationInterval: 60 });
       g2.destroyGit();
       assert.ok(fs.existsSync(path.join(hDir, 'settings.json')));
       fs.rmSync(dir2, { recursive: true, force: true });

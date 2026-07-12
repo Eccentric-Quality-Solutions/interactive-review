@@ -21,8 +21,6 @@ and reworked to run on **stable VS Code APIs only** (no proposed APIs).
 - **Inline diff review surface (default).** The native diff editor, forced to unified/inline
   rendering, shows removed (red) and added (green) lines in place with per-hunk
   `Accept`/`Discard` CodeLens.
-- **In-file decorations surface (optional).** A decorations-only mode
-  (`showInlineDecorations`) as an alternative to the diff editor.
 - **File-level actions.** Approve or revert a whole file from the title bar, the review
   panel, or a keybinding.
 - **Cross-file auto-advance.** Resolving a file's last hunk opens the next reviewing file at

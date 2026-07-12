@@ -9,11 +9,10 @@ import {
   activeReviewTarget, hunkAtCursor, neighbourHunk, revealHunk,
 } from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
-import { InlineDecorations } from './inlineDecorations';
 import { hunkId, computeHunks } from './diffEngine';
 import { initLog, log } from './log';
 
-export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined; getInlineDecorations: () => InlineDecorations }> {
+export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
   initLog();
   const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   log(`activate v${ext?.packageJSON?.version ?? '?'}`);
@@ -36,8 +35,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
 
   let reviewPanel: ReviewPanel | undefined;
   let diffCodeLensProvider: DiffCodeLensProvider | undefined;
-  const inlineDecorations = new InlineDecorations(stateManager);
-  context.subscriptions.push(inlineDecorations);
 
   // Status bar: surfaces "N to review" while walking the queue and "Review complete"
   // as the terminal closure state (the review-flow model's whole point). Clicking it
@@ -83,7 +80,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     stateManager.noteReviewActivity();
     reviewPanel?.refresh();
     diffCodeLensProvider?.fire();
-    inlineDecorations.refresh();
     updateStatusBar();
     updateInReviewContext();
   }
@@ -161,17 +157,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   context.subscriptions.push(
     vscode.window.onDidChangeVisibleTextEditors(() => {
       diffCodeLensProvider?.fire();
-      inlineDecorations.refresh();
     }),
     vscode.window.onDidChangeActiveTextEditor(() => {
       diffCodeLensProvider?.fire();
-      inlineDecorations.refresh();
       updateInReviewContext();
     }),
     vscode.workspace.onDidChangeTextDocument(e => {
       if (e.document.uri.scheme !== 'file') return;
       reviewPanel?.refresh();
-      inlineDecorations.refresh();
     }),
   );
 
@@ -192,29 +185,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
       discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
-    }),
-    // Decorations surface: peek the baseline lines a hunk removed. Decorations
-    // can't render removed content inline on stable APIs, so we open a peek widget
-    // anchored at the hunk pointing into the baseline virtual document.
-    vscode.commands.registerCommand('interactiveReview.showRemovedLines', async (filePath: string, hId: string) => {
-      const fileState = stateManager.getFile(filePath);
-      if (!fileState) return;
-      const currentUri = vscode.Uri.file(filePath);
-      const editor = vscode.window.visibleTextEditors.find(
-        e => e.document.uri.scheme === 'file' && e.document.uri.fsPath === filePath
-      );
-      if (!editor) return;
-      const hunk = computeHunks(fileState.baseline, editor.document.getText()).find(h => hunkId(h) === hId);
-      if (!hunk || hunk.oldLines === 0) return;
-
-      const baselineUri = currentUri.with({ scheme: 'interactive-review-baseline' });
-      // Baseline removed lines occupy 0-based lines [oldStart-1 .. oldStart-1+oldLines).
-      const removedStart = Math.max(0, hunk.oldStart - 1);
-      const removedRange = new vscode.Range(removedStart, 0, removedStart + hunk.oldLines, 0);
-      const location = new vscode.Location(baselineUri, removedRange);
-      // Anchor the peek at the hunk position in the current file.
-      const anchor = new vscode.Position(Math.max(0, hunk.newStart - 1), 0);
-      await vscode.commands.executeCommand('editor.action.peekLocations', currentUri, anchor, [location], 'peek');
     }),
   );
 
@@ -404,6 +374,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
 
     if (lastHead !== undefined) {
       let headWatcher: fs.FSWatcher | undefined;
+      // Serialize branch-switch handling. A rebase / rapid checkouts change HEAD
+      // several times in quick succession; running clearHunksOnBranchSwitch calls
+      // concurrently would race on state, and resuming after the FIRST finished
+      // (while a later one is still rewriting baselines) would let git-checkout file
+      // events surface as false "reviewing" entries. Chain the clears and only
+      // resume once the last pending switch completes.
+      let branchSwitchPending = 0;
+      let branchSwitchChain: Promise<void> = Promise.resolve();
       const startHeadWatch = () => {
         headWatcher?.close();
         headWatcher = undefined;
@@ -420,16 +398,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
               lastHead = currentHead;
               log(`branch switched → suppressing file watcher and clearing hunks`);
               fileWatcher.suppressAll();
-              stateManager.clearHunksOnBranchSwitch(
-                (fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)
-              ).then(() => {
-                fileWatcher.resumeAll();
-                onStateChanged();
-              }).catch((err) => {
-                log(`clearHunksOnBranchSwitch error: ${err}`);
-                fileWatcher.resumeAll();
-                onStateChanged();
-              });
+              branchSwitchPending++;
+              branchSwitchChain = branchSwitchChain
+                .then(() => stateManager.clearHunksOnBranchSwitch(
+                  (fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)
+                ))
+                .catch((err) => { log(`clearHunksOnBranchSwitch error: ${err}`); })
+                .finally(() => {
+                  // Only resume once every queued switch has drained, so late
+                  // git-checkout events never arrive while suppression is off.
+                  if (--branchSwitchPending === 0) {
+                    fileWatcher.resumeAll();
+                    onStateChanged();
+                  }
+                });
             }
           });
         } catch (err) { log(`HEAD watch failed: ${err}`); }
@@ -443,7 +425,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   activeReviewPanel = reviewPanel;
   activeFileWatcher = fileWatcher;
 
-  return { getReviewPanel, getStateManager, getFileWatcher, getInlineDecorations: () => inlineDecorations };
+  return { getReviewPanel, getStateManager, getFileWatcher };
 }
 
 let activeStateManager: StateManager | undefined;

@@ -137,6 +137,11 @@ export class FileWatcher {
     // since VSCode silently reloads a clean open buffer to match an external write,
     // making buffer==disk true for BOTH a user save and an AI edit to an open file.
     const saveListener = vscode.workspace.onDidSaveTextDocument(doc => {
+      // Only record while enabled: when disabled, onDiskChange early-returns before
+      // consuming, so tokens would never be reclaimed. The listener lives for the whole
+      // extension lifetime (register() runs once at activation), so without this guard
+      // every save would retain the file's full content even for users who never enable.
+      if (!this.stateManager.enabled) return;
       if (doc.uri.scheme !== 'file') return;
       this.pendingManualSaves.set(normalizePath(doc.uri.fsPath), doc.getText());
     });
@@ -448,7 +453,13 @@ export class FileWatcher {
     if (!this.stateManager.enabled) return;
 
     if (this.shouldIgnore(filePath)) { log(`onDiskChange(${basename}): ignored, skip`); return; }
-    if (this.selfEditFiles.has(filePath)) { log(`onDiskChange(${basename}): self-edit, skip`); return; }
+    if (this.selfEditFiles.has(filePath)) {
+      // The extension's own write (accept/reject) — its save fired onDidSaveTextDocument
+      // too, so drop any pending token here rather than stranding the file's full content.
+      this.pendingManualSaves.delete(filePath);
+      log(`onDiskChange(${basename}): self-edit, skip`);
+      return;
+    }
 
     let diskContent: string;
     try {
@@ -457,6 +468,11 @@ export class FileWatcher {
       log(`onDiskChange(${basename}): read failed, skip`);
       return;
     }
+
+    // Resolve the save token now, before any early-return, so every branch below reclaims
+    // it (a reviewing-file save would otherwise strand the file's full content for the
+    // whole session). The result is only acted on in the manual-save branch.
+    const wasManualSave = this.consumeManualSave(filePath, diskContent);
 
     const fileState = this.stateManager.getFile(filePath);
 
@@ -474,7 +490,7 @@ export class FileWatcher {
     // baseline, no hunk. Gated on the save EVENT (onDidSaveTextDocument), not on the
     // open buffer matching disk: VSCode silently reloads a clean open buffer to match
     // an external write, so buffer==disk is true even for an AI edit to an open file.
-    if (this.consumeManualSave(filePath, diskContent)) {
+    if (wasManualSave) {
       log(`onDiskChange(${basename}): matched VSCode save, snapshot as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;

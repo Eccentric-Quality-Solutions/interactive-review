@@ -6,17 +6,21 @@ explicit "review complete" state. Built for the workflow where an AI agent (or a
 has just changed a batch of files and you want to go through them deliberately, the way
 Cursor's classic review flow feels.
 
-It works with **any** source of changes — an AI assistant, a script, or your own edits —
+It works with **any** tool that writes your files — an AI assistant, a script, a formatter —
 because it diffs against a private baseline snapshot rather than hooking into a specific
-tool. Runs on **stable VS Code APIs only** (no proposed APIs), so it installs on stable VS
-Code without Insiders or `argv.json` flags.
+tool. (Edits you make and save by hand in VS Code are folded into the baseline silently, not
+queued for review — only out-of-band writes are surfaced.) Runs on **stable VS Code APIs
+only** (no proposed APIs).
+
+NOTE: **Interactive Review is a fork of [hunkwise](https://github.com/molon/hunkwise) by
+[molon](https://github.com/molon)** (MIT-licensed). The coolest stuff are molon's work, the bugs I claim as my own.
 
 ## Status
 
 Early development. The single-file review loop (baseline → per-hunk `Accept`/`Discard`
 CodeLens in a native diff editor → baseline update) works today, along with the
 bounded-changeset flow (cross-file auto-advance and an explicit review-complete state). See
-[`design.md`](design.md) for the architecture and phased plan.
+[`docs/design.md`](docs/design.md) for the architecture and phased plan.
 
 ## Install
 
@@ -37,7 +41,9 @@ don't hot-reload, so re-run the package + install + reload steps after pulling c
 1. **Enable** — Command Palette → *Interactive Review: Enable*. This snapshots a private
    baseline of your working tree; every later change is diffed against it, no matter what
    made the change.
-2. **Make edits** — let an AI agent, a script, or you change files.
+2. **Make edits** — let an AI agent, a script, or a formatter change files. (Edits you type
+   and save by hand are adopted into the baseline silently, so they won't appear in the
+   queue.)
 3. **Walk the queue** — the **Interactive Review** panel (bottom panel, alongside Terminal
    and Problems) lists every changed file. Click a file or hunk to open it.
 
@@ -60,7 +66,7 @@ selection actions work on messy hunks where you want only *some* of the added li
 folds the selected added lines into the baseline (the rest stay pending), reject deletes
 them. When the last hunk across all files is resolved, the panel shows **review complete**.
 
-> **Heads-up:** while enabled on the diff-editor surface, the extension sets the *global* VS
+> **Heads-up:** while enabled, the extension sets the *global* VS
 > Code settings `diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` so
 > review diffs render inline with visible Accept/Discard buttons. VS Code has no per-diff
 > override for these, so the change also affects your **other** (git, manual) diffs. Flip
@@ -68,12 +74,8 @@ them. When the last hunk across all files is resolved, the panel shows **review 
 
 ### Settings
 
-Open the panel's **gear** icon. Notable option:
-
-- **Open diff editor from panel** (default *on*) — the inline-diff surface above. Turn it
-  *off* to review with in-editor decorations instead: added lines are highlighted in place,
-  and removed lines are reachable via a *"Show N removed lines"* peek (stable VS Code APIs
-  can't render deleted lines inline in a normal editor).
+Open the panel's **gear** icon for exclude patterns, gitignore handling, branch-switch
+behavior, and the quote-rotation interval.
 
 Settings persist in `.vscode/interactive-review/` **per workspace**, not in your VS Code
 `settings.json`. One consequence: changing a default in code only affects workspaces
@@ -113,8 +115,9 @@ What this fork changes:
   and renamed the command / view / URI-scheme / state-directory ids — and the internal
   identifiers — accordingly (e.g. hunkwise's `HunkwiseGit` baseline-git module is now
   `BaselineGit`).
-- **In progress:** a bounded *changeset* state machine (turn boundary + auto-advance +
-  review-complete) — the piece hunkwise's continuous, unbounded monitor does not have.
+- **Added a bounded *changeset* state machine** (turn boundary + cross-file auto-advance +
+  an explicit review-complete state) — the piece hunkwise's continuous, unbounded monitor
+  does not have.
 
 Both the original work and these modifications are under the MIT License — see
 [`LICENSE`](LICENSE), which retains molon's copyright notice as required.

@@ -32,9 +32,9 @@ the wedge.
 
 **Known stable-path limitation:** you cannot float buttons or render a deleted-lines block
 *inside the normal editor* without `editorInsets`. Mitigation: use the **native diff editor**
-as the primary review surface (removed lines shown natively there); optionally offer a
-decorations-only "in-file" mode for added-line highlighting where removed content is viewed via
-peek. Accept this as the cost of shippability.
+as the review surface (removed lines shown natively there). Accept this as the cost of
+shippability. *(An optional decorations-only "in-file" mode existed briefly but was removed
+as unused — see §4e.)*
 
 ## 3. Layer B — the changeset state machine (the core work)
 
@@ -235,9 +235,13 @@ un-accept) the MVP doesn't have. Revisit only if a concrete feature demands it. 
 ## 4e. Primary surface — RESOLVED (2026-07-05): inline diff editor by default
 
 Settled by **dogfooding on this repo** (multi-file agent edits, reviewed live). The native
-diff editor, **forced to inline/unified rendering**, is now the default review surface:
-`useDiffEditor` defaults `true`, `showInlineDecorations` defaults `false`
-([baselineGit.ts](src/baselineGit.ts) `DEFAULT_SETTINGS`).
+diff editor, **forced to inline/unified rendering**, is the review surface.
+
+**Update (2026-07-12): decorations surface removed entirely.** The optional in-file
+decorations surface (and its `useDiffEditor` / `showInlineDecorations` settings, the
+`InlineDecorations` module, and the `showRemovedLines` peek) went unused and was deleted.
+The diff editor is now the *only* surface — no toggle. The rationale below is retained as
+the record of why the diff editor won.
 
 **Why.** The decorations-only surface *cannot show removed lines inline* on stable APIs — it
 highlights added lines in place and hides removed content behind a *"Show N removed lines"*

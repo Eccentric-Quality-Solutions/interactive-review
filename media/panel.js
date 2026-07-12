@@ -1,14 +1,14 @@
 // @ts-check
 /** @type {{ postMessage: (msg: unknown) => void, getState: () => unknown, setState: (state: unknown) => void }} */
 const vscode = /** @type {any} */ (globalThis).acquireVsCodeApi();
-const app = document.getElementById('app');
+const app = document.getElementById("app");
 
-/** @type {{ enabled: boolean, ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean, totalFiles: number, totalAdded: number, totalRemoved: number, files: any[] } | null} */
+/** @type {{ enabled: boolean, ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean, totalFiles: number, totalAdded: number, totalRemoved: number, files: any[], reviewComplete: boolean } | null} */
 let currentState = null;
 /** @type {Set<string>} */
 const expandedFiles = new Set();
 /** @type {'main' | 'settings'} */
-let view = 'main';
+let view = "main";
 /** Track whether we are currently in loading state, so the next update can fade in */
 let isLoading = false;
 
@@ -62,12 +62,14 @@ let idleFadeTimer = null;
 /** Last quote index, to avoid immediate repeat */
 let lastQuoteIndex = -1;
 /** Current displayed quote — persists across re-renders so refresh doesn't reset it */
-let currentQuote = '';
+let currentQuote = "";
 
 /** Pick a new random quote (different from last) and store it */
 function pickNewQuote() {
   let idx;
-  do { idx = Math.floor(Math.random() * SPLASH_QUOTES.length); } while (idx === lastQuoteIndex);
+  do {
+    idx = Math.floor(Math.random() * SPLASH_QUOTES.length);
+  } while (idx === lastQuoteIndex);
   lastQuoteIndex = idx;
   currentQuote = SPLASH_QUOTES[idx];
   return currentQuote;
@@ -81,8 +83,14 @@ function getOrPickQuote() {
 }
 
 function clearIdleTimers() {
-  if (idleCycleTimer !== null) { clearTimeout(idleCycleTimer); idleCycleTimer = null; }
-  if (idleFadeTimer !== null) { clearTimeout(idleFadeTimer); idleFadeTimer = null; }
+  if (idleCycleTimer !== null) {
+    clearTimeout(idleCycleTimer);
+    idleCycleTimer = null;
+  }
+  if (idleFadeTimer !== null) {
+    clearTimeout(idleFadeTimer);
+    idleFadeTimer = null;
+  }
 }
 
 /**
@@ -105,35 +113,37 @@ function el(tag, cls, text) {
  * @returns {HTMLButtonElement}
  */
 function btn(label, cls, onClick) {
-  const b = /** @type {HTMLButtonElement} */ (document.createElement('button'));
+  const b = /** @type {HTMLButtonElement} */ (document.createElement("button"));
   b.textContent = label;
   if (cls) b.className = cls;
-  b.addEventListener('click', e => { e.stopPropagation(); onClick(); });
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClick();
+  });
   return b;
 }
 
-
 /** @param {HTMLElement} parent */
 function appendIcon(parent) {
-  const wrap = el('div', 'splash-icon');
+  const wrap = el("div", "splash-icon");
   wrap.innerHTML = ICON_SVG;
   parent.appendChild(wrap);
 }
 
 /**
- * @param {{ enabled: boolean, ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean, totalFiles: number, totalAdded: number, totalRemoved: number, files: any[] }} state
+ * @param {{ enabled: boolean, ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean, totalFiles: number, totalAdded: number, totalRemoved: number, files: any[], reviewComplete: boolean }} state
  */
 function render(state) {
   if (!app) return;
   clearIdleTimers();
-  app.innerHTML = '';
+  app.innerHTML = "";
 
   if (!state.enabled) {
     renderSetupScreen();
     return;
   }
 
-  if (view === 'settings') {
+  if (view === "settings") {
     renderSettingsScreen(state);
     return;
   }
@@ -154,38 +164,40 @@ function render(state) {
 
 function renderCompleteScreen() {
   if (!app) return;
-  const screen = el('div', 'splash-screen');
-  const badge = el('div', 'complete-badge');
-  badge.textContent = '✓';
+  const screen = el("div", "splash-screen");
+  const badge = el("div", "complete-badge");
+  badge.textContent = "✓";
   screen.appendChild(badge);
-  screen.appendChild(el('p', 'splash-tagline', 'Review complete'));
-  screen.appendChild(el('p', 'complete-subtitle', 'All changes reviewed.'));
+  screen.appendChild(el("p", "splash-tagline", "Review complete"));
+  screen.appendChild(el("p", "complete-subtitle", "All changes reviewed."));
   app.appendChild(screen);
 }
 
 function renderSetupScreen() {
   if (!app) return;
-  const screen = el('div', 'splash-screen');
+  const screen = el("div", "splash-screen");
   appendIcon(screen);
-  screen.appendChild(el('p', 'splash-tagline', getOrPickQuote()));
-  screen.appendChild(btn('Enable for this project', 'btn-primary', () => {
-    vscode.postMessage({ command: 'enable' });
-  }));
+  screen.appendChild(el("p", "splash-tagline", getOrPickQuote()));
+  screen.appendChild(
+    btn("Enable for this project", "btn-primary", () => {
+      vscode.postMessage({ command: "enable" });
+    }),
+  );
   app.appendChild(screen);
 }
 
-const IDLE_CYCLE_FADE = 600;    // ms fade transition
+const IDLE_CYCLE_FADE = 600; // ms fade transition
 
 /**
  * @param {number} quoteRotationInterval minutes; 0 = no rotation
  */
 function renderIdleScreen(quoteRotationInterval) {
   if (!app) return;
-  const screen = el('div', 'splash-screen');
+  const screen = el("div", "splash-screen");
   appendIcon(screen);
 
-  const textBox = el('div', 'splash-textbox');
-  const cycleEl = el('p', 'splash-tagline splash-cycle');
+  const textBox = el("div", "splash-textbox");
+  const cycleEl = el("p", "splash-tagline splash-cycle");
   cycleEl.textContent = getOrPickQuote();
   textBox.appendChild(cycleEl);
   screen.appendChild(textBox);
@@ -199,10 +211,10 @@ function renderIdleScreen(quoteRotationInterval) {
     const intervalMs = quoteRotationInterval * 60 * 1000;
     function scheduleNext() {
       idleCycleTimer = setTimeout(() => {
-        cycleEl.classList.add('splash-cycle-fade');
+        cycleEl.classList.add("splash-cycle-fade");
         idleFadeTimer = setTimeout(() => {
           cycleEl.textContent = pickNewQuote();
-          cycleEl.classList.remove('splash-cycle-fade');
+          cycleEl.classList.remove("splash-cycle-fade");
           idleFadeTimer = null;
           scheduleNext();
         }, IDLE_CYCLE_FADE);
@@ -213,156 +225,182 @@ function renderIdleScreen(quoteRotationInterval) {
 }
 
 /**
- * @param {{ ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean }} state
+ * @param {{ ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number }} state
  */
 function renderSettingsScreen(state) {
   if (!app) return;
 
   // Header with back button
-  const header = el('div', 'settings-header');
-  const backBtn = btn('← Back', 'btn-back', () => {
-    view = 'main';
+  const header = el("div", "settings-header");
+  const backBtn = btn("← Back", "btn-back", () => {
+    view = "main";
     if (currentState) render(currentState);
   });
   header.appendChild(backBtn);
-  header.appendChild(el('span', 'settings-header-title', 'Settings'));
+  header.appendChild(el("span", "settings-header-title", "Settings"));
   app.appendChild(header);
 
-  const body = el('div', 'settings-body');
+  const body = el("div", "settings-body");
 
   // ── Respect .gitignore ──
-  const gitignoreSection = el('div', 'settings-section');
-  gitignoreSection.appendChild(el('div', 'settings-section-title', 'Git Integration'));
+  const gitignoreSection = el("div", "settings-section");
+  gitignoreSection.appendChild(
+    el("div", "settings-section-title", "Git Integration"),
+  );
 
-  const checkRow = el('label', 'settings-check-row');
-  checkRow.appendChild(el('span', 'settings-check-label', 'Respect .gitignore'));
-  const checkDescRow = el('div', 'settings-check-desc-row');
-  const checkbox = /** @type {HTMLInputElement} */ (document.createElement('input'));
-  checkbox.type = 'checkbox';
-  checkbox.className = 'settings-checkbox';
+  const checkRow = el("label", "settings-check-row");
+  checkRow.appendChild(
+    el("span", "settings-check-label", "Respect .gitignore"),
+  );
+  const checkDescRow = el("div", "settings-check-desc-row");
+  const checkbox = /** @type {HTMLInputElement} */ (
+    document.createElement("input")
+  );
+  checkbox.type = "checkbox";
+  checkbox.className = "settings-checkbox";
   checkbox.checked = state.respectGitignore;
-  checkbox.addEventListener('change', () => {
-    vscode.postMessage({ command: 'setRespectGitignore', value: checkbox.checked });
+  checkbox.addEventListener("change", () => {
+    vscode.postMessage({
+      command: "setRespectGitignore",
+      value: checkbox.checked,
+    });
   });
   checkDescRow.appendChild(checkbox);
-  checkDescRow.appendChild(el('span', 'settings-check-desc', 'Skip files already ignored by your project\'s .gitignore'));
+  checkDescRow.appendChild(
+    el(
+      "span",
+      "settings-check-desc",
+      "Skip files already ignored by your project's .gitignore",
+    ),
+  );
   checkRow.appendChild(checkDescRow);
   gitignoreSection.appendChild(checkRow);
 
   // Clear on branch switch
-  const branchRow = el('label', 'settings-check-row');
-  branchRow.appendChild(el('span', 'settings-check-label', 'Clear hunks on branch switch'));
-  const branchDescRow = el('div', 'settings-check-desc-row');
-  const branchCheckbox = /** @type {HTMLInputElement} */ (document.createElement('input'));
-  branchCheckbox.type = 'checkbox';
-  branchCheckbox.className = 'settings-checkbox';
+  const branchRow = el("label", "settings-check-row");
+  branchRow.appendChild(
+    el("span", "settings-check-label", "Clear hunks on branch switch"),
+  );
+  const branchDescRow = el("div", "settings-check-desc-row");
+  const branchCheckbox = /** @type {HTMLInputElement} */ (
+    document.createElement("input")
+  );
+  branchCheckbox.type = "checkbox";
+  branchCheckbox.className = "settings-checkbox";
   branchCheckbox.checked = state.clearOnBranchSwitch;
-  branchCheckbox.addEventListener('change', () => {
-    vscode.postMessage({ command: 'setClearOnBranchSwitch', value: branchCheckbox.checked });
+  branchCheckbox.addEventListener("change", () => {
+    vscode.postMessage({
+      command: "setClearOnBranchSwitch",
+      value: branchCheckbox.checked,
+    });
   });
   branchDescRow.appendChild(branchCheckbox);
-  branchDescRow.appendChild(el('span', 'settings-check-desc', 'Automatically clear pending hunks when you switch branches'));
+  branchDescRow.appendChild(
+    el(
+      "span",
+      "settings-check-desc",
+      "Automatically clear pending hunks when you switch branches",
+    ),
+  );
   branchRow.appendChild(branchDescRow);
   gitignoreSection.appendChild(branchRow);
 
   // ── Appearance ──
-  const appearanceSection = el('div', 'settings-section');
-  appearanceSection.appendChild(el('div', 'settings-section-title', 'Appearance'));
+  const appearanceSection = el("div", "settings-section");
+  appearanceSection.appendChild(
+    el("div", "settings-section-title", "Appearance"),
+  );
 
-  const rotationRow = el('div', 'settings-input-row');
-  const rotationLabel = el('div', 'settings-check-text');
-  rotationLabel.appendChild(el('span', 'settings-check-label', 'Quote rotation interval (minutes)'));
-  rotationLabel.appendChild(el('span', 'settings-check-desc', 'Rotate idle screen quotes at this interval. Set to 0 to disable.'));
+  const rotationRow = el("div", "settings-input-row");
+  const rotationLabel = el("div", "settings-check-text");
+  rotationLabel.appendChild(
+    el("span", "settings-check-label", "Quote rotation interval (minutes)"),
+  );
+  rotationLabel.appendChild(
+    el(
+      "span",
+      "settings-check-desc",
+      "Rotate idle screen quotes at this interval. Set to 0 to disable.",
+    ),
+  );
   rotationRow.appendChild(rotationLabel);
-  const rotationInput = /** @type {HTMLInputElement} */ (document.createElement('input'));
-  rotationInput.type = 'number';
-  rotationInput.className = 'settings-number-input';
-  rotationInput.min = '0';
+  const rotationInput = /** @type {HTMLInputElement} */ (
+    document.createElement("input")
+  );
+  rotationInput.type = "number";
+  rotationInput.className = "settings-number-input";
+  rotationInput.min = "0";
   rotationInput.value = String(state.quoteRotationInterval);
-  rotationInput.addEventListener('change', () => {
+  rotationInput.addEventListener("change", () => {
     const val = parseInt(rotationInput.value, 10);
     if (!isNaN(val) && val >= 0) {
-      vscode.postMessage({ command: 'setQuoteRotationInterval', value: val });
+      vscode.postMessage({ command: "setQuoteRotationInterval", value: val });
     }
   });
   rotationRow.appendChild(rotationInput);
 
-  // Show inline decorations
-  const inlineDecRow = el('label', 'settings-check-row');
-  inlineDecRow.appendChild(el('span', 'settings-check-label', 'Show inline decorations'));
-  const inlineDecDescRow = el('div', 'settings-check-desc-row');
-  const inlineDecCheckbox = /** @type {HTMLInputElement} */ (document.createElement('input'));
-  inlineDecCheckbox.type = 'checkbox';
-  inlineDecCheckbox.className = 'settings-checkbox';
-  inlineDecCheckbox.checked = state.showInlineDecorations;
-  inlineDecCheckbox.addEventListener('change', () => {
-    vscode.postMessage({ command: 'setShowInlineDecorations', value: inlineDecCheckbox.checked });
-  });
-  inlineDecDescRow.appendChild(inlineDecCheckbox);
-  inlineDecDescRow.appendChild(el('span', 'settings-check-desc', 'Show Accept/Discard buttons and diff highlights inline in the editor'));
-  inlineDecRow.appendChild(inlineDecDescRow);
-  appearanceSection.appendChild(inlineDecRow);
-
-  // Open diff editor from panel
-  const diffEditorRow = el('label', 'settings-check-row');
-  diffEditorRow.appendChild(el('span', 'settings-check-label', 'Open diff editor from panel'));
-  const diffEditorDescRow = el('div', 'settings-check-desc-row');
-  const diffEditorCheckbox = /** @type {HTMLInputElement} */ (document.createElement('input'));
-  diffEditorCheckbox.type = 'checkbox';
-  diffEditorCheckbox.className = 'settings-checkbox';
-  diffEditorCheckbox.checked = state.useDiffEditor;
-  diffEditorCheckbox.addEventListener('change', () => {
-    vscode.postMessage({ command: 'setUseDiffEditor', value: diffEditorCheckbox.checked });
-  });
-  diffEditorDescRow.appendChild(diffEditorCheckbox);
-  diffEditorDescRow.appendChild(el('span', 'settings-check-desc', 'Clicking files or hunks in the panel opens a diff view (baseline vs current) instead of the inline editor'));
-  diffEditorRow.appendChild(diffEditorDescRow);
-  appearanceSection.appendChild(diffEditorRow);
   appearanceSection.appendChild(rotationRow);
 
   // ── Exclude Patterns ──
-  const patternSection = el('div', 'settings-section');
-  patternSection.appendChild(el('div', 'settings-section-title', 'Exclude Patterns'));
-  patternSection.appendChild(el('p', 'settings-section-desc', 'gitignore-style patterns to exclude from change tracking (relative to workspace root).'));
+  const patternSection = el("div", "settings-section");
+  patternSection.appendChild(
+    el("div", "settings-section-title", "Exclude Patterns"),
+  );
+  patternSection.appendChild(
+    el(
+      "p",
+      "settings-section-desc",
+      "gitignore-style patterns to exclude from change tracking (relative to workspace root).",
+    ),
+  );
 
-  const patternList = el('div', 'pattern-list');
+  const patternList = el("div", "pattern-list");
 
   // Protected system rule — always enforced, cannot be removed
-  const protectedRow = el('div', 'pattern-row-inner pattern-row-protected');
-  protectedRow.appendChild(el('span', 'pattern-text', '.vscode/interactive-review'));
-  protectedRow.appendChild(el('span', 'pattern-lock', '🔒'));
+  const protectedRow = el("div", "pattern-row-inner pattern-row-protected");
+  protectedRow.appendChild(
+    el("span", "pattern-text", ".vscode/interactive-review"),
+  );
+  protectedRow.appendChild(el("span", "pattern-lock", "🔒"));
   patternList.appendChild(protectedRow);
 
   for (const folder of state.ignorePatterns) {
-    const inner = el('div', 'pattern-row-inner');
-    const folderEl = el('span', 'pattern-text', folder);
-    const delBtn = el('button', 'pattern-del', '');
-    delBtn.title = 'Remove';
-    delBtn.addEventListener('click', e => {
+    const inner = el("div", "pattern-row-inner");
+    const folderEl = el("span", "pattern-text", folder);
+    const delBtn = el("button", "pattern-del", "");
+    delBtn.title = "Remove";
+    delBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const newFolders = state.ignorePatterns.filter(f => f !== folder);
-      vscode.postMessage({ command: 'setIgnorePatterns', folders: newFolders });
+      const newFolders = state.ignorePatterns.filter((f) => f !== folder);
+      vscode.postMessage({ command: "setIgnorePatterns", folders: newFolders });
     });
     inner.appendChild(folderEl);
     inner.appendChild(delBtn);
     patternList.appendChild(inner);
   }
 
-  const addRow = el('div', 'pattern-add-row');
-  const addInput = /** @type {HTMLInputElement} */ (document.createElement('input'));
-  addInput.type = 'text';
-  addInput.className = 'pattern-input';
-  addInput.placeholder = 'e.g. node_modules';
-  const addBtn = el('button', 'pattern-add-btn', 'Add');
-  addBtn.addEventListener('click', e => {
+  const addRow = el("div", "pattern-add-row");
+  const addInput = /** @type {HTMLInputElement} */ (
+    document.createElement("input")
+  );
+  addInput.type = "text";
+  addInput.className = "pattern-input";
+  addInput.placeholder = "e.g. node_modules";
+  const addBtn = el("button", "pattern-add-btn", "Add");
+  addBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     const val = addInput.value.trim();
     if (val && !state.ignorePatterns.includes(val)) {
-      vscode.postMessage({ command: 'setIgnorePatterns', folders: [...state.ignorePatterns, val] });
+      vscode.postMessage({
+        command: "setIgnorePatterns",
+        folders: [...state.ignorePatterns, val],
+      });
     }
-    addInput.value = '';
+    addInput.value = "";
   });
-  addInput.addEventListener('keydown', e => { if (e.key === 'Enter') addBtn.click(); });
+  addInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addBtn.click();
+  });
   addRow.appendChild(addInput);
   addRow.appendChild(addBtn);
   patternList.appendChild(addRow);
@@ -372,12 +410,22 @@ function renderSettingsScreen(state) {
   body.appendChild(gitignoreSection);
 
   // ── Disable ──
-  const disableSection = el('div', 'settings-section settings-section-danger');
-  disableSection.appendChild(el('div', 'settings-section-title', 'Danger Zone'));
-  disableSection.appendChild(el('p', 'settings-section-desc', 'Disables Interactive Review and clears all tracked state for this project.'));
-  disableSection.appendChild(btn('Disable Interactive Review', 'btn-disable', () => {
-    vscode.postMessage({ command: 'disable' });
-  }));
+  const disableSection = el("div", "settings-section settings-section-danger");
+  disableSection.appendChild(
+    el("div", "settings-section-title", "Danger Zone"),
+  );
+  disableSection.appendChild(
+    el(
+      "p",
+      "settings-section-desc",
+      "Disables Interactive Review and clears all tracked state for this project.",
+    ),
+  );
+  disableSection.appendChild(
+    btn("Disable Interactive Review", "btn-disable", () => {
+      vscode.postMessage({ command: "disable" });
+    }),
+  );
   body.appendChild(disableSection);
 
   app.appendChild(body);
@@ -389,26 +437,44 @@ function renderSettingsScreen(state) {
  * @returns {string}
  */
 function extColor(fileName) {
-  const ext = (fileName.split('.').pop() ?? '').toLowerCase();
+  const ext = (fileName.split(".").pop() ?? "").toLowerCase();
   /** @type {Record<string,string>} */
   const m = {
-    ts:'#3178c6',tsx:'#3178c6',
-    js:'#d4a017',jsx:'#d4a017',mjs:'#d4a017',
-    json:'#d4a017',
-    py:'#3572A5',
-    go:'#00add8',
-    rs:'#dea584',
-    java:'#b07219',kt:'#a97bff',
-    rb:'#cc342d',php:'#4f5d95',cs:'#178600',
-    cpp:'#f34b7d',c:'#a8a8a8',h:'#a8a8a8',
-    html:'#e34c26',htm:'#e34c26',
-    css:'#563d7c',scss:'#c6538c',less:'#1d365d',
-    md:'#4a90d9',mdx:'#4a90d9',
-    yaml:'#cb171e',yml:'#cb171e',toml:'#9c4221',
-    sh:'#89e051',bash:'#89e051',
-    swift:'#F05138',vue:'#41b883',svelte:'#ff3e00',dart:'#00B4AB',
+    ts: "#3178c6",
+    tsx: "#3178c6",
+    js: "#d4a017",
+    jsx: "#d4a017",
+    mjs: "#d4a017",
+    json: "#d4a017",
+    py: "#3572A5",
+    go: "#00add8",
+    rs: "#dea584",
+    java: "#b07219",
+    kt: "#a97bff",
+    rb: "#cc342d",
+    php: "#4f5d95",
+    cs: "#178600",
+    cpp: "#f34b7d",
+    c: "#a8a8a8",
+    h: "#a8a8a8",
+    html: "#e34c26",
+    htm: "#e34c26",
+    css: "#563d7c",
+    scss: "#c6538c",
+    less: "#1d365d",
+    md: "#4a90d9",
+    mdx: "#4a90d9",
+    yaml: "#cb171e",
+    yml: "#cb171e",
+    toml: "#9c4221",
+    sh: "#89e051",
+    bash: "#89e051",
+    swift: "#F05138",
+    vue: "#41b883",
+    svelte: "#ff3e00",
+    dart: "#00B4AB",
   };
-  return m[ext] ?? '#6e7681';
+  return m[ext] ?? "#6e7681";
 }
 
 /**
@@ -417,9 +483,10 @@ function extColor(fileName) {
  * @returns {HTMLElement}
  */
 function fileIconBadge(fileName) {
-  const ext = (fileName.split('.').pop() ?? '').toLowerCase();
-  const abbr = ext.length <= 3 ? ext.toUpperCase() : ext.slice(0,3).toUpperCase();
-  const badge = el('span', 'file-badge', abbr);
+  const ext = (fileName.split(".").pop() ?? "").toLowerCase();
+  const abbr =
+    ext.length <= 3 ? ext.toUpperCase() : ext.slice(0, 3).toUpperCase();
+  const badge = el("span", "file-badge", abbr);
   badge.style.background = extColor(fileName);
   return badge;
 }
@@ -431,15 +498,27 @@ function renderReviewScreen(state) {
   if (!app) return;
 
   // Summary header
-  const header = el('div', 'review-header');
-  const summary = el('div', 'review-summary');
-  summary.appendChild(document.createTextNode(`${state.totalFiles} file${state.totalFiles > 1 ? 's' : ''} `));
-  summary.appendChild(el('span', 'stat-added', `+${state.totalAdded}`));
-  summary.appendChild(document.createTextNode(' '));
-  summary.appendChild(el('span', 'stat-removed', `-${state.totalRemoved}`));
-  const actions = el('div', 'review-actions');
-  actions.appendChild(btn('✓ Accept', 'btn-review-accept', () => vscode.postMessage({ command: 'acceptAll' })));
-  actions.appendChild(btn('↺ Discard', 'btn-review-discard', () => vscode.postMessage({ command: 'discardAll' })));
+  const header = el("div", "review-header");
+  const summary = el("div", "review-summary");
+  summary.appendChild(
+    document.createTextNode(
+      `${state.totalFiles} file${state.totalFiles > 1 ? "s" : ""} `,
+    ),
+  );
+  summary.appendChild(el("span", "stat-added", `+${state.totalAdded}`));
+  summary.appendChild(document.createTextNode(" "));
+  summary.appendChild(el("span", "stat-removed", `-${state.totalRemoved}`));
+  const actions = el("div", "review-actions");
+  actions.appendChild(
+    btn("✓ Accept", "btn-review-accept", () =>
+      vscode.postMessage({ command: "acceptAll" }),
+    ),
+  );
+  actions.appendChild(
+    btn("↺ Discard", "btn-review-discard", () =>
+      vscode.postMessage({ command: "discardAll" }),
+    ),
+  );
   header.appendChild(summary);
   header.appendChild(actions);
   app.appendChild(header);
@@ -455,15 +534,18 @@ function renderReviewScreen(state) {
 function renderFileGroup(file) {
   const isSpecial = file.isNew || file.isDeleted;
   const isExpanded = !isSpecial && expandedFiles.has(file.filePath);
-  const group = el('div', 'file-group');
+  const group = el("div", "file-group");
 
-  const fileRow = el('div', 'file-row');
-  fileRow.addEventListener('click', () => {
+  const fileRow = el("div", "file-row");
+  fileRow.addEventListener("click", () => {
     if (isSpecial) {
       if (file.isDeleted) {
-        vscode.postMessage({ command: 'openDeletedDiff', filePath: file.filePath });
+        vscode.postMessage({
+          command: "openDeletedDiff",
+          filePath: file.filePath,
+        });
       } else {
-        vscode.postMessage({ command: 'openFile', filePath: file.filePath });
+        vscode.postMessage({ command: "openFile", filePath: file.filePath });
       }
       return;
     }
@@ -472,38 +554,53 @@ function renderFileGroup(file) {
     } else {
       expandedFiles.add(file.filePath);
       if (file.hunks.length > 0) {
-        vscode.postMessage({ command: 'jumpToHunk', filePath: file.filePath, hunkId: file.hunks[0].id });
+        vscode.postMessage({
+          command: "jumpToHunk",
+          filePath: file.filePath,
+          hunkId: file.hunks[0].id,
+        });
       }
     }
     if (currentState) render(currentState);
   });
 
-  const chevron = isSpecial ? el('span', 'file-chevron', '') : el('span', 'file-chevron', isExpanded ? '▼' : '▶');
+  const chevron = isSpecial
+    ? el("span", "file-chevron", "")
+    : el("span", "file-chevron", isExpanded ? "▼" : "▶");
   const fileIcon = fileIconBadge(file.fileName);
-  const name = el('span', 'file-name', file.fileName);
+  const name = el("span", "file-name", file.fileName);
   if (!isSpecial) {
-    name.classList.add('file-name-link');
-    name.addEventListener('click', (e) => {
+    name.classList.add("file-name-link");
+    name.addEventListener("click", (e) => {
       e.stopPropagation();
-      vscode.postMessage({ command: 'openFile', filePath: file.filePath });
+      vscode.postMessage({ command: "openFile", filePath: file.filePath });
     });
   }
-  const badge = file.isNew ? el('span', 'file-status-badge file-status-new', 'new')
-    : file.isDeleted ? el('span', 'file-status-badge file-status-deleted', 'deleted')
-    : null;
-  const dir = file.dirName ? el('span', 'file-dir', file.dirName) : null;
+  const badge = file.isNew
+    ? el("span", "file-status-badge file-status-new", "new")
+    : file.isDeleted
+      ? el("span", "file-status-badge file-status-deleted", "deleted")
+      : null;
+  const dir = file.dirName ? el("span", "file-dir", file.dirName) : null;
 
-  const right = el('div', 'file-right');
-  const stats = el('div', 'file-stats');
-  if (file.addedLines > 0) stats.appendChild(el('span', 'stat-added', `+${file.addedLines}`));
-  if (file.addedLines > 0 && file.removedLines > 0) stats.appendChild(document.createTextNode(' '));
-  if (file.removedLines > 0) stats.appendChild(el('span', 'stat-removed', `-${file.removedLines}`));
+  const right = el("div", "file-right");
+  const stats = el("div", "file-stats");
+  if (file.addedLines > 0)
+    stats.appendChild(el("span", "stat-added", `+${file.addedLines}`));
+  if (file.addedLines > 0 && file.removedLines > 0)
+    stats.appendChild(document.createTextNode(" "));
+  if (file.removedLines > 0)
+    stats.appendChild(el("span", "stat-removed", `-${file.removedLines}`));
 
-  const fileActions = el('div', 'file-actions');
-  const keepBtn = btn('✓', 'btn-action btn-action-keep', () => vscode.postMessage({ command: 'acceptFile', filePath: file.filePath }));
-  keepBtn.title = 'Accept all changes';
-  const undoBtn = btn('↺', 'btn-action btn-action-discard', () => vscode.postMessage({ command: 'discardFile', filePath: file.filePath }));
-  undoBtn.title = 'Discard all changes';
+  const fileActions = el("div", "file-actions");
+  const keepBtn = btn("✓", "btn-action btn-action-keep", () =>
+    vscode.postMessage({ command: "acceptFile", filePath: file.filePath }),
+  );
+  keepBtn.title = "Accept all changes";
+  const undoBtn = btn("↺", "btn-action btn-action-discard", () =>
+    vscode.postMessage({ command: "discardFile", filePath: file.filePath }),
+  );
+  undoBtn.title = "Discard all changes";
   fileActions.appendChild(keepBtn);
   fileActions.appendChild(undoBtn);
 
@@ -519,22 +616,38 @@ function renderFileGroup(file) {
   group.appendChild(fileRow);
 
   if (isExpanded) {
-    const hunkList = el('div', 'hunk-list');
+    const hunkList = el("div", "hunk-list");
     for (const hunk of file.hunks) {
-      const hunkRow = el('div', 'hunk-row');
-      hunkRow.addEventListener('click', () => {
-        vscode.postMessage({ command: 'jumpToHunk', filePath: hunk.filePath, hunkId: hunk.id });
+      const hunkRow = el("div", "hunk-row");
+      hunkRow.addEventListener("click", () => {
+        vscode.postMessage({
+          command: "jumpToHunk",
+          filePath: hunk.filePath,
+          hunkId: hunk.id,
+        });
       });
-      const label = el('span', 'hunk-label', `@line ${hunk.newStart}`);
-      const hunkStats = el('div', 'hunk-stats');
-      hunkStats.appendChild(el('span', 'stat-added', `+${hunk.newLines}`));
-      hunkStats.appendChild(document.createTextNode(' '));
-      hunkStats.appendChild(el('span', 'stat-removed', `-${hunk.oldLines}`));
-      const hunkActions = el('div', 'hunk-actions');
-      const hk = btn('✓', 'btn-action btn-action-keep', () => vscode.postMessage({ command: 'acceptHunk', filePath: hunk.filePath, hunkId: hunk.id }));
-      hk.title = 'Accept hunk';
-      const hu = btn('↺', 'btn-action btn-action-discard', () => vscode.postMessage({ command: 'discardHunk', filePath: hunk.filePath, hunkId: hunk.id }));
-      hu.title = 'Discard hunk';
+      const label = el("span", "hunk-label", `@line ${hunk.newStart}`);
+      const hunkStats = el("div", "hunk-stats");
+      hunkStats.appendChild(el("span", "stat-added", `+${hunk.newLines}`));
+      hunkStats.appendChild(document.createTextNode(" "));
+      hunkStats.appendChild(el("span", "stat-removed", `-${hunk.oldLines}`));
+      const hunkActions = el("div", "hunk-actions");
+      const hk = btn("✓", "btn-action btn-action-keep", () =>
+        vscode.postMessage({
+          command: "acceptHunk",
+          filePath: hunk.filePath,
+          hunkId: hunk.id,
+        }),
+      );
+      hk.title = "Accept hunk";
+      const hu = btn("↺", "btn-action btn-action-discard", () =>
+        vscode.postMessage({
+          command: "discardHunk",
+          filePath: hunk.filePath,
+          hunkId: hunk.id,
+        }),
+      );
+      hu.title = "Discard hunk";
       hunkActions.appendChild(hk);
       hunkActions.appendChild(hu);
       hunkRow.appendChild(label);
@@ -548,35 +661,35 @@ function renderFileGroup(file) {
   return group;
 }
 
-window.addEventListener('message', event => {
+window.addEventListener("message", (event) => {
   const msg = event.data;
-  if (msg.type === 'loading') {
+  if (msg.type === "loading") {
     if (!app) return;
     if (msg.loading) {
       isLoading = true;
-      app.innerHTML = '';
-      const screen = el('div', 'splash-screen');
-      screen.appendChild(el('p', 'splash-tagline', 'Initializing…'));
+      app.innerHTML = "";
+      const screen = el("div", "splash-screen");
+      screen.appendChild(el("p", "splash-tagline", "Initializing…"));
       app.appendChild(screen);
     }
-  } else if (msg.type === 'update') {
+  } else if (msg.type === "update") {
     currentState = msg.state;
-    if (!msg.state.enabled) view = 'main';
+    if (!msg.state.enabled) view = "main";
     if (isLoading && app) {
       isLoading = false;
       // Render hidden first, then fade in
-      app.classList.add('fade-hidden');
+      app.classList.add("fade-hidden");
       render(msg.state);
       // Force a reflow so the transition fires
       void app.offsetWidth;
-      app.classList.remove('fade-hidden');
+      app.classList.remove("fade-hidden");
     } else {
       render(msg.state);
     }
-  } else if (msg.type === 'openSettings') {
-    view = 'settings';
+  } else if (msg.type === "openSettings") {
+    view = "settings";
     if (currentState) render(currentState);
   }
 });
 
-vscode.postMessage({ command: 'ready' });
+vscode.postMessage({ command: "ready" });

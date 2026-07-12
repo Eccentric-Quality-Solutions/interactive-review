@@ -11,8 +11,6 @@ interface Settings {
   respectGitignore: boolean;
   clearOnBranchSwitch: boolean;
   quoteRotationInterval: number;
-  useDiffEditor: boolean;
-  showInlineDecorations: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -20,11 +18,6 @@ const DEFAULT_SETTINGS: Settings = {
   respectGitignore: true,
   clearOnBranchSwitch: false,
   quoteRotationInterval: 30,
-  // The diff editor (forced to inline/unified rendering) is the default review
-  // surface: it shows removed baseline lines in red above the added lines in
-  // green, which the stable-API inline-decorations surface cannot do.
-  useDiffEditor: true,
-  showInlineDecorations: false,
 };
 
 /**
@@ -96,12 +89,6 @@ export class BaselineGit {
         quoteRotationInterval: (typeof parsed.quoteRotationInterval === 'number' && Number.isFinite(parsed.quoteRotationInterval) && parsed.quoteRotationInterval >= 0)
           ? parsed.quoteRotationInterval
           : DEFAULT_SETTINGS.quoteRotationInterval,
-        useDiffEditor: typeof parsed.useDiffEditor === 'boolean'
-          ? parsed.useDiffEditor
-          : DEFAULT_SETTINGS.useDiffEditor,
-        showInlineDecorations: typeof parsed.showInlineDecorations === 'boolean'
-          ? parsed.showInlineDecorations
-          : DEFAULT_SETTINGS.showInlineDecorations,
       };
     } catch {
       return { ...DEFAULT_SETTINGS, ignorePatterns: [...DEFAULT_SETTINGS.ignorePatterns] };
@@ -197,6 +184,10 @@ export class BaselineGit {
           { env: this.env },
           (err, stdout) => (err ? reject(err) : resolve(stdout.trim()))
         );
+        // Writing to git's stdin can emit EPIPE if git exits early. Without this
+        // listener Node rethrows it as an uncaught exception and crashes the host
+        // (the try/catch below can't see an unhandled stream 'error' event).
+        child.stdin!.on('error', reject);
         child.stdin!.end(content, 'utf-8');
       });
       await this.git(['update-index', '--add', '--cacheinfo', `100644,${hash},${rel}`]);
@@ -289,6 +280,9 @@ export class BaselineGit {
               { env: this.env },
               (err, stdout) => (err ? reject(err) : resolve({ rel, hash: stdout.trim() }))
             );
+            // Guard against an uncaught EPIPE crashing the host if git exits early;
+            // routes the stream error into the promise so the try/catch handles it.
+            child.stdin!.on('error', reject);
             child.stdin!.end(content, 'utf-8');
           })
         )

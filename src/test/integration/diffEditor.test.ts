@@ -44,34 +44,6 @@ suite('interactive-review diff editor integration', function () {
     return filePath;
   }
 
-  // ── useDiffEditor setting ──────────────────────────────────────────────────
-
-  test('useDiffEditor setting persists and defaults to true', async () => {
-    await enableReview();
-    const sm = getStateManager();
-    // The inline-forced diff editor is the default review surface (it shows removed
-    // baseline lines in red, which the inline-decorations surface cannot).
-    assert.strictEqual(sm.useDiffEditor, true, 'useDiffEditor should default to true');
-
-    sm.setUseDiffEditor(false);
-    assert.strictEqual(sm.useDiffEditor, false);
-
-    sm.setUseDiffEditor(true);
-    assert.strictEqual(sm.useDiffEditor, true);
-  });
-
-  test('showInlineDecorations setting persists and defaults to false', async () => {
-    await enableReview();
-    const sm = getStateManager();
-    assert.strictEqual(sm.showInlineDecorations, false, 'showInlineDecorations should default to false');
-
-    sm.setShowInlineDecorations(true);
-    assert.strictEqual(sm.showInlineDecorations, true);
-
-    sm.setShowInlineDecorations(false);
-    assert.strictEqual(sm.showInlineDecorations, false);
-  });
-
   // ── textDocuments scheme filtering ────────────────────────────────────────
 
   test('acceptHunk finds doc by file scheme even when baseline doc exists', async () => {
@@ -210,9 +182,6 @@ suite('interactive-review diff editor integration', function () {
       'line 1\n',
       'changed line 1\n'
     );
-    // Diff surface, so the decorations surface is inactive.
-    getStateManager().setUseDiffEditor(true);
-
     // Open a stray normal editor (no diff tab) — no CodeLens expected on the diff surface.
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     await vscode.window.showTextDocument(doc);
@@ -220,23 +189,5 @@ suite('interactive-review diff editor integration', function () {
 
     assert.strictEqual((await reviewLensesFor(filePath)).length, 0,
       'no interactive-review CodeLens in a stray normal editor on the diff surface');
-  });
-
-  test('decorations surface: per-hunk CodeLens appear on the normal editor (parity)', async () => {
-    const filePath = await setupReviewingFile(
-      'codelens-decorations.txt',
-      'line 1\n',
-      'changed line 1\n'
-    );
-    // Decorations surface: the normal editor is the review surface.
-    getStateManager().setUseDiffEditor(false);
-    getStateManager().setShowInlineDecorations(true);
-
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-    await vscode.window.showTextDocument(doc);
-    await sleep(300);
-
-    assert.strictEqual((await reviewLensesFor(filePath)).length, 2,
-      'accept + discard CodeLens render on the normal editor in decorations mode');
   });
 });

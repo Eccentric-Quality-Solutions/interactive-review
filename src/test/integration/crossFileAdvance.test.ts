@@ -11,8 +11,9 @@ import { acceptFileByPath } from '../../commands';
 // ── Test suite ────────────────────────────────────────────────────────────────
 //
 // Cross-file advance: resolving a file's last hunk auto-opens the next reviewing
-// file, so the whole changeset walks as one queue. Uses the normal-editor surface
-// (useDiffEditor defaults false), so the advanced-to file becomes the active editor.
+// file, so the whole changeset walks as one queue. The advanced-to file is opened
+// in the diff editor, whose modified side is a file-scheme editor for that path, so
+// it becomes the active editor.
 
 suite('interactive-review cross-file advance', function () {
   this.timeout(30000);
