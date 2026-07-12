@@ -39,6 +39,12 @@ function prefixGitignoreRules(content: string, prefix: string): string {
 export class FileWatcher {
   private disposables: vscode.Disposable[] = [];
   private selfEditFiles: Set<string> = new Set();
+  // Content VSCode itself just saved (manual save or auto-save), keyed by path.
+  // A disk change whose content matches a pending save is a user save → absorbed
+  // into the baseline. Anything else is an external/AI write → surfaced for review.
+  // This replaces the old buffer-match heuristic, which VSCode's silent reload of
+  // clean open buffers made unreliable (see docs/terminal-edits-not-captured.md).
+  private pendingManualSaves: Map<string, string> = new Map();
   // Files being deleted by the user via VSCode (explorer / applyEdit)
   private pendingUserDeletes: Set<string> = new Set();
   // Old paths of in-progress user renames — suppress onDiskDelete without extra git ops
@@ -125,6 +131,17 @@ export class FileWatcher {
     });
     this.disposables.push(docChange);
 
+    // Record every VSCode-initiated save (manual Ctrl+S AND all auto-save modes) so
+    // onDiskChange/onDiskCreate can tell a user save from an external write by event
+    // provenance rather than by comparing buffer content — the only reliable signal,
+    // since VSCode silently reloads a clean open buffer to match an external write,
+    // making buffer==disk true for BOTH a user save and an AI edit to an open file.
+    const saveListener = vscode.workspace.onDidSaveTextDocument(doc => {
+      if (doc.uri.scheme !== 'file') return;
+      this.pendingManualSaves.set(normalizePath(doc.uri.fsPath), doc.getText());
+    });
+    this.disposables.push(saveListener);
+
     context.subscriptions.push(...this.disposables);
   }
 
@@ -210,6 +227,20 @@ export class FileWatcher {
   /** Resume file-system event handling after branch switch completes. */
   resumeAll(): void {
     this._suppressed = false;
+  }
+
+  /**
+   * Consume-once check: did VSCode itself just save exactly `diskContent` to `filePath`?
+   * Returns true only when a pending save is recorded for the path AND its content matches
+   * the bytes now on disk, then clears the token. Exact match (not normalized) is deliberate:
+   * a mismatch falls through to the review path (safe — at worst a spurious hunk on your own
+   * save), whereas a loose match risks absorbing a genuine external edit (silent data loss).
+   */
+  private consumeManualSave(filePath: string, diskContent: string): boolean {
+    const saved = this.pendingManualSaves.get(filePath);
+    if (saved === undefined) return false;
+    this.pendingManualSaves.delete(filePath);
+    return saved === diskContent;
   }
 
   markSelfEdit(filePath: string): void {
@@ -307,16 +338,10 @@ export class FileWatcher {
       return;
     }
 
-    // Check if this was a manual create in VSCode (editor buffer matches disk).
-    // Filter by scheme: a review diff's baseline side shares this fsPath.
-    const openDoc = vscode.workspace.textDocuments.find(
-      d => d.uri.scheme === 'file' && normalizePath(d.uri.fsPath) === filePath
-    );
-    const bufferMatch = openDoc ? openDoc.getText() === diskContent : false;
-    log(`onDiskCreate(${basename}): openDoc=${!!openDoc}, bufferMatch=${bufferMatch}`);
-    if (openDoc && bufferMatch) {
-      // User created/saved this file in VSCode — snapshot as baseline, no hunk
-      log(`onDiskCreate(${basename}): buffer matches disk, snapshot as baseline`);
+    // Was this file just saved by VSCode itself (user created + saved a new file)?
+    // Gated on the save event, not buffer==disk — same reasoning as onDiskChange.
+    if (this.consumeManualSave(filePath, diskContent)) {
+      log(`onDiskCreate(${basename}): matched VSCode save, snapshot as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
     }
@@ -418,16 +443,18 @@ export class FileWatcher {
 
   private async onDiskChange(uri: vscode.Uri): Promise<void> {
     const filePath = normalizePath(uri.fsPath);
+    const basename = path.basename(filePath);
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
 
-    if (this.shouldIgnore(filePath)) return;
-    if (this.selfEditFiles.has(filePath)) return;
+    if (this.shouldIgnore(filePath)) { log(`onDiskChange(${basename}): ignored, skip`); return; }
+    if (this.selfEditFiles.has(filePath)) { log(`onDiskChange(${basename}): self-edit, skip`); return; }
 
     let diskContent: string;
     try {
       diskContent = await fs.promises.readFile(filePath, 'utf-8');
     } catch {
+      log(`onDiskChange(${basename}): read failed, skip`);
       return;
     }
 
@@ -435,20 +462,20 @@ export class FileWatcher {
 
     if (fileState?.status === 'reviewing') {
       // Already has diff — recompute against known baseline
+      log(`onDiskChange(${basename}): reviewing, recompute hunks`);
       this.recomputeHunks(filePath, fileState.baseline, diskContent);
       return;
     }
 
     const git = this.stateManager.git;
-    if (!git) return;
+    if (!git) { log(`onDiskChange(${basename}): no git, skip`); return; }
 
-    // Check if this was a manual save in VSCode (editor buffer matches disk).
-    // Filter by scheme: a review diff's baseline side shares this fsPath.
-    const openDoc = vscode.workspace.textDocuments.find(
-      d => d.uri.scheme === 'file' && normalizePath(d.uri.fsPath) === filePath
-    );
-    if (openDoc && openDoc.getText() === diskContent) {
-      // User saved in VSCode — accept into baseline, no hunk
+    // A VSCode-initiated save (manual or auto) of exactly this content — absorb into
+    // baseline, no hunk. Gated on the save EVENT (onDidSaveTextDocument), not on the
+    // open buffer matching disk: VSCode silently reloads a clean open buffer to match
+    // an external write, so buffer==disk is true even for an AI edit to an open file.
+    if (this.consumeManualSave(filePath, diskContent)) {
+      log(`onDiskChange(${basename}): matched VSCode save, snapshot as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
     }
@@ -464,9 +491,14 @@ export class FileWatcher {
       // Genuine new files created while interactive-review is running are caught by onDidCreate,
       // not this path. This is intentionally consistent with syncIgnoreState's toAdd
       // behavior which also silently snapshots.
+      // KNOWN GAP (Cause B): if an external CREATE was missed and only this CHANGE fired,
+      // the edit is silently absorbed here with no review hunk. See
+      // docs/terminal-edits-not-captured.md §5. Logged loudly so it is findable.
+      log(`onDiskChange(${basename}): external change but NO baseline — silently adopting as baseline (Cause B; edit will NOT be reviewed)`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
     }
+    log(`onDiskChange(${basename}): external change, enterReviewing`);
     this.enterReviewing(filePath, gitBaseline, diskContent);
   }
 
@@ -525,6 +557,7 @@ export class FileWatcher {
       clearTimeout(timer);
     }
     this.debounceTimers.clear();
+    this.pendingManualSaves.clear();
     this.pendingUserDeletes.clear();
     this.pendingRenameOldPaths.clear();
     this.disposables.forEach(d => d.dispose());

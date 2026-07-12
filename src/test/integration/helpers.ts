@@ -109,6 +109,21 @@ export async function disableReview(): Promise<void> {
   await sleep(100);
 }
 
+/** Open a file in a real editor tab and return the editor (buffer is clean). */
+export async function openDocInEditor(filePath: string): Promise<vscode.TextEditor> {
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  await sleep(100);
+  return editor;
+}
+
+/** The open file-scheme TextDocument for a path, if any. */
+export function findOpenDoc(filePath: string): vscode.TextDocument | undefined {
+  return vscode.workspace.textDocuments.find(
+    d => d.uri.scheme === 'file' && d.uri.fsPath === filePath
+  );
+}
+
 export function writeFileExternally(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, 'utf-8');
@@ -172,16 +187,6 @@ export function getFileWatcher(): any {
   const api = ext.exports;
   if (api && typeof api.getFileWatcher === 'function') {
     return api.getFileWatcher();
-  }
-  return undefined;
-}
-
-export function getInlineDecorations(): any {
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  if (!ext || !ext.isActive) return undefined;
-  const api = ext.exports;
-  if (api && typeof api.getInlineDecorations === 'function') {
-    return api.getInlineDecorations();
   }
   return undefined;
 }
