@@ -16,8 +16,15 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
   }
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    if (document.uri.scheme !== 'file') return [];
     if (!this.stateManager.enabled) return [];
+
+    // A deleted file's modified side is an empty `interactive-review-deleted` doc
+    // (no `file`-scheme doc for the hunk lenses below), so file-level Accept/Restore
+    // actions are rendered there instead — see provideDeletedFileLenses.
+    if (document.uri.scheme === 'interactive-review-deleted') {
+      return this.provideDeletedFileLenses(document);
+    }
+    if (document.uri.scheme !== 'file') return [];
 
     const fileState = this.stateManager.getFile(document.uri.fsPath);
     if (!fileState || fileState.status !== 'reviewing') return [];
@@ -53,6 +60,51 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
     }
 
     return lenses;
+  }
+
+  /**
+   * File-level Accept/Restore actions for a deleted file, anchored to the top of
+   * the empty modified side of its diff. That URI is
+   * `vscode.Uri.file(filePath).with({ scheme: 'interactive-review-deleted' })`, so
+   * `.fsPath` is the real file path. Only rendered when the file is genuinely
+   * deleted (tracked, missing on disk) and its deleted diff is the active tab.
+   */
+  private provideDeletedFileLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    const fsPath = document.uri.fsPath;
+    const fileState = this.stateManager.getFile(fsPath);
+    if (!fileState || fileState.status !== 'reviewing') return [];
+    // Deleted = had a baseline but no longer on disk (see StateManager.isDeleted).
+    // A null baseline is a *new* file and an existing file is an ordinary edit.
+    if (!this.stateManager.isDeleted(fsPath)) return [];
+    if (!this.isActiveDeletedReviewTab(fsPath)) return [];
+
+    const range = new vscode.Range(0, 0, 0, 0);
+    return [
+      new vscode.CodeLens(range, {
+        title: '$(check) Accept deletion',
+        command: 'interactiveReview.codeLensAcceptFile',
+        arguments: [fsPath],
+      }),
+      new vscode.CodeLens(range, {
+        title: '$(discard) Restore file',
+        command: 'interactiveReview.codeLensRestoreFile',
+        arguments: [fsPath],
+      }),
+    ];
+  }
+
+  private isActiveDeletedReviewTab(fsPath: string): boolean {
+    for (const group of vscode.window.tabGroups.all) {
+      const active = group.activeTab;
+      if (active?.input instanceof vscode.TabInputTextDiff) {
+        if (active.input.original.scheme === 'interactive-review-baseline'
+          && active.input.original.fsPath === fsPath
+          && active.input.modified.scheme === 'interactive-review-deleted') {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private hasVisibleNormalEditor(uri: vscode.Uri): boolean {

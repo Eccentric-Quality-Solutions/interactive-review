@@ -23,12 +23,12 @@
   "contributes": {
     "commands": [
       {
-        "command": "interactiveReview.enable",
-        "title": "Interactive Review: Enable"
+        "command": "interactiveReview.beginReview",
+        "title": "Interactive Review: Begin review"
       },
       {
-        "command": "interactiveReview.disable",
-        "title": "Interactive Review: Disable"
+        "command": "interactiveReview.endReview",
+        "title": "Interactive Review: End review"
       },
       {
         "command": "interactiveReview.openSettings",

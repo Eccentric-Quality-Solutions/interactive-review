@@ -15,6 +15,22 @@ export function hunkId(hunk: ParsedHunk): string {
   return `${hunk.newStart}:${hunk.newLines}:${hunk.oldStart}:${hunk.oldLines}`;
 }
 
+/**
+ * Resolve the pending hunk a 1-based document line falls into, else the first hunk starting
+ * at/after that line, else undefined (the line sits past every hunk). `newLines` is floored
+ * to 1 so a pure-removal hunk (newLines === 0) still occupies its anchor line.
+ *
+ * The single source of truth for "which hunk does this line resolve to", shared by the
+ * cursor-driven (`hunkAtCursor`) and selection-driven (`acceptSelection`/`rejectSelection`)
+ * commands. Callers that must always land on a hunk fall back to `hunks[0]` themselves —
+ * that fallback is intentionally *not* baked in here, since selection commands treat
+ * "past every hunk" as a skip rather than wrapping to the first hunk.
+ */
+export function hunkAtLine(hunks: ParsedHunk[], line1Based: number): ParsedHunk | undefined {
+  return hunks.find(h => line1Based >= h.newStart && line1Based < h.newStart + Math.max(1, h.newLines))
+    ?? hunks.find(h => h.newStart >= line1Based);
+}
+
 export interface HunkRangeSplit {
   hasAddedInRange: boolean;
   addedStartIdx: number; // inclusive index into hunk.addedContent

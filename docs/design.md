@@ -302,14 +302,45 @@ The insight: when *you* save, the open buffer equals what just hit disk. When an
 **Known fragility — the reload race.** VS Code **silently reloads a saved/clean open document when its file changes on disk** (reload prompt only for *dirty* buffers). This is the standing default: a request to prompt for clean files too ([microsoft/vscode#50472](https://github.com/microsoft/vscode/issues/50472)) was closed as a duplicate without changing the behavior. So if an agent writes to a file you have open and unmodified, two things race: VS Code's silent buffer reload
 vs. our `onDiskChange` reading `openDoc.getText()`. If the reload wins, the buffer already equals disk → the agent's edit is misread as a user save and folded into the baseline (**missed from review**). In practice `onDiskChange` usually wins (external AI edits are observed to surface reliably), but it is a genuine latent race. If it ever bites, the fix is to capture buffer content at the *start* of the debounce / compare against a pre-change snapshot rather than the possibly-reloaded live buffer — not attempted yet (no observed failure).
 
-## 4g. Phase 4 — status (2026-07-05): DONE
+## 4g. Phase 4 — status (updated 2026-08-09): DONE pending a manual UI pass
 
-The polish phase's four pieces all shipped: **keyboard-driven review** (`Alt+A/R`,
-`Alt+N/P`) with cursor-resolved accept/reject and whole-hunk **accept/reject symmetry**
-(`0ed0e58`); **partial-hunk reject over a line selection** (`dc09183`); an **in-file
-decorations** review surface (`3548dd4`, since demoted from default by §4e); and now the
-final gap — **partial-hunk accept** (`acceptSelection`, `Alt+Shift+A`), the symmetric
-counterpart of `rejectSelection`.
+The polish phase shipped in three code pieces plus a relabel: **keyboard-driven review**
+(`Alt+A/R`, `Alt+N/P`) with cursor-resolved accept/reject and whole-hunk **accept/reject
+symmetry** (`0ed0e58`); **partial-hunk reject over a line selection** (`dc09183`);
+**partial-hunk accept** (`acceptSelection`, `Alt+Shift+A`), the symmetric counterpart of
+`rejectSelection`; and **trigger UX** — the palette now reads **"Begin review" / "End
+review"** instead of "Enable" / "Disable".
+
+**Trigger UX turned out to be naming, not mechanics.** The begin-review path was already
+dialog-free, panel-independent (`setLoading` no-ops with no view), and resolves only after
+the snapshot is durable — so it was *already* safe for an agent to invoke at a turn
+boundary; it just didn't say so. The work was renaming, documenting the agent hook in the
+README, and recording the non-interactivity requirement as a contract comment on
+`enableReview` so a future dialog doesn't silently break agent-driven review.
+`triggerUx.test.ts` pins it: the agent tests bypass the test helper's waits and assert on
+the bare resolved promise.
+
+**The rename is a breaking change, taken deliberately.** `interactiveReview.enable` /
+`.disable` became `interactiveReview.beginReview` / `.endReview`, with no aliases. Holding
+the old ids would have left the command id saying "enable a mode" while the palette title,
+the panel button, and the docs all said "begin a bounded session" — reintroducing at the API
+layer exactly the ambiguity the relabel existed to remove. The webview's panel↔host message
+names moved with them. The tests assert the old ids are *absent*, so a future
+"compatibility alias" can't quietly restore the two-names-for-one-thing problem.
+
+**Two corrections to the earlier "(2026-07-05): DONE" claim.** That status was written
+before the phase actually closed, and two things have since falsified it:
+
+- **The in-file decorations surface (`3548dd4`) was removed, not merely demoted.** §4e's
+  update of 2026-07-12 deleted the surface outright along with the `useDiffEditor` /
+  `showInlineDecorations` settings and the removed-lines peek. The diff editor is the sole
+  review surface — see §4e and §5 #3. The corresponding `inline-decorations-surface`
+  capability was descoped and its delta spec deleted; it never entered `openspec/specs/`.
+- **Trigger UX (`review-trigger-ux`) was unstarted at the time.** Since delivered
+  (2026-08-09) — see above.
+
+Only the manual multi-file keyboard walk (task 5.3) remains. Current suite: **77 unit / 105
+integration passing, 1 pending, 0 failing**.
 
 **The accept/reject asymmetry that shaped the implementation.** Reject *rewrites the buffer*
 (deletes the added lines, needs a `WorkspaceEdit` + save + self-edit guard); accept *never
@@ -325,6 +356,42 @@ added lines is a logged no-op; a multi-hunk selection resolves the start hunk on
 the rest. 6 integration tests ([partialAccept.test.ts](src/test/integration/partialAccept.test.ts));
 suite **97 passing / 1 pending / 0 failing**.
 
+## 4h. QuickDiffProvider — evaluated, declined (2026-07-12)
+
+Considered registering a `QuickDiffProvider` (stable since ~1.11; present in our resolved
+1.110 types at `@types/vscode` `QuickDiffProvider`) to reuse the platform machinery behind the
+git gutter change-bars. We already serve baseline content through a
+`TextDocumentContentProvider` (`interactive-review-baseline:`), so wiring it would be ~10 lines:
+hang a `quickDiffProvider` off a `scm.createSourceControl(...)` whose `provideOriginalResource`
+returns the baseline URI for reviewing files.
+
+**Declined — it buys us nothing for our surface.** The decision turns on one fact: our
+red/green comes entirely from the **native diff editor** (§4e, `vscode.diff` against the
+baseline doc), *not* from any decoration or quick-diff machinery. QuickDiff is orthogonal to
+that and can neither add nor remove it.
+
+- **QuickDiff does not render always-on inline red/green.** It draws *gutter bars* + a
+  *click-to-open peek* of a single change. The persistent removed-red/added-green we require is
+  a property of the diff editor only. (The always-on inline overlay in an *editable* buffer —
+  the Copilot look — is the gated `chatEditing` **proposed** API, unreachable per the
+  stable-only charter §4a. QuickDiff is not a stable substitute for it; it's a different, lesser
+  thing.)
+- **Its only value is in the plain file tab, which we don't use as the review surface.** In the
+  diff tab (our primary surface, §4e) the peek is pure redundancy — the diff editor already
+  shows every removal/addition side-by-side, always-on. QuickDiff would only matter if we
+  supported "review while editing the real file," a mode we deliberately don't offer.
+- **It carries a UI cost.** Even in 1.110 there is no standalone `window.registerQuickDiffProvider`;
+  the only form hangs off a `SourceControl`, which adds a group to the Source Control view we
+  don't want.
+
+**The one genuine scrap (parked, not adopted).** The diff editor has *built-in*
+next/previous-difference navigation (`F7` / `Shift+F7`), which overlaps `neighbourHunk` /
+`revealHunk` in the diff-tab path. If we ever trim that cursor-nav code, this is the lever — but
+it's a minor cleanup, independent of QuickDiff, and untouched for now.
+
+**Net:** the red/green that motivated this project is already the platform's job via the diff
+editor and is fully stable. QuickDiff is a no-op for our workflow — set aside with no loss.
+
 ## 5. Open decisions
 
 1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).
@@ -339,6 +406,10 @@ suite **97 passing / 1 pending / 0 failing**.
    more limited without insets). **RESOLVED (2026-07-05): inline diff editor by default** —
    decorations can't render removed lines on stable APIs, which fails the review use case. See
    §4e for the decision, the global-settings tradeoff, and the scheme-collision bug it exposed.
+4. **QuickDiffProvider for gutter change-bars** — **RESOLVED (2026-07-12): declined.** Orthogonal
+   to our red/green (which is the diff editor's, §4e); renders only gutter bars + a click-to-peek,
+   never always-on inline red/green; adds an unwanted Source Control view entry. A no-op for the
+   diff-tab workflow. See §4h.
 
 ## 6. Someday / maybe (parked ideas)
 

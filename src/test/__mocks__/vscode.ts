@@ -1,4 +1,4 @@
-// Minimal vscode stub for unit-testing gitignoreManager.
+// Minimal vscode stub for unit tests that import the 'vscode' module.
 // Only vscode.workspace.workspaceFolders is used.
 
 declare const global: Record<string, unknown>;

@@ -98,6 +98,10 @@ export class BaselineGit {
   saveSettings(settings: Settings): void {
     try {
       fs.mkdirSync(this.stateDir, { recursive: true });
+      // Land the ignore rule in the same breath the folder is first created, so
+      // settings written before review is enabled can't leak into the project's
+      // git (settings.json can be persisted from the panel while still disabled).
+      this.ensureGitignore();
       fs.writeFileSync(this.settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
     } catch (err) {
       this.log(`saveSettings failed: ${err}`);
@@ -130,7 +134,29 @@ export class BaselineGit {
     }
   }
 
+  /**
+   * Write a self-contained `.gitignore` into the state dir so the *project's*
+   * git ignores everything under `.vscode/interactive-review/` (the nested git
+   * repo, settings, baselines). A single `*` rule matches all contents — git
+   * reads .gitignore files even inside untracked directories, so this needs no
+   * changes to the user's root .gitignore. Written idempotently; skipped if the
+   * file already exists so we never clobber a user edit.
+   */
+  private ensureGitignore(): void {
+    const gitignorePath = path.join(this.stateDir, '.gitignore');
+    try {
+      if (fs.existsSync(gitignorePath)) return;
+      fs.mkdirSync(this.stateDir, { recursive: true });
+      // Ignore all contents of this directory from the enclosing project repo.
+      fs.writeFileSync(gitignorePath, '# Managed by the Interactive Review extension.\n# Keeps review state out of your project\'s git.\n*\n', 'utf-8');
+    } catch (err) {
+      this.log(`ensureGitignore failed: ${err}`);
+    }
+  }
+
   private async doInitGit(): Promise<void> {
+    // Keep review state out of the enclosing project's git (idempotent).
+    this.ensureGitignore();
     // Check for a valid git repo: HEAD file must exist. If the directory
     // exists but HEAD is missing, the repo is corrupted (e.g. interrupted
     // init). Re-initialize from scratch in that case.

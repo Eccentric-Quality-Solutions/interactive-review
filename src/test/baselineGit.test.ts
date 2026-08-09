@@ -31,6 +31,37 @@ describe('BaselineGit', () => {
       await git.initGit();
       assert.ok(fs.existsSync(path.join(stateDir, 'git')));
     });
+
+    it('writes a .gitignore that ignores all state-dir contents', () => {
+      const gi = path.join(stateDir, '.gitignore');
+      assert.ok(fs.existsSync(gi), '.gitignore should exist in the state dir');
+      assert.match(fs.readFileSync(gi, 'utf-8'), /^\*$/m);
+    });
+
+    it('writes the .gitignore when settings are saved before enable (no initGit)', () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-preenable-'));
+      const sd2 = path.join(dir2, '.vscode', 'interactive-review');
+      // saveSettings is the disk-write path that runs while still disabled — it must
+      // land the ignore rule so pre-enable settings.json can't leak into project git.
+      new BaselineGit(sd2, dir2).saveSettings({
+        ignorePatterns: ['.git'], respectGitignore: true,
+        clearOnBranchSwitch: false, quoteRotationInterval: 30,
+      });
+      assert.ok(fs.existsSync(path.join(sd2, 'settings.json')));
+      assert.ok(fs.existsSync(path.join(sd2, '.gitignore')), '.gitignore must exist alongside pre-enable settings.json');
+      assert.ok(!fs.existsSync(path.join(sd2, 'git')), 'git dir should not be created just by saving settings');
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+
+    it('does not clobber an existing .gitignore', async () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-gitignore-'));
+      const sd2 = path.join(dir2, '.vscode', 'interactive-review');
+      fs.mkdirSync(sd2, { recursive: true });
+      fs.writeFileSync(path.join(sd2, '.gitignore'), 'custom-rule\n', 'utf-8');
+      await new BaselineGit(sd2, dir2).initGit();
+      assert.equal(fs.readFileSync(path.join(sd2, '.gitignore'), 'utf-8'), 'custom-rule\n');
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
   });
 
   describe('snapshot / getBaseline', () => {

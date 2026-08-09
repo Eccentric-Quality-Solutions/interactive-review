@@ -3,7 +3,23 @@
 const vscode = /** @type {any} */ (globalThis).acquireVsCodeApi();
 const app = document.getElementById("app");
 
-/** @type {{ enabled: boolean, ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean, totalFiles: number, totalAdded: number, totalRemoved: number, files: any[], reviewComplete: boolean } | null} */
+/**
+ * The full panel state pushed from the extension host (see `PanelState` in
+ * src/reviewPanel.ts — this must stay in sync with it).
+ * @typedef {object} PanelState
+ * @property {boolean} enabled
+ * @property {string[]} ignorePatterns
+ * @property {boolean} respectGitignore
+ * @property {boolean} clearOnBranchSwitch
+ * @property {number} quoteRotationInterval
+ * @property {number} totalFiles
+ * @property {number} totalAdded
+ * @property {number} totalRemoved
+ * @property {any[]} files
+ * @property {boolean} reviewComplete
+ */
+
+/** @type {PanelState | null} */
 let currentState = null;
 /** @type {Set<string>} */
 const expandedFiles = new Set();
@@ -123,6 +139,55 @@ function btn(label, cls, onClick) {
   return b;
 }
 
+/**
+ * A settings checkbox row: a labelled `<label>` with a checkbox + description that
+ * posts `{ command, value }` on toggle. Factors out the two near-identical rows in
+ * the settings render path so a new toggle is one call, not a 26-line copy.
+ * @param {string} label
+ * @param {string} desc
+ * @param {boolean} checked
+ * @param {string} command
+ * @returns {HTMLLabelElement}
+ */
+function checkboxRow(label, desc, checked, command) {
+  const row = /** @type {HTMLLabelElement} */ (el("label", "settings-check-row"));
+  row.appendChild(el("span", "settings-check-label", label));
+  const descRow = el("div", "settings-check-desc-row");
+  const checkbox = /** @type {HTMLInputElement} */ (document.createElement("input"));
+  checkbox.type = "checkbox";
+  checkbox.className = "settings-checkbox";
+  checkbox.checked = checked;
+  checkbox.addEventListener("change", () => {
+    vscode.postMessage({ command, value: checkbox.checked });
+  });
+  descRow.appendChild(checkbox);
+  descRow.appendChild(el("span", "settings-check-desc", desc));
+  row.appendChild(descRow);
+  return row;
+}
+
+/**
+ * The ✓ Accept / ↺ Discard `btn-action` cluster used at the file and hunk level.
+ * Returns a `containerClass` div holding both buttons; `onAccept`/`onDiscard` are
+ * the click handlers (each site posts a different payload).
+ * @param {string} containerClass
+ * @param {() => void} onAccept
+ * @param {() => void} onDiscard
+ * @param {string} acceptTitle
+ * @param {string} discardTitle
+ * @returns {HTMLElement}
+ */
+function actionButtons(containerClass, onAccept, onDiscard, acceptTitle, discardTitle) {
+  const container = el("div", containerClass);
+  const keep = btn("✓", "btn-action btn-action-keep", onAccept);
+  keep.title = acceptTitle;
+  const undo = btn("↺", "btn-action btn-action-discard", onDiscard);
+  undo.title = discardTitle;
+  container.appendChild(keep);
+  container.appendChild(undo);
+  return container;
+}
+
 /** @param {HTMLElement} parent */
 function appendIcon(parent) {
   const wrap = el("div", "splash-icon");
@@ -131,7 +196,7 @@ function appendIcon(parent) {
 }
 
 /**
- * @param {{ enabled: boolean, ignorePatterns: string[], respectGitignore: boolean, clearOnBranchSwitch: boolean, quoteRotationInterval: number, useDiffEditor: boolean, showInlineDecorations: boolean, totalFiles: number, totalAdded: number, totalRemoved: number, files: any[], reviewComplete: boolean }} state
+ * @param {PanelState} state
  */
 function render(state) {
   if (!app) return;
@@ -179,8 +244,8 @@ function renderSetupScreen() {
   appendIcon(screen);
   screen.appendChild(el("p", "splash-tagline", getOrPickQuote()));
   screen.appendChild(
-    btn("Enable for this project", "btn-primary", () => {
-      vscode.postMessage({ command: "enable" });
+    btn("Begin review", "btn-primary", () => {
+      vscode.postMessage({ command: "beginReview" });
     }),
   );
   app.appendChild(screen);
@@ -248,62 +313,23 @@ function renderSettingsScreen(state) {
     el("div", "settings-section-title", "Git Integration"),
   );
 
-  const checkRow = el("label", "settings-check-row");
-  checkRow.appendChild(
-    el("span", "settings-check-label", "Respect .gitignore"),
-  );
-  const checkDescRow = el("div", "settings-check-desc-row");
-  const checkbox = /** @type {HTMLInputElement} */ (
-    document.createElement("input")
-  );
-  checkbox.type = "checkbox";
-  checkbox.className = "settings-checkbox";
-  checkbox.checked = state.respectGitignore;
-  checkbox.addEventListener("change", () => {
-    vscode.postMessage({
-      command: "setRespectGitignore",
-      value: checkbox.checked,
-    });
-  });
-  checkDescRow.appendChild(checkbox);
-  checkDescRow.appendChild(
-    el(
-      "span",
-      "settings-check-desc",
+  gitignoreSection.appendChild(
+    checkboxRow(
+      "Respect .gitignore",
       "Skip files already ignored by your project's .gitignore",
+      state.respectGitignore,
+      "setRespectGitignore",
     ),
   );
-  checkRow.appendChild(checkDescRow);
-  gitignoreSection.appendChild(checkRow);
 
-  // Clear on branch switch
-  const branchRow = el("label", "settings-check-row");
-  branchRow.appendChild(
-    el("span", "settings-check-label", "Clear hunks on branch switch"),
-  );
-  const branchDescRow = el("div", "settings-check-desc-row");
-  const branchCheckbox = /** @type {HTMLInputElement} */ (
-    document.createElement("input")
-  );
-  branchCheckbox.type = "checkbox";
-  branchCheckbox.className = "settings-checkbox";
-  branchCheckbox.checked = state.clearOnBranchSwitch;
-  branchCheckbox.addEventListener("change", () => {
-    vscode.postMessage({
-      command: "setClearOnBranchSwitch",
-      value: branchCheckbox.checked,
-    });
-  });
-  branchDescRow.appendChild(branchCheckbox);
-  branchDescRow.appendChild(
-    el(
-      "span",
-      "settings-check-desc",
+  gitignoreSection.appendChild(
+    checkboxRow(
+      "Clear hunks on branch switch",
       "Automatically clear pending hunks when you switch branches",
+      state.clearOnBranchSwitch,
+      "setClearOnBranchSwitch",
     ),
   );
-  branchRow.appendChild(branchDescRow);
-  gitignoreSection.appendChild(branchRow);
 
   // ── Appearance ──
   const appearanceSection = el("div", "settings-section");
@@ -409,7 +435,7 @@ function renderSettingsScreen(state) {
   body.appendChild(patternSection);
   body.appendChild(gitignoreSection);
 
-  // ── Disable ──
+  // ── End review ──
   const disableSection = el("div", "settings-section settings-section-danger");
   disableSection.appendChild(
     el("div", "settings-section-title", "Danger Zone"),
@@ -418,12 +444,12 @@ function renderSettingsScreen(state) {
     el(
       "p",
       "settings-section-desc",
-      "Disables Interactive Review and clears all tracked state for this project.",
+      "Ends the review session and discards the baseline snapshot. Pending hunks stop being tracked; your files are left exactly as they are on disk.",
     ),
   );
   disableSection.appendChild(
-    btn("Disable Interactive Review", "btn-disable", () => {
-      vscode.postMessage({ command: "disable" });
+    btn("End review", "btn-disable", () => {
+      vscode.postMessage({ command: "endReview" });
     }),
   );
   body.appendChild(disableSection);
@@ -592,17 +618,13 @@ function renderFileGroup(file) {
   if (file.removedLines > 0)
     stats.appendChild(el("span", "stat-removed", `-${file.removedLines}`));
 
-  const fileActions = el("div", "file-actions");
-  const keepBtn = btn("✓", "btn-action btn-action-keep", () =>
-    vscode.postMessage({ command: "acceptFile", filePath: file.filePath }),
+  const fileActions = actionButtons(
+    "file-actions",
+    () => vscode.postMessage({ command: "acceptFile", filePath: file.filePath }),
+    () => vscode.postMessage({ command: "discardFile", filePath: file.filePath }),
+    "Accept all changes",
+    "Discard all changes",
   );
-  keepBtn.title = "Accept all changes";
-  const undoBtn = btn("↺", "btn-action btn-action-discard", () =>
-    vscode.postMessage({ command: "discardFile", filePath: file.filePath }),
-  );
-  undoBtn.title = "Discard all changes";
-  fileActions.appendChild(keepBtn);
-  fileActions.appendChild(undoBtn);
 
   right.appendChild(stats);
   right.appendChild(fileActions);
@@ -631,25 +653,13 @@ function renderFileGroup(file) {
       hunkStats.appendChild(el("span", "stat-added", `+${hunk.newLines}`));
       hunkStats.appendChild(document.createTextNode(" "));
       hunkStats.appendChild(el("span", "stat-removed", `-${hunk.oldLines}`));
-      const hunkActions = el("div", "hunk-actions");
-      const hk = btn("✓", "btn-action btn-action-keep", () =>
-        vscode.postMessage({
-          command: "acceptHunk",
-          filePath: hunk.filePath,
-          hunkId: hunk.id,
-        }),
+      const hunkActions = actionButtons(
+        "hunk-actions",
+        () => vscode.postMessage({ command: "acceptHunk", filePath: hunk.filePath, hunkId: hunk.id }),
+        () => vscode.postMessage({ command: "discardHunk", filePath: hunk.filePath, hunkId: hunk.id }),
+        "Accept hunk",
+        "Discard hunk",
       );
-      hk.title = "Accept hunk";
-      const hu = btn("↺", "btn-action btn-action-discard", () =>
-        vscode.postMessage({
-          command: "discardHunk",
-          filePath: hunk.filePath,
-          hunkId: hunk.id,
-        }),
-      );
-      hu.title = "Discard hunk";
-      hunkActions.appendChild(hk);
-      hunkActions.appendChild(hu);
       hunkRow.appendChild(label);
       hunkRow.appendChild(hunkStats);
       hunkRow.appendChild(hunkActions);

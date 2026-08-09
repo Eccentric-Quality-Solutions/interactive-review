@@ -97,7 +97,7 @@ export async function waitForReviewing(filePath: string, timeoutMs = 15000): Pro
 }
 
 export async function enableReview(): Promise<void> {
-  await vscode.commands.executeCommand('interactiveReview.enable');
+  await vscode.commands.executeCommand('interactiveReview.beginReview');
   const root = getWorkspaceRoot();
   const gitDir = path.join(root, '.vscode', 'interactive-review', 'git');
   await waitForCondition(() => fs.existsSync(gitDir));
@@ -105,7 +105,7 @@ export async function enableReview(): Promise<void> {
 }
 
 export async function disableReview(): Promise<void> {
-  await vscode.commands.executeCommand('interactiveReview.disable');
+  await vscode.commands.executeCommand('interactiveReview.endReview');
   await sleep(100);
 }
 

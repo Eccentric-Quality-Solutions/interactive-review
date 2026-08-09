@@ -38,14 +38,39 @@ don't hot-reload, so re-run the package + install + reload steps after pulling c
 
 ## Using it
 
-1. **Enable** — Command Palette → *Interactive Review: Enable*. This snapshots a private
-   baseline of your working tree; every later change is diffed against it, no matter what
-   made the change.
+1. **Begin review** — Command Palette → *Interactive Review: Begin review*. This snapshots a
+   private baseline of your working tree; every later change is diffed against it, no matter
+   what made the change.
 2. **Make edits** — let an AI agent, a script, or a formatter change files. (Edits you type
    and save by hand are adopted into the baseline silently, so they won't appear in the
    queue.)
 3. **Walk the queue** — the **Interactive Review** panel (bottom panel, alongside Terminal
    and Problems) lists every changed file. Click a file or hunk to open it.
+4. **End review** — Command Palette → *Interactive Review: End review*, or the button in the
+   panel's settings screen. This closes the session and discards the baseline; your files are
+   left exactly as they are on disk.
+
+A review is a **bounded session you walk to completion**, not a mode you leave switched on.
+
+### Starting a review from an agent
+
+`interactiveReview.beginReview` is the begin-review hook, and it is safe to invoke
+programmatically: it takes no arguments, shows no dialogs, needs no visible panel, and its
+promise resolves only once the baseline snapshot is complete. An agent can call it at a turn
+boundary to open a review over the edits it is about to make:
+
+```ts
+await vscode.commands.executeCommand('interactiveReview.beginReview');
+// ...agent makes its edits; each one lands in the review queue...
+await vscode.commands.executeCommand('interactiveReview.endReview'); // end the session
+```
+
+Beginning a review is tool-agnostic: the extension diffs the working tree against its own
+baseline, so it never needs to know which agent made a change.
+
+> **Breaking change:** these commands were previously `interactiveReview.enable` and
+> `interactiveReview.disable`. The old IDs are gone — no aliases. Update any custom
+> keybindings, tasks, or agent integrations that reference them.
 
 ### Review surface
 

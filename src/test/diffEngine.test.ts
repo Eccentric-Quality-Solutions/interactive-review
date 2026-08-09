@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHunks, hunkId, splitHunkByRange } from '../diffEngine';
+import { computeHunks, hunkAtLine, hunkId, splitHunkByRange } from '../diffEngine';
 
 describe('computeHunks', () => {
   it('returns empty for identical content', () => {
@@ -197,6 +197,41 @@ describe('hunkId', () => {
     const hunks = computeHunks('a\nb\nc\n', 'a\nX\nc\n');
     const h = hunks[0];
     assert.equal(hunkId(h), `${h.newStart}:${h.newLines}:${h.oldStart}:${h.oldLines}`);
+  });
+});
+
+describe('hunkAtLine', () => {
+  // Two hunks: replace line 1 (newStart 1, newLines 1) and line 5 (newStart 5, newLines 1);
+  // lines 2-4 are context between them.
+  const twoHunks = () => computeHunks('1\n2\n3\n4\n5\n', 'X\n2\n3\n4\nY\n');
+
+  it('resolves the hunk a line falls inside', () => {
+    const hunks = twoHunks();
+    assert.equal(hunkAtLine(hunks, 1)?.newStart, 1);
+    assert.equal(hunkAtLine(hunks, 5)?.newStart, 5);
+  });
+
+  it('falls forward to the first hunk at/after a context line', () => {
+    const hunks = twoHunks();
+    // lines 2-4 are between the hunks → resolve to the next one (newStart 5)
+    assert.equal(hunkAtLine(hunks, 3)?.newStart, 5);
+  });
+
+  it('returns undefined past every hunk — the asymmetry vs hunkAtCursor', () => {
+    const hunks = twoHunks();
+    // line 6 sits after the last hunk: no wrap to hunks[0], selection callers treat as skip
+    assert.equal(hunkAtLine(hunks, 6), undefined);
+  });
+
+  it('a pure-removal hunk (newLines 0) still occupies its anchor line', () => {
+    // delete line 2 → newStart 2, newLines 0; Math.max(1, 0) keeps it selectable at line 2
+    const hunks = computeHunks('a\nb\nc\n', 'a\nc\n');
+    assert.equal(hunks[0].newLines, 0);
+    assert.equal(hunkAtLine(hunks, 2)?.newStart, 2);
+  });
+
+  it('returns undefined for no hunks', () => {
+    assert.equal(hunkAtLine([], 1), undefined);
   });
 });
 

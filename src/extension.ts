@@ -30,6 +30,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
         const fileState = stateManager.getFile(filePath);
         return fileState?.baseline ?? '';  // null baseline → '' for diff display
       },
+    }),
+    // Empty modified side for a deleted file's diff. Using a content-provider doc
+    // (keyed to the real fsPath) rather than an untitled buffer means the file-level
+    // Accept/Restore CodeLenses render on the *modified* side, where diff-editor
+    // lenses are reliably shown, and the provider can resolve the path from the URI.
+    vscode.workspace.registerTextDocumentContentProvider('interactive-review-deleted', {
+      provideTextDocumentContent(): string { return ''; },
     })
   );
 
@@ -100,7 +107,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
         // Interactive Review diff tab (normal file or deleted file)
         if (tab.input instanceof vscode.TabInputTextDiff
           && tab.input.original.scheme === 'interactive-review-baseline') {
-          // For deleted files, modified is untitled:path.deleted; extract real path from original
+          // For deleted files the modified side is interactive-review-deleted (not a
+          // real file), so fall back to the baseline side for the real path.
           const filePath = tab.input.modified.scheme === 'file'
             ? tab.input.modified.fsPath
             : tab.input.original.fsPath;
@@ -162,6 +170,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       diffCodeLensProvider?.fire();
       updateInReviewContext();
     }),
+    // Both lens gates (isActiveReviewDiffTab / isActiveDeletedReviewTab) read
+    // tabGroups.activeTab, so tab activation — not just editor focus — is what
+    // actually changes their answer. Subscribe to the governing event rather than
+    // relying on the editor events happening to fire alongside it.
+    vscode.window.tabGroups.onDidChangeTabs(() => {
+      diffCodeLensProvider?.fire();
+    }),
     vscode.workspace.onDidChangeTextDocument(e => {
       if (e.document.uri.scheme !== 'file') return;
       reviewPanel?.refresh();
@@ -180,11 +195,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   context.subscriptions.push(
     diffCodeLensProvider,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, diffCodeLensProvider),
+    // Deleted files render their file-level actions on the empty modified side
+    // (the `interactive-review-deleted` doc), which has no file-scheme lenses.
+    vscode.languages.registerCodeLensProvider({ scheme: 'interactive-review-deleted' }, diffCodeLensProvider),
     vscode.commands.registerCommand('interactiveReview.codeLensAcceptHunk', (filePath: string, hId: string) => {
       acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); walkAfterResolve(filePath); }, 'codeLens');
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
       discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
+    }),
+    // Deleted-file file-level actions (rendered on the baseline side of a deleted diff).
+    // Accept = confirm the deletion (drop from tracking); Restore = write the baseline back.
+    vscode.commands.registerCommand('interactiveReview.codeLensAcceptFile', (filePath: string) => {
+      acceptFileByPath(stateManager, filePath, () => { onStateChanged(); walkAfterResolve(filePath); });
+    }),
+    vscode.commands.registerCommand('interactiveReview.codeLensRestoreFile', (filePath: string) => {
+      void discardFileByPath(stateManager, fileWatcher, filePath, () => { onStateChanged(); walkAfterResolve(filePath); });
     }),
   );
 

@@ -1,4 +1,12 @@
-## ADDED Requirements
+# Review Keybindings
+
+## Purpose
+
+Let reviewers drive the review queue entirely from the keyboard — accept/reject a hunk,
+move between hunks, accept/reject a whole file — with accept and reject as symmetric,
+equally cheap, single-undo actions, so the walk never requires the mouse.
+
+## Requirements
 
 ### Requirement: Registered review commands
 
@@ -8,8 +16,10 @@ delegating to the existing accept/reject logic so behavior matches the CodeLens 
 panel paths.
 
 #### Scenario: Accept the current hunk from the command palette
-- **WHEN** the active editor is a file with a pending hunk under the cursor and the user runs "Interactive Review: Accept Hunk"
-- **THEN** that hunk is accepted (folded into the baseline) exactly as if accepted via CodeLens
+- **WHEN** the active editor is a file with a pending hunk under the cursor and the user
+  runs "Interactive Review: Accept Hunk"
+- **THEN** that hunk is accepted (folded into the baseline) exactly as if accepted via
+  CodeLens
 
 #### Scenario: Commands are hidden when review is disabled
 - **WHEN** review is not enabled for the workspace

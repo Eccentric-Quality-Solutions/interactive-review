@@ -86,6 +86,59 @@ export class StateManager {
   get git(): BaselineGit | undefined { return this._git; }
 
   /**
+   * Recursively collect absolute (normalized) paths of every non-ignored file
+   * under the workspace root. Directories/files for which `shouldIgnore` returns
+   * true are pruned. Unreadable directories are skipped silently. This is the
+   * single shared workspace walk used by snapshot / sync / branch-switch logic.
+   */
+  private async collectWorkspaceFiles(
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<string[]> {
+    if (!this.workspaceRoot) return [];
+    const walk = async (dir: string): Promise<string[]> => {
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+      const out: string[] = [];
+      for (const entry of entries) {
+        const full = normalizePath(path.join(dir, entry.name));
+        const isDir = entry.isDirectory();
+        if (shouldIgnore?.(full, isDir)) continue;
+        if (isDir) {
+          // Element-wise, not `out.push(...await walk(full))`: spreading a large
+          // subtree's file list as call arguments throws RangeError at scale.
+          for (const f of await walk(full)) out.push(f);
+        } else if (entry.isFile()) {
+          out.push(full);
+        }
+      }
+      return out;
+    };
+    return walk(this.workspaceRoot);
+  }
+
+  /**
+   * Read a set of files into a snapshot batch. Files that fail to read are
+   * silently dropped — this is deliberate and load-bearing: binary files and
+   * unreadable files (permissions, transient races) must not abort the batch,
+   * and their UTF-8 content would be meaningless as a baseline anyway.
+   */
+  private async readBatch(filePaths: string[]): Promise<{ filePath: string; content: string }[]> {
+    const batch: { filePath: string; content: string }[] = [];
+    await Promise.all(filePaths.map(async filePath => {
+      try {
+        batch.push({ filePath, content: await fs.promises.readFile(filePath, 'utf-8') });
+      } catch {
+        // Skip binary/unreadable files — see method doc.
+      }
+    }));
+    return batch;
+  }
+
+  /**
    * Walk workspace and collect files that exist on disk but are not tracked in git.
    * These are externally created new files that should be shown with null baseline.
    */
@@ -93,37 +146,20 @@ export class StateManager {
     trackedSet: Set<string>,
     shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
   ): Promise<string[]> {
-    if (!this.workspaceRoot) return [];
-    const root = this.workspaceRoot;
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
+    const all = await this.collectWorkspaceFiles(shouldIgnore);
+    const untracked: string[] = [];
+    await Promise.all(all.map(async full => {
+      if (trackedSet.has(full)) return;
       try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        // Skip unreadable files (e.g. permission errors) to avoid downstream
+        // failures when reading content as UTF-8.
+        await fs.promises.access(full, fs.constants.R_OK);
+        untracked.push(full);
       } catch {
-        return results;
+        // unreadable — omit
       }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore?.(full, isDir)) continue;
-        if (isDir) {
-          const nested = await collect(full);
-          if (nested.length) results.push(...nested);
-        } else if (entry.isFile() && !trackedSet.has(full)) {
-          try {
-            await fs.promises.access(full, fs.constants.R_OK);
-            results.push(full);
-          } catch {
-            // Skip unreadable files (e.g. permission errors) to avoid
-            // downstream failures when reading content as UTF-8
-            continue;
-          }
-        }
-      }
-      return results;
-    };
-    return collect(root);
+    }));
+    return untracked;
   }
 
   // ── init / load ───────────────────────────────────────────────────────────
@@ -137,28 +173,22 @@ export class StateManager {
   }
 
   /**
-   * Load persistent state from settings.json + git repo.
-   * Must be called once at activation. Async because reading baselines
-   * from git requires exec calls.
+   * Shared per-file scan of the git-tracked files, used by both `load()` and
+   * `rebuildState()`. For each tracked file: skip if ignored, skip if it has no
+   * baseline in the index, otherwise compare the baseline against current disk
+   * content and enter `reviewing` on a real diff or a deletion (ENOENT). Files
+   * with no diff, no baseline, or that are ignored are NOT added to `this.state`.
+   *
+   * Populates `this.state` and returns the classification buckets so each caller
+   * can layer its own logging / cleanup / diffing on top. Untracked-file
+   * detection and all surrounding orchestration stay with the callers, where the
+   * intentional load-vs-rebuild differences live.
    */
-  async load(shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
-    const g = this.ensureGit();
-    if (!g) return;
-
-    // enabled state is determined by whether the interactive-review git dir exists on disk
-    const gitDir = path.join(this.stateDir!, 'git');
-    if (!fs.existsSync(gitDir)) return;
-
-    this._enabled = true;
-    const settings = g.loadSettings();
-    this._ignorePatterns = settings.ignorePatterns;
-    this._respectGitignore = settings.respectGitignore;
-    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
-    this._quoteRotationInterval = settings.quoteRotationInterval;
-
-    // Initialize git (idempotent) then restore in-memory state from HEAD
-    await g.initGit();
-    const tracked = await g.listTrackedFiles();
+  private async scanTrackedIntoState(
+    g: BaselineGit,
+    tracked: string[],
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<{ reviewing: string[]; idle: string[]; skippedNoBaseline: string[]; ignored: string[] }> {
     const ignored: string[] = [];
     const skippedNoBaseline: string[] = [];
     const reviewing: string[] = [];
@@ -191,6 +221,34 @@ export class StateManager {
         idle.push(filePath);
       }
     }));
+    return { reviewing, idle, skippedNoBaseline, ignored };
+  }
+
+  /**
+   * Load persistent state from settings.json + git repo.
+   * Must be called once at activation. Async because reading baselines
+   * from git requires exec calls.
+   */
+  async load(shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
+    const g = this.ensureGit();
+    if (!g) return;
+
+    // enabled state is determined by whether the interactive-review git dir exists on disk
+    const gitDir = path.join(this.stateDir!, 'git');
+    if (!fs.existsSync(gitDir)) return;
+
+    this._enabled = true;
+    const settings = g.loadSettings();
+    this._ignorePatterns = settings.ignorePatterns;
+    this._respectGitignore = settings.respectGitignore;
+    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
+    this._quoteRotationInterval = settings.quoteRotationInterval;
+
+    // Initialize git (idempotent) then restore in-memory state from HEAD
+    await g.initGit();
+    const tracked = await g.listTrackedFiles();
+    const { reviewing, idle, skippedNoBaseline, ignored } =
+      await this.scanTrackedIntoState(g, tracked, shouldIgnore);
     if (skippedNoBaseline.length > 0) {
       log(`load: skipped ${skippedNoBaseline.length} file(s) with no baseline in index: ${logFileList(skippedNoBaseline, this.workspaceRoot)}`);
     }
@@ -236,29 +294,15 @@ export class StateManager {
 
     // Snapshot old state for comparison
     const oldState = new Map<string, FileState>();
-    for (const [fp, fs] of this.state) {
-      oldState.set(fp, { ...fs });
+    for (const [fp, st] of this.state) {
+      oldState.set(fp, { ...st });
     }
 
-    // Rebuild: clear and reload from git (same logic as load, but parallelized)
+    // Rebuild: clear and reload from git via the shared tracked-file scan
     this.state.clear();
     await g.initGit();
     const tracked = await g.listTrackedFiles();
-    const filtered = tracked.filter(fp => !shouldIgnore?.(fp));
-    await Promise.all(filtered.map(async filePath => {
-      const baseline = await g.getBaseline(filePath);
-      if (baseline === undefined) return;
-      let diskContent: string | undefined;
-      let fileDeleted = false;
-      try {
-        diskContent = await fs.promises.readFile(filePath, 'utf-8');
-      } catch (err: any) {
-        if (err?.code === 'ENOENT') { fileDeleted = true; }
-      }
-      if (fileDeleted || (diskContent !== undefined && diskContent !== baseline)) {
-        this.state.set(filePath, { status: 'reviewing', baseline });
-      }
-    }));
+    await this.scanTrackedIntoState(g, tracked, shouldIgnore);
 
     // Detect files on disk not tracked in git — these are externally created new files
     const trackedSet = new Set(tracked);
@@ -307,6 +351,17 @@ export class StateManager {
 
   getFile(filePath: string): FileState | undefined {
     return this.state.get(normalizePath(filePath));
+  }
+
+  /**
+   * Canonical "is this a deleted file" test — the single source of truth shared by
+   * the panel list, the diff-open routing, and the deleted-file CodeLenses so they
+   * can never disagree. Deleted = tracked with a real baseline (a null baseline is a
+   * *new* file, not a deletion) but no longer present on disk.
+   */
+  isDeleted(filePath: string): boolean {
+    const fileState = this.getFile(filePath);
+    return !!fileState && fileState.baseline !== null && !fs.existsSync(filePath);
   }
 
   setFile(filePath: string, state: FileState, skipSnapshot?: boolean): void {
@@ -474,37 +529,8 @@ export class StateManager {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return results;
-      }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore(full, isDir)) continue;
-        if (isDir) {
-          results = results.concat(await collect(full));
-        } else if (entry.isFile()) {
-          results.push(full);
-        }
-      }
-      return results;
-    };
-
-    const filePaths = await collect(this.workspaceRoot);
-    const batch: { filePath: string; content: string }[] = [];
-    await Promise.all(filePaths.map(async filePath => {
-      try {
-        const content = await fs.promises.readFile(filePath, 'utf-8');
-        batch.push({ filePath, content });
-      } catch {
-        // Skip binary or unreadable files
-      }
-    }));
+    const filePaths = await this.collectWorkspaceFiles(shouldIgnore);
+    const batch = await this.readBatch(filePaths);
     if (batch.length > 0) {
       await g.snapshotBatch(batch);
     }
@@ -567,29 +593,8 @@ export class StateManager {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return results;
-      }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore(full, isDir)) continue;
-        if (isDir) {
-          results = results.concat(await collect(full));
-        } else if (entry.isFile()) {
-          results.push(full);
-        }
-      }
-      return results;
-    };
-
     const [allowedFiles, trackedFiles] = await Promise.all([
-      collect(this.workspaceRoot),
+      this.collectWorkspaceFiles(shouldIgnore),
       g.listTrackedFiles(),
     ]);
 
@@ -630,13 +635,7 @@ export class StateManager {
       log(`syncIgnoreState: adding ${toAdd.length} file(s): ${logFileList(toAdd, this.workspaceRoot)}`);
     }
     if (toAdd.length > 0) {
-      const batch: { filePath: string; content: string }[] = [];
-      await Promise.all(toAdd.map(async fp => {
-        try {
-          const content = await fs.promises.readFile(fp, 'utf-8');
-          batch.push({ filePath: fp, content });
-        } catch { /* skip unreadable */ }
-      }));
+      const batch = await this.readBatch(toAdd);
       if (batch.length > 0) {
         this.gitQueue = this.gitQueue.then(() => g.snapshotBatch(batch)).catch(err => { log(`git queue error: ${err}`); });
       }
@@ -664,41 +663,14 @@ export class StateManager {
     this.state.clear();
 
     // Collect all current workspace files (respecting ignore rules)
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return results;
-      }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore?.(full, isDir)) continue;
-        if (isDir) {
-          results = results.concat(await collect(full));
-        } else if (entry.isFile()) {
-          results.push(full);
-        }
-      }
-      return results;
-    };
-
     const [diskFiles, trackedFiles] = await Promise.all([
-      collect(this.workspaceRoot),
+      this.collectWorkspaceFiles(shouldIgnore),
       g.listTrackedFiles(),
     ]);
 
     // Snapshot all disk files as new baselines
     const diskSet = new Set(diskFiles);
-    const batch: { filePath: string; content: string }[] = [];
-    await Promise.all(diskFiles.map(async fp => {
-      try {
-        const content = await fs.promises.readFile(fp, 'utf-8');
-        batch.push({ filePath: fp, content });
-      } catch { /* skip unreadable */ }
-    }));
+    const batch = await this.readBatch(diskFiles);
 
     // Remove baselines for files that no longer exist on disk
     const toRemove = trackedFiles.filter(fp => !diskSet.has(fp));
