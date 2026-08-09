@@ -5,7 +5,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline, sleep, waitForCondition,
   waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager,
+  writeFileExternally, cleanWorkspace, getStateManager, openWithSelection,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -28,13 +28,6 @@ suite('interactive-review keyboard commands', function () {
     cleanWorkspace();
   });
 
-  async function openReviewingFile(filePath: string, cursorLine0: number): Promise<vscode.TextEditor> {
-    const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
-    const pos = new vscode.Position(cursorLine0, 0);
-    editor.selection = new vscode.Selection(pos, pos);
-    return editor;
-  }
-
   test('acceptHunk command folds the hunk under the cursor into the baseline', async () => {
     const root = getWorkspaceRoot();
     const f = path.join(root, 'edit.txt');
@@ -45,7 +38,7 @@ suite('interactive-review keyboard commands', function () {
     writeFileExternally(f, 'l1\nl2\nl3\n'); // added line → reviewing
     await waitForReviewing(f);
 
-    await openReviewingFile(f, 2); // cursor on the added line
+    await openWithSelection(f, 2); // cursor on the added line
     await vscode.commands.executeCommand('interactiveReview.acceptHunk');
     await sleep(300);
 
@@ -64,7 +57,7 @@ suite('interactive-review keyboard commands', function () {
     writeFileExternally(f, 'l1\nl2\nl3\n');
     await waitForReviewing(f);
 
-    await openReviewingFile(f, 2);
+    await openWithSelection(f, 2);
     await vscode.commands.executeCommand('interactiveReview.rejectHunk');
     await sleep(300);
 
@@ -88,7 +81,7 @@ suite('interactive-review keyboard commands', function () {
     await waitForReviewing(a);
     await waitForReviewing(b);
 
-    await openReviewingFile(a, 1); // cursor on/after a's only hunk
+    await openWithSelection(a, 1); // cursor on/after a's only hunk
     await vscode.commands.executeCommand('interactiveReview.nextHunk');
     await sleep(300);
 
@@ -103,7 +96,7 @@ suite('interactive-review keyboard commands', function () {
     await enableReview(); // plain becomes a baseline, not reviewing (no diff)
     await waitForCondition(() => gitGetBaseline(root, 'plain.txt') !== undefined);
 
-    await openReviewingFile(plain, 0);
+    await openWithSelection(plain, 0);
     const before = fs.readFileSync(plain, 'utf-8');
     // No reviewing target → command resolves nothing and must not mutate.
     await vscode.commands.executeCommand('interactiveReview.acceptHunk');

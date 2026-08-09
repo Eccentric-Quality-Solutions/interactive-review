@@ -121,7 +121,12 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
     for (const group of vscode.window.tabGroups.all) {
       const active = group.activeTab;
       if (active?.input instanceof vscode.TabInputTextDiff) {
+        // The scheme check matters: a deleted file's diff carries the SAME fsPath on its
+        // modified side under `interactive-review-deleted`. Without it, a stale
+        // file-scheme doc for that path would also claim the tab and render per-hunk
+        // lenses alongside the deleted-file Accept/Restore pair.
         if (active.input.original.scheme === 'interactive-review-baseline'
+          && active.input.modified.scheme === 'file'
           && active.input.modified.fsPath === fsPath) {
           return true;
         }

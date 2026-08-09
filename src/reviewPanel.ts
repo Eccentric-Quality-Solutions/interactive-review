@@ -83,7 +83,12 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         }
         return;
       }
-      this.handleMessage(msg);
+      // Fire-and-forget: the webview listener is sync, so a rejected accept/discard
+      // would otherwise vanish and leave a panel button looking like it did nothing.
+      void this.handleMessage(msg).catch(err => {
+        log(`panel command '${msg.command}' failed: ${err}`);
+        void vscode.window.showErrorMessage(`Interactive Review: ${msg.command} failed — ${err}`);
+      });
     });
   }
 
@@ -91,6 +96,21 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     if (!this.view || this._loading) return;
     const state = this.buildPanelState();
     this.view.webview.postMessage({ type: 'update', state });
+  }
+
+  /**
+   * Announce that reconciliation removed entries. Dropping a vanished new file changes
+   * `reviewingCount` and `reviewComplete`, which the status bar and the `inReview`
+   * keybinding context read — so a silent removal leaves them stale, and a ghost that was
+   * the last pending file would never flip the bar to "Review complete".
+   *
+   * Deferred rather than fired inline because reconciliation runs *inside* the render
+   * (`onStateChanged` → `refresh` → `buildPanelState`), so a synchronous call would
+   * re-enter it. This settles after one extra pass: the follow-up finds nothing left to
+   * reconcile and announces nothing.
+   */
+  private announceReconcile(): void {
+    queueMicrotask(() => this.onStateChanged());
   }
 
   setLoading(loading: boolean): void {
@@ -119,11 +139,22 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     const files: PanelFile[] = [];
     let totalAdded = 0;
     let totalRemoved = 0;
+    // Entries reconciled away mid-build; removed after the loop rather than during it,
+    // so the map is not mutated while it is being iterated.
+    const vanished: string[] = [];
 
     for (const [filePath, fileState] of this.stateManager.getAllFiles()) {
       if (fileState.status !== 'reviewing') continue;
 
       const fileExists = fs.existsSync(filePath);
+      // Same predicate as StateManager.reconcileVanishedNewFile, reusing the stat just
+      // taken (as isDeleted does below). A new file that is gone from disk has nothing
+      // to review and cannot render a diff — list it and the row is actionless and its
+      // click opens a nonexistent file.
+      if (!fileExists && fileState.baseline === null) {
+        vanished.push(filePath);
+        continue;
+      }
       let currentContent: string;
       if (!fileExists) {
         currentContent = '';
@@ -176,6 +207,12 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         })),
       });
     }
+
+    let reconciled = false;
+    for (const filePath of vanished) {
+      reconciled = this.stateManager.reconcileVanishedNewFile(filePath) || reconciled;
+    }
+    if (reconciled) this.announceReconcile();
 
     files.sort((a, b) => a.filePath.localeCompare(b.filePath));
 
@@ -334,6 +371,15 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
   }
 
   private async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
+    // A new file that has since vanished has no side to show at all — reconcile it out
+    // of the queue rather than opening `vscode.diff` against a file that isn't there.
+    // Reached when panel state is stale relative to disk, or from the queue advance,
+    // which reads live state and never passes through buildPanelState.
+    if (this.stateManager.reconcileVanishedNewFile(filePath)) {
+      this.announceReconcile();
+      return;
+    }
+
     // Deleted files have no live modified side — route them to the empty-diff view
     // so navigation (and cross-file queue advance) never errors on a missing file.
     if (this.stateManager.isDeleted(filePath)) {
@@ -389,16 +435,22 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     const others = Array.from(this.stateManager.getAllFiles().entries())
       .filter(([fp, s]) => s.status === 'reviewing' && fp !== fromPath)
       .map(([fp]) => fp)
+      // Step over — and clean up — new files that have vanished from disk. They cannot be
+      // opened, so leaving them in the queue would stall the walk on a file that never
+      // appears. Safe to mutate here: Array.from already materialised the entries.
+      .filter(fp => {
+        if (!this.stateManager.reconcileVanishedNewFile(fp)) return true;
+        // The walk can end here (returning false below with no other candidate), so the
+        // removal must be announced or it lands after this turn's last refresh.
+        this.announceReconcile();
+        return false;
+      })
       .sort((a, b) => a.localeCompare(b));
     if (others.length === 0) return false;
     const next = others.find(fp => fp.localeCompare(fromPath) > 0) ?? others[0];
-    await this.openReviewingFile(next);
+    // No hunk id → openDiffEditor lands on the file's first hunk.
+    await this.openDiffEditor(next);
     return true;
-  }
-
-  /** Open a reviewing file in the diff editor at its first hunk. */
-  private async openReviewingFile(filePath: string): Promise<void> {
-    await this.openDiffEditor(filePath);
   }
 
   private getHtml(webview: vscode.Webview): string {

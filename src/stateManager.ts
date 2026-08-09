@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FileState } from './types';
-import { BaselineGit } from './baselineGit';
+import { BaselineGit, Settings } from './baselineGit';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 
@@ -225,6 +225,24 @@ export class StateManager {
   }
 
   /**
+   * Enter every on-disk file that git isn't tracking into `reviewing` with a null
+   * baseline — i.e. treat it as externally created and new. The untracked half of the
+   * shared load/rebuild scan (`scanTrackedIntoState` is the tracked half); kept here so
+   * the two entry points can't drift on what counts as a new file. Returns the adopted
+   * paths so `load()` can log them.
+   */
+  private async adoptUntrackedFiles(
+    tracked: string[],
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<string[]> {
+    const untracked = await this.collectUntrackedFiles(new Set(tracked), shouldIgnore);
+    for (const filePath of untracked) {
+      this.state.set(filePath, { status: 'reviewing', baseline: null });
+    }
+    return untracked;
+  }
+
+  /**
    * Load persistent state from settings.json + git repo.
    * Must be called once at activation. Async because reading baselines
    * from git requires exec calls.
@@ -238,11 +256,7 @@ export class StateManager {
     if (!fs.existsSync(gitDir)) return;
 
     this._enabled = true;
-    const settings = g.loadSettings();
-    this._ignorePatterns = settings.ignorePatterns;
-    this._respectGitignore = settings.respectGitignore;
-    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
-    this._quoteRotationInterval = settings.quoteRotationInterval;
+    this.applySettings(g.loadSettings());
 
     // Initialize git (idempotent) then restore in-memory state from HEAD
     await g.initGit();
@@ -265,13 +279,9 @@ export class StateManager {
     }
 
     // Detect files on disk not tracked in git — these are externally created new files
-    const trackedSet = new Set(tracked);
-    const untrackedFiles = await this.collectUntrackedFiles(trackedSet, shouldIgnore);
+    const untrackedFiles = await this.adoptUntrackedFiles(tracked, shouldIgnore);
     if (untrackedFiles.length > 0) {
       log(`load: ${untrackedFiles.length} untracked new file(s): ${logFileList(untrackedFiles, this.workspaceRoot)}`);
-      for (const fp of untrackedFiles) {
-        this.state.set(fp, { status: 'reviewing', baseline: null });
-      }
     }
     this.noteReviewActivity();
   }
@@ -305,11 +315,7 @@ export class StateManager {
     await this.scanTrackedIntoState(g, tracked, shouldIgnore);
 
     // Detect files on disk not tracked in git — these are externally created new files
-    const trackedSet = new Set(tracked);
-    const untrackedFiles = await this.collectUntrackedFiles(trackedSet, shouldIgnore);
-    for (const fp of untrackedFiles) {
-      this.state.set(fp, { status: 'reviewing', baseline: null });
-    }
+    await this.adoptUntrackedFiles(tracked, shouldIgnore);
     this.noteReviewActivity();
 
     // Compare old vs new state
@@ -362,6 +368,32 @@ export class StateManager {
   isDeleted(filePath: string): boolean {
     const fileState = this.getFile(filePath);
     return !!fileState && fileState.baseline !== null && !fs.existsSync(filePath);
+  }
+
+  /**
+   * Drop a *new* (null-baseline) entry whose file is no longer on disk, reporting whether
+   * one was dropped. The counterpart to `isDeleted`: a null baseline means the file did not
+   * exist when review began, so once it is gone from disk there is nothing left to review —
+   * no baseline to restore, no content to accept — and no diff to render, because neither
+   * side exists. It is not a deletion the user needs to disposition; it is a non-event.
+   *
+   * `load()` and `rebuildState()` already reconcile these away for free, since they rebuild
+   * from git-tracked plus on-disk files and a vanished new file is in neither. This covers
+   * the live in-memory state *between* those rebuilds: FileWatcher.onDiskDelete normally
+   * removes such an entry, but a dropped watcher event (the same class of miss documented
+   * in docs/terminal-edits-not-captured.md) can strand one, where it shows as an actionless
+   * panel row whose diff opens against a nonexistent file.
+   *
+   * Removal is in-memory only — `removeFile` skips the git op for a null baseline, which was
+   * never stored in the index.
+   */
+  reconcileVanishedNewFile(filePath: string): boolean {
+    const fileState = this.getFile(filePath);
+    if (!fileState || fileState.baseline !== null) return false;
+    if (fs.existsSync(filePath)) return false;
+    log(`reconcile: dropping vanished new file ${path.basename(filePath)} (null baseline, not on disk)`);
+    this.removeFile(filePath);
+    return true;
   }
 
   setFile(filePath: string, state: FileState, skipSnapshot?: boolean): void {
@@ -508,11 +540,7 @@ export class StateManager {
       // reflects stale in-memory values that survive across enable/disable cycles in a
       // long-lived host, so a fresh enable would silently inherit a prior session's
       // settings instead of resetting to disk/defaults.
-      const merged = g.mergeDefaultSettings(g.loadSettings());
-      this._ignorePatterns = merged.ignorePatterns;
-      this._respectGitignore = merged.respectGitignore;
-      this._clearOnBranchSwitch = merged.clearOnBranchSwitch;
-      this._quoteRotationInterval = merged.quoteRotationInterval;
+      this.applySettings(g.mergeDefaultSettings(g.loadSettings()));
     } else {
       this.state.clear();
       this._git?.destroyGit();
@@ -536,37 +564,51 @@ export class StateManager {
     }
   }
 
-  private currentSettings() {
+  private currentSettings(): Settings {
     return { ignorePatterns: this._ignorePatterns, respectGitignore: this._respectGitignore, clearOnBranchSwitch: this._clearOnBranchSwitch, quoteRotationInterval: this._quoteRotationInterval };
   }
 
-  setIgnorePatterns(patterns: string[]): void {
-    this._ignorePatterns = patterns;
+  /**
+   * Copy a full settings object into the backing fields. The single place the
+   * in-memory settings are populated, so every source of settings (load from disk,
+   * enable-time merge, external-edit reload, a panel setter) applies all fields —
+   * a new setting cannot be half-adopted by one path and missed by another.
+   */
+  private applySettings(settings: Settings): void {
+    this._ignorePatterns = settings.ignorePatterns;
+    this._respectGitignore = settings.respectGitignore;
+    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
+    this._quoteRotationInterval = settings.quoteRotationInterval;
+  }
+
+  /**
+   * Change one setting in memory, and persist the whole settings object when a review
+   * session is active. Persisting only while enabled is deliberate: settings.json is
+   * session state, and writing it from a disabled extension would resurrect a stale
+   * state dir. The in-memory update happens either way so the panel reflects the change.
+   */
+  private updateSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
+    const next: Settings = { ...this.currentSettings(), [key]: value };
+    this.applySettings(next);
     if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), ignorePatterns: patterns });
+      this._git.saveSettings(next);
     }
+  }
+
+  setIgnorePatterns(patterns: string[]): void {
+    this.updateSetting('ignorePatterns', patterns);
   }
 
   setRespectGitignore(value: boolean): void {
-    this._respectGitignore = value;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), respectGitignore: value });
-    }
+    this.updateSetting('respectGitignore', value);
   }
 
   setClearOnBranchSwitch(value: boolean): void {
-    this._clearOnBranchSwitch = value;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), clearOnBranchSwitch: value });
-    }
+    this.updateSetting('clearOnBranchSwitch', value);
   }
 
   setQuoteRotationInterval(value: number): void {
-    const normalized = (Number.isFinite(value) && value >= 0) ? Math.floor(value) : 0;
-    this._quoteRotationInterval = normalized;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), quoteRotationInterval: normalized });
-    }
+    this.updateSetting('quoteRotationInterval', (Number.isFinite(value) && value >= 0) ? Math.floor(value) : 0);
   }
 
   /**
@@ -575,11 +617,7 @@ export class StateManager {
    */
   reloadIgnorePatterns(): string[] | null {
     if (!this._enabled || !this._git) return null;
-    const settings = this._git.loadSettings();
-    this._ignorePatterns = settings.ignorePatterns;
-    this._respectGitignore = settings.respectGitignore;
-    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
-    this._quoteRotationInterval = settings.quoteRotationInterval;
+    this.applySettings(this._git.loadSettings());
     return this._ignorePatterns;
   }
 
@@ -710,7 +748,4 @@ export class StateManager {
   async flush(): Promise<void> {
     await this.gitQueue;
   }
-
-  /** Cancel any pending saves (no-op now, kept for API compatibility). */
-  cancelPendingSave(): void {}
 }

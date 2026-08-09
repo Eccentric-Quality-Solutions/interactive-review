@@ -94,4 +94,61 @@ suite('interactive-review cross-file advance', function () {
     await sleep(100);
     assert.strictEqual(sm.reviewComplete, true, 'closure state, not a jump');
   });
+
+  // ── Vanished new files ────────────────────────────────────────────────────
+  //
+  // A new file (null baseline) that is gone from disk has nothing left to review and
+  // no side to render a diff from. FileWatcher.onDiskDelete normally drops it, but a
+  // dropped watcher event can strand it in memory — so the state is injected directly
+  // here, which is exactly the situation a missed event produces.
+
+  /** Strand a null-baseline reviewing entry for a path that does not exist on disk. */
+  function strandVanishedNewFile(filePath: string): void {
+    getStateManager().setFile(filePath, { status: 'reviewing', baseline: null });
+    assert.strictEqual(getStateManager().getFile(filePath)?.status, 'reviewing',
+      'precondition: the stranded entry is in reviewing');
+  }
+
+  test('a vanished new file is dropped from the panel instead of listed as actionless', async () => {
+    const root = getWorkspaceRoot();
+    await enableReview();
+    const ghost = path.join(root, 'ghost.txt'); // never created on disk
+    strandVanishedNewFile(ghost);
+
+    const state = getReviewPanel().panelStateForTest();
+
+    assert.ok(!state.files.some((f: any) => f.filePath === ghost),
+      'a new file with no file on disk must not be listed');
+    assert.strictEqual(getStateManager().getFile(ghost), undefined,
+      'building the panel reconciles the stranded entry out of state');
+  });
+
+  test('advancing over a vanished new file skips it rather than stalling the walk', async () => {
+    const root = getWorkspaceRoot();
+    const a = path.join(root, 'a.txt');
+    const real = path.join(root, 'z-real.txt');
+    await enableReview();
+    writeFileExternally(a, 'content a\n');
+    writeFileExternally(real, 'content real\n');
+    await waitForReviewing(a);
+    await waitForReviewing(real);
+
+    // Sorts between a.txt and z-real.txt, so the walk reaches it first.
+    const ghost = path.join(root, 'm-ghost.txt');
+    strandVanishedNewFile(ghost);
+
+    const sm = getStateManager();
+    const panel = getReviewPanel();
+    acceptFileByPath(sm, a, () => {});
+
+    // Must not throw on the nonexistent file, and must not stop there.
+    await panel.advanceToNextFile(a);
+    await sleep(200);
+
+    assert.strictEqual(sm.getFile(ghost), undefined, 'the vanished entry is reconciled away');
+    assert.strictEqual(
+      vscode.window.activeTextEditor?.document.uri.fsPath, real,
+      'the walk steps over the vanished file and opens the next real one',
+    );
+  });
 });

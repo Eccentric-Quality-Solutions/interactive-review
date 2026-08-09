@@ -36,6 +36,11 @@ function prefixGitignoreRules(content: string, prefix: string): string {
   }).join('\n');
 }
 
+/** One VSCode-initiated save, tracked by object identity — see `pendingManualSaves`. */
+interface SaveToken {
+  content: string;
+}
+
 export class FileWatcher {
   private disposables: vscode.Disposable[] = [];
   private selfEditFiles: Set<string> = new Set();
@@ -44,7 +49,11 @@ export class FileWatcher {
   // into the baseline. Anything else is an external/AI write → surfaced for review.
   // This replaces the old buffer-match heuristic, which VSCode's silent reload of
   // clean open buffers made unreliable (see docs/terminal-edits-not-captured.md).
-  private pendingManualSaves: Map<string, string> = new Map();
+  //
+  // Boxed rather than a bare string so each save is a distinct *identity*: the disk-event
+  // wrappers release only the token they started with, and two saves of byte-identical
+  // content are still two tokens. A plain string map could not tell them apart.
+  private pendingManualSaves: Map<string, SaveToken> = new Map();
   // Files being deleted by the user via VSCode (explorer / applyEdit)
   private pendingUserDeletes: Set<string> = new Set();
   // Old paths of in-progress user renames — suppress onDiskDelete without extra git ops
@@ -153,7 +162,7 @@ export class FileWatcher {
       // every save would retain the file's full content even for users who never enable.
       if (!this.stateManager.enabled) return;
       if (doc.uri.scheme !== 'file') return;
-      this.pendingManualSaves.set(normalizePath(doc.uri.fsPath), doc.getText());
+      this.pendingManualSaves.set(normalizePath(doc.uri.fsPath), { content: doc.getText() });
     });
     this.disposables.push(saveListener);
 
@@ -255,7 +264,7 @@ export class FileWatcher {
     const saved = this.pendingManualSaves.get(filePath);
     if (saved === undefined) return false;
     this.pendingManualSaves.delete(filePath);
-    return saved === diskContent;
+    return saved.content === diskContent;
   }
 
   markSelfEdit(filePath: string): void {
@@ -308,8 +317,55 @@ export class FileWatcher {
     return false;
   }
 
+  /**
+   * A pending-save token is valid for exactly one disk event: the one caused by the save
+   * that recorded it. Every handler below therefore releases the token on *every* exit,
+   * via the `finally` in these two wrappers, whether or not it was acted on.
+   *
+   * Letting a token outlive its event is not merely a leak (it retains the file's full
+   * text): the next external write of byte-identical content would match it and be
+   * absorbed into the baseline instead of surfaced for review — the silent data loss
+   * `consumeManualSave`'s exact comparison exists to prevent. Handlers return early on
+   * many paths (suppressed, ignored, not-enabled, read failure, already reviewing), and
+   * each one used to strand the token.
+   *
+   * Discarding is always the safe direction: an unconsumed token costs at most a spurious
+   * hunk on the user's own save, which they can accept in one keystroke.
+   *
+   * Only the token this handler *started with* is released. Handlers await disk and git
+   * reads, and a second save of the same file can land in that window and replace the
+   * entry; deleting by path alone would throw away the newer save's token and make the
+   * user's own second save look like an external edit. Comparing identity leaves a
+   * replacement token in place for the handler that will actually consume it.
+   */
   private async onDiskCreate(uri: vscode.Uri): Promise<void> {
     const filePath = normalizePath(uri.fsPath);
+    const token = this.pendingManualSaves.get(filePath);
+    try {
+      await this.handleDiskCreate(filePath);
+    } finally {
+      this.releaseSaveToken(filePath, token);
+    }
+  }
+
+  private async onDiskChange(uri: vscode.Uri): Promise<void> {
+    const filePath = normalizePath(uri.fsPath);
+    const token = this.pendingManualSaves.get(filePath);
+    try {
+      await this.handleDiskChange(filePath);
+    } finally {
+      this.releaseSaveToken(filePath, token);
+    }
+  }
+
+  /** Drop `token` if it is still the entry for `filePath` — see the wrappers above. */
+  private releaseSaveToken(filePath: string, token: SaveToken | undefined): void {
+    if (token !== undefined && this.pendingManualSaves.get(filePath) === token) {
+      this.pendingManualSaves.delete(filePath);
+    }
+  }
+
+  private async handleDiskCreate(filePath: string): Promise<void> {
     const basename = path.basename(filePath);
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
@@ -456,8 +512,7 @@ export class FileWatcher {
     this.enterReviewing(filePath, gitBaseline, '');
   }
 
-  private async onDiskChange(uri: vscode.Uri): Promise<void> {
-    const filePath = normalizePath(uri.fsPath);
+  private async handleDiskChange(filePath: string): Promise<void> {
     const basename = path.basename(filePath);
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
@@ -465,8 +520,7 @@ export class FileWatcher {
     if (this.shouldIgnore(filePath)) { log(`onDiskChange(${basename}): ignored, skip`); return; }
     if (this.selfEditFiles.has(filePath)) {
       // The extension's own write (accept/reject) — its save fired onDidSaveTextDocument
-      // too, so drop any pending token here rather than stranding the file's full content.
-      this.pendingManualSaves.delete(filePath);
+      // too. The wrapper's finally drops the resulting token.
       log(`onDiskChange(${basename}): self-edit, skip`);
       return;
     }
@@ -479,9 +533,9 @@ export class FileWatcher {
       return;
     }
 
-    // Resolve the save token now, before any early-return, so every branch below reclaims
-    // it (a reviewing-file save would otherwise strand the file's full content for the
-    // whole session). The result is only acted on in the manual-save branch.
+    // Resolve the save token here, while the disk content needed to compare it is in
+    // hand; the branches below only read the boolean. Reclamation itself is guaranteed
+    // by the wrapper's finally, so an early return above this line is also safe.
     const wasManualSave = this.consumeManualSave(filePath, diskContent);
 
     const fileState = this.stateManager.getFile(filePath);

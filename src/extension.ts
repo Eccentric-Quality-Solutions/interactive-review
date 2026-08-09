@@ -146,6 +146,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       .catch(err => log(`walkAfterResolve: ${err}`));
   }
 
+  /**
+   * Rejection handler for the review commands, every one of which is fire-and-forget:
+   * `registerCommand` callbacks return void, so a rejected accept/reject promise has
+   * nowhere to surface. These operations write to disk and apply workspace edits, so
+   * they genuinely fail (read-only file, full volume, an edit VS Code declines) — and
+   * unhandled, the failure is invisible: the lens or keybinding appears to have worked
+   * while nothing changed. Log it and tell the user, who can then retry.
+   */
+  function reportCommandFailure(label: string, filePath: string): (err: unknown) => void {
+    return err => {
+      const name = path.basename(filePath);
+      log(`${label}(${name}): failed — ${err}`);
+      void vscode.window.showErrorMessage(`Interactive Review: ${label} failed for ${name} — ${err}`);
+    };
+  }
+
   let syncIgnore: () => void;
   const fileWatcher = new FileWatcher(stateManager, onStateChanged, () => syncIgnore());
   syncIgnore = () => stateManager.syncIgnoreState((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)).then(onStateChanged);
@@ -202,7 +218,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); walkAfterResolve(filePath); }, 'codeLens');
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
-      discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
+      void discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens')
+        .catch(reportCommandFailure('Discard hunk', filePath));
     }),
     // Deleted-file file-level actions (rendered on the baseline side of a deleted diff).
     // Accept = confirm the deletion (drop from tracking); Restore = write the baseline back.
@@ -210,7 +227,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       acceptFileByPath(stateManager, filePath, () => { onStateChanged(); walkAfterResolve(filePath); });
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensRestoreFile', (filePath: string) => {
-      void discardFileByPath(stateManager, fileWatcher, filePath, () => { onStateChanged(); walkAfterResolve(filePath); });
+      void discardFileByPath(stateManager, fileWatcher, filePath, () => { onStateChanged(); walkAfterResolve(filePath); })
+        .catch(reportCommandFailure('Restore file', filePath));
     }),
   );
 
@@ -229,22 +247,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       if (!t) return;
       const hunk = hunkAtCursor(t.editor, t.fileState);
       if (!hunk) return;
-      discardHunk(stateManager, fileWatcher, t.filePath, hunkId(hunk),
-        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding');
+      void discardHunk(stateManager, fileWatcher, t.filePath, hunkId(hunk),
+        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding')
+        .catch(reportCommandFailure('Reject hunk', t.filePath));
     }),
     vscode.commands.registerCommand('interactiveReview.rejectSelection', () => {
       const t = activeReviewTarget(stateManager);
       if (!t) return;
       const sel = t.editor.selection;
       void rejectSelection(stateManager, fileWatcher, t.filePath, sel.start.line, sel.end.line,
-        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding');
+        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding')
+        .catch(reportCommandFailure('Reject selection', t.filePath));
     }),
     vscode.commands.registerCommand('interactiveReview.acceptSelection', () => {
       const t = activeReviewTarget(stateManager);
       if (!t) return;
       const sel = t.editor.selection;
       void acceptSelection(stateManager, t.filePath, sel.start.line, sel.end.line,
-        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); }, 'keybinding');
+        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); }, 'keybinding')
+        .catch(reportCommandFailure('Accept selection', t.filePath));
     }),
     vscode.commands.registerCommand('interactiveReview.acceptFile', () => {
       const t = activeReviewTarget(stateManager);
@@ -256,7 +277,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       const t = activeReviewTarget(stateManager);
       if (!t) return;
       void discardFileByPath(stateManager, fileWatcher, t.filePath,
-        () => { onStateChanged(); walkAfterResolve(t.filePath); });
+        () => { onStateChanged(); walkAfterResolve(t.filePath); })
+        .catch(reportCommandFailure('Reject file', t.filePath));
     }),
     vscode.commands.registerCommand('interactiveReview.nextHunk', () => {
       const t = activeReviewTarget(stateManager);

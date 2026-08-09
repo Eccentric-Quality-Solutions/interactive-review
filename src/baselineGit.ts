@@ -6,7 +6,7 @@ import { normalizePath } from './pathNormalize';
 
 const execFileAsync = promisify(execFile);
 
-interface Settings {
+export interface Settings {
   ignorePatterns: string[];
   respectGitignore: boolean;
   clearOnBranchSwitch: boolean;

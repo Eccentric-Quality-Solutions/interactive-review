@@ -109,6 +109,47 @@ export async function disableReview(): Promise<void> {
   await sleep(100);
 }
 
+/**
+ * Create `name` at `baseline`, begin review, wait until that exact content is
+ * recorded as the git baseline, then write `modified` so the file enters reviewing.
+ *
+ * Waiting for `=== baseline` rather than merely "a baseline exists" is load-bearing:
+ * if the snapshot has not landed before the edit, the file is adopted as brand-new
+ * (null baseline) and every assertion downstream measures the wrong thing.
+ */
+export async function setupReviewingFile(name: string, baseline: string, modified: string): Promise<string> {
+  const root = getWorkspaceRoot();
+  const filePath = path.join(root, name);
+  writeFileExternally(filePath, baseline);
+  await enableReview();
+  await waitForCondition(() => gitGetBaseline(root, path.relative(root, filePath)) === baseline);
+  writeFileExternally(filePath, modified);
+  await waitForReviewing(filePath);
+  return filePath;
+}
+
+/**
+ * Open a file and set a 0-based line selection, returning the editor. Omitting `endLine0`
+ * selects that one line in full — NOT a collapsed cursor. The hunk commands only read
+ * `selection.active.line`, so this serves cursor-based tests too; but a test of
+ * `acceptSelection`/`rejectSelection` written this way exercises the partial-selection
+ * path, not the whole-hunk fallback a bare cursor would take.
+ */
+export async function openWithSelection(
+  filePath: string,
+  startLine0: number,
+  endLine0: number = startLine0,
+): Promise<vscode.TextEditor> {
+  const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+  const doc = editor.document;
+  const endCol = doc.lineAt(Math.min(endLine0, doc.lineCount - 1)).text.length;
+  editor.selection = new vscode.Selection(
+    new vscode.Position(startLine0, 0),
+    new vscode.Position(endLine0, endCol),
+  );
+  return editor;
+}
+
 /** Open a file in a real editor tab and return the editor (buffer is clean). */
 export async function openDocInEditor(filePath: string): Promise<vscode.TextEditor> {
   const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
@@ -161,32 +202,25 @@ export function cleanWorkspace(): void {
   }
 }
 
-export function getReviewPanel(): any {
+/**
+ * Call an accessor on the activated extension's exported test API, or return
+ * undefined if the extension is absent, not yet active, or predates the accessor.
+ */
+function fromExtensionApi(accessor: 'getReviewPanel' | 'getStateManager' | 'getFileWatcher'): any {
   const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
-  if (api && typeof api.getReviewPanel === 'function') {
-    return api.getReviewPanel();
-  }
-  return undefined;
+  return typeof api?.[accessor] === 'function' ? api[accessor]() : undefined;
+}
+
+export function getReviewPanel(): any {
+  return fromExtensionApi('getReviewPanel');
 }
 
 export function getStateManager(): any {
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  if (!ext || !ext.isActive) return undefined;
-  const api = ext.exports;
-  if (api && typeof api.getStateManager === 'function') {
-    return api.getStateManager();
-  }
-  return undefined;
+  return fromExtensionApi('getStateManager');
 }
 
 export function getFileWatcher(): any {
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  if (!ext || !ext.isActive) return undefined;
-  const api = ext.exports;
-  if (api && typeof api.getFileWatcher === 'function') {
-    return api.getFileWatcher();
-  }
-  return undefined;
+  return fromExtensionApi('getFileWatcher');
 }

@@ -5,6 +5,7 @@ import {
   getWorkspaceRoot, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher, getReviewPanel,
+  setupReviewingFile,
 } from './helpers';
 import { acceptHunk, discardHunk } from '../../commands';
 import { computeHunks, hunkId } from '../../diffEngine';
@@ -22,27 +23,6 @@ suite('interactive-review diff editor integration', function () {
     try { await disableReview(); } catch { /* ignore */ }
     cleanWorkspace();
   });
-
-  /**
-   * Helper: create a file, enable interactive-review, then modify externally to produce hunks.
-   */
-  async function setupReviewingFile(filename: string, baseline: string, modified: string): Promise<string> {
-    const root = getWorkspaceRoot();
-    const filePath = path.join(root, filename);
-
-    writeFileExternally(filePath, baseline);
-    await enableReview();
-
-    const rel = path.relative(root, filePath);
-    await waitForCondition(() => gitGetBaseline(root, rel) === baseline, 5000);
-
-    writeFileExternally(filePath, modified);
-
-    const sm = getStateManager();
-    await waitForCondition(() => sm.getFile(filePath)?.status === 'reviewing', 5000);
-
-    return filePath;
-  }
 
   // ── textDocuments scheme filtering ────────────────────────────────────────
 
