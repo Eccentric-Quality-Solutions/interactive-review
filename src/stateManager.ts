@@ -598,12 +598,20 @@ export class StateManager {
       g.listTrackedFiles(),
     ]);
 
-    // Remove tracked files that are now ignored (from git and from in-memory state)
-    const allowedSet = new Set(allowedFiles);
-    const toRemove = trackedFiles.filter(fp => !allowedSet.has(fp));
+    // Remove tracked files that are now ignored (from git and from in-memory state).
+    //
+    // Test `shouldIgnore` directly rather than "missing from allowedFiles":
+    // collectWorkspaceFiles only walks what exists on disk, so a *deleted* file
+    // awaiting review is absent from it for a reason that has nothing to do with
+    // ignore rules. Removing on absence git-rm'd its baseline, which permanently
+    // dropped the pending deletion from review the moment any .gitignore changed.
+    // Deletions are the file watcher's and rebuildState's business, not this
+    // function's — it syncs ignore rules and nothing else.
+    const toRemove = trackedFiles.filter(fp => shouldIgnore(fp));
     // Also remove in-memory state entries that are ignored but have no git baseline (e.g. new files in reviewing)
-    for (const fp of this.state.keys()) {
-      if (!allowedSet.has(fp) && !toRemove.includes(fp)) {
+    const removeSet = new Set(toRemove);
+    for (const fp of Array.from(this.state.keys())) {
+      if (shouldIgnore(fp) && !removeSet.has(fp)) {
         this.state.delete(fp);
       }
     }

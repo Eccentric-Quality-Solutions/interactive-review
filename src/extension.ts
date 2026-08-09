@@ -9,7 +9,7 @@ import {
   activeReviewTarget, hunkAtCursor, neighbourHunk, revealHunk,
 } from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
-import { hunkId, computeHunks } from './diffEngine';
+import { hunkId } from './diffEngine';
 import { initLog, log } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {

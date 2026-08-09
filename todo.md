@@ -97,55 +97,7 @@ insertion order.
 
 ---
 
-## 5. Flaky test: "a partial reject is a single undo"
-
-**Severity:** low — pre-existing, not newly introduced.
-
-[partialReject.test.ts:121](src/test/integration/partialReject.test.ts#L121) failed 1 of 4
-full-suite runs on 2026-08-09, and passed both in isolation and in every other run,
-including a same-session re-run of the identical suite. Undo assertions are timing
-sensitive and the suite runs under xvfb.
-
-Not caused by the tests added in Phase 4 — verified by running the walk and partialReject
-suites together (both passed) and re-running the full suite (106 passing, 0 failing).
-Recorded because task 5.1 asked for "no new flakiness" and this is the one wobble observed.
-
----
-
-## 6. Phase 4 task 5.3 was never visually confirmed
-
-**Severity:** low — verification gap, not a defect.
-
-The multi-file keyboard walk was automated in real VS Code (`keyboardWalk.test.ts`) and
-passes, but **nobody has looked at it**. Screenshot capture under Xvfb returns a blank
-332-byte frame regardless of which window is targeted — Electron with `--disable-gpu` isn't
-producing a capturable surface — so the following are unverified by eye:
-
-- diff editor red/green rendering
-- CodeLens placement and legibility on hunks
-- panel styling, and the new "Begin review" / "End review" copy in situ
-
-A two-minute manual pass closes this. Recorded in the archived
-`2026-08-09-phase-4-polish/tasks.md` as well.
-
----
-
-## 7. Stale root `.gitignore` entry for upgrading users
-
-**Severity:** cosmetic.
-
-Users who enabled review under the old `gitignoreManager` have a `# interactive-review` /
-`.vscode/interactive-review/` block in their project's root `.gitignore`. That module and
-its `removeGitignore` cleanup were deleted in favor of the self-ignoring state dir, so
-nothing will ever remove it.
-
-The entry still ignores the correct directory, so nothing breaks — it's unexplained litter
-in a tracked file. Leaving it is defensible: writing migration code to delete two lines from
-a user's `.gitignore` is a worse trade than the litter. Listed so it reads as a decision.
-
----
-
-## 8. Unused import
-
-[extension.ts:12](src/extension.ts#L12) imports `computeHunks`, which is never used.
-Pre-existing on `HEAD` — not introduced by Phase 4. Trivial.
+we need to confirm accept/discard big buttons that do all files at once
+it seem,s like sometimes it is grabbing bigger chunks of code
+It shows @line x even when its a multiline change
+Accept/Discard showing up seems to be occurring much more slowly (possibly because the repo I'm workign in is on a VM?)

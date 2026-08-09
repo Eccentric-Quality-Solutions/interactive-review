@@ -39,7 +39,14 @@ suite('interactive-review deleted-file code lenses', function () {
 
     fs.unlinkSync(filePath);
     const sm = getStateManager();
-    await waitForConditionNudged(() => sm.getFile(filePath)?.status === 'reviewing', 5000);
+    // On timeout, report what actually happened — a lost git baseline and a lost state
+    // entry are very different failures, and the bare "condition not met" hid that.
+    try {
+      await waitForConditionNudged(() => sm.getFile(filePath)?.status === 'reviewing', 5000);
+    } catch {
+      throw new Error(`${filename} never entered reviewing: state=${JSON.stringify(sm.getFile(filePath))} `
+        + `baselineInGit=${JSON.stringify(gitGetBaseline(root, rel))} onDisk=${fs.existsSync(filePath)}`);
+    }
     assert.strictEqual(fs.existsSync(filePath), false, 'file should be gone from disk');
     return filePath;
   }

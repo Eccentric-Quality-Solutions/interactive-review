@@ -123,12 +123,17 @@ suite('interactive-review partial reject', function () {
 
     const editor = await openWithSelection(f, 1, 2); // A and B
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
-    await sleep(300);
+    // Poll rather than sleep: under full-suite load the workspace edit and the undo
+    // can both land later than a fixed delay allows. Polling for the exact expected
+    // text keeps the assertion strict — a two-step undo stack would settle on
+    // 'l1\nB\nC\nl2\n' and time out here rather than pass.
+    // On timeout fall through to the assert so the failure shows the actual text.
+    await waitForCondition(() => editor.document.getText() === 'l1\nC\nl2\n').catch(() => {});
     assert.strictEqual(editor.document.getText(), 'l1\nC\nl2\n', 'lines deleted');
 
     await vscode.window.showTextDocument(editor.document);
     await vscode.commands.executeCommand('undo');
-    await sleep(200);
+    await waitForCondition(() => editor.document.getText() === 'l1\nA\nB\nC\nl2\n').catch(() => {});
     assert.strictEqual(editor.document.getText(), 'l1\nA\nB\nC\nl2\n',
       'a single undo restores both deleted lines at once');
   });

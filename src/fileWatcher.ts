@@ -70,9 +70,19 @@ export class FileWatcher {
     this.loadGitignore();
 
     const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore');
-    gitignoreWatcher.onDidChange(() => { this.loadGitignore(); this.onIgnoreRulesChanged?.(); });
-    gitignoreWatcher.onDidCreate(() => { this.loadGitignore(); this.onIgnoreRulesChanged?.(); });
-    gitignoreWatcher.onDidDelete(() => { this.loadGitignore(); this.onIgnoreRulesChanged?.(); });
+    // `**/.gitignore` also matches the `*` gitignore the extension writes into its own
+    // state dir on every beginReview. That file never affects which project files are
+    // ignored (shouldIgnore short-circuits the whole state dir), so reacting to it just
+    // schedules a pointless reload + ignore-sync that races whatever the user is doing.
+    const onGitignoreEvent = (uri: vscode.Uri) => {
+      const stateDir = this.stateManager.dir;
+      if (stateDir && normalizePath(uri.fsPath).startsWith(stateDir + path.sep)) return;
+      this.loadGitignore();
+      this.onIgnoreRulesChanged?.();
+    };
+    gitignoreWatcher.onDidChange(onGitignoreEvent);
+    gitignoreWatcher.onDidCreate(onGitignoreEvent);
+    gitignoreWatcher.onDidDelete(onGitignoreEvent);
     this.disposables.push(gitignoreWatcher);
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
