@@ -560,8 +560,15 @@ export class StateManager {
     const filePaths = await this.collectWorkspaceFiles(shouldIgnore);
     const batch = await this.readBatch(filePaths);
     if (batch.length > 0) {
-      await g.snapshotBatch(batch);
+      // Through `gitQueue`, not a bare await, matching every other `snapshotBatch` call
+      // site. The queue exists because concurrent git invocations contend on
+      // `.git/index.lock` and the loser throws — and every queue consumer swallows that
+      // error, so a collision costs a file its baseline silently. Running off-queue was
+      // survivable only while nothing else wrote git during enable; `handleDiskCreate`'s
+      // adopt-during-snapshot branch now does exactly that.
+      this.gitQueue = this.gitQueue.then(() => g.snapshotBatch(batch)).catch(err => { log(`git queue error: ${err}`); });
     }
+    await this.gitQueue;
   }
 
   private currentSettings(): Settings {

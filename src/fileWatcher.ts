@@ -65,6 +65,8 @@ export class FileWatcher {
   private gitignoreMatcher: Ignore = ignoreLib();
   // When true, all file-system events are suppressed (used during branch switch)
   private _suppressed: boolean = false;
+  // When true, `snapshotWorkspace` is mid-flight — see `snapshotInProgress`.
+  private _snapshotInProgress: boolean = false;
 
   constructor(
     private stateManager: StateManager,
@@ -254,6 +256,26 @@ export class FileWatcher {
   }
 
   /**
+   * Mark `snapshotWorkspace` as running, so a create event that lands inside the enable
+   * window is classified as pre-existing rather than new. See `handleDiskCreate`.
+   *
+   * Deliberately *not* `suppressAll`, which the obvious symmetry with activation would
+   * suggest: `_suppressed` gates all four handlers, so it would also blind the watcher to
+   * deletes and to changes against files the snapshot had already baselined. This flag
+   * changes one classification decision and nothing else. It also fails safe — a flag
+   * stuck true costs one file quietly baselined, whereas suppression stuck true is a
+   * permanently deaf watcher.
+   */
+  beginSnapshot(): void {
+    this._snapshotInProgress = true;
+  }
+
+  /** Clear the enable-window flag. Must run even if the snapshot throws. */
+  endSnapshot(): void {
+    this._snapshotInProgress = false;
+  }
+
+  /**
    * Consume-once check: did VSCode itself just save exactly `diskContent` to `filePath`?
    * Returns true only when a pending save is recorded for the path AND its content matches
    * the bytes now on disk, then clears the token. Exact match (not normalized) is deliberate:
@@ -367,6 +389,12 @@ export class FileWatcher {
 
   private async handleDiskCreate(filePath: string): Promise<void> {
     const basename = path.basename(filePath);
+    // Sampled at entry, not at the branch that consumes it. This handler awaits a disk
+    // read and a git read before classifying, and `endSnapshot` can land in either gap —
+    // reading the field late would classify a create that arrived *inside* the enable
+    // window against a flag that has since cleared, reinstating the exact false-new-file
+    // race the flag was added to remove. Arrival time is the property being tested.
+    const duringSnapshot = this._snapshotInProgress;
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
     if (this.shouldIgnore(filePath)) return;
@@ -413,6 +441,29 @@ export class FileWatcher {
     // Gated on the save event, not buffer==disk — same reasoning as onDiskChange.
     if (this.consumeManualSave(filePath, diskContent)) {
       log(`onDiskCreate(${basename}): matched VSCode save, snapshot as baseline`);
+      this.stateManager.snapshotFile(filePath, diskContent);
+      return;
+    }
+
+    // No baseline, but `snapshotWorkspace` is still running — the file was on disk when
+    // Begin review was pressed and simply has not been walked yet. Silently adopt it as
+    // baseline, matching what `handleDiskChange` already does for the identical race (see
+    // its `gitBaseline === undefined` branch, which names this case explicitly). Without
+    // this the outcome is a coin flip on filesystem timing: whichever of
+    // `collectWorkspaceFiles` and the create event wins decides whether the user's first
+    // sight of the session is an empty queue or every line of the file marked added.
+    //
+    // The cost is a genuine create landing inside the enable window being baselined
+    // instead of queued. That window is the snapshot's duration, and `beginReview`'s
+    // contract is "disk as it stands now is the baseline" — a quiet miss there is the
+    // better failure than a nondeterministic false new-file at t=0.
+    //
+    // A residual sliver stays open by construction: a file created after
+    // `collectWorkspaceFiles` returns but before `snapshotBatch` finishes gets no baseline
+    // at all, and its next change falls into handleDiskChange's Cause B adopt. Closing it
+    // would mean making the snapshot atomic against the filesystem, which it cannot be.
+    if (duringSnapshot) {
+      log(`onDiskCreate(${basename}): create during enable snapshot, adopt as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
     }

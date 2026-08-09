@@ -56,8 +56,10 @@ suite('interactive-review multi-file keyboard walk (task 5.3)', function () {
     // ── Baseline: 3 files, 9 lines each ──
     const base = Array.from({ length: 9 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
     for (const p of paths) writeFileExternally(p, base);
-    await sleep(500); // let the create-watcher settle before the snapshot
 
+    // No settle before enabling, deliberately: writing files and immediately pressing
+    // Begin review is the agent-driven case, and FileWatcher.beginSnapshot is what keeps
+    // a create event racing the snapshot from being classified as a new file.
     await enableReview();
     // The baseline must actually be recorded before we edit, or the files get treated as
     // brand-new (null baseline) and the whole walk measures the wrong thing.

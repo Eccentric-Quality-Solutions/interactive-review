@@ -7,53 +7,53 @@ Opened 2026-08-09, from the Phase 4 close-out.
 
 ---
 
-## 1. Files created just before "Begin review" can be treated as new
+## 1. Three independent answers to "is this file new"
 
-**Severity:** medium — user-visible, produces a wrong review queue.
+**Severity:** low — no known wrong behavior today; a drift hazard.
 
-Create a file, then immediately run Begin review, and the file can show up in the queue as
-an entirely-new file (null baseline, every line an addition) instead of a quiet baselined
-file with nothing pending.
+Fixing the enable-window race (see below) left the codebase with three separate places that
+decide whether an on-disk file with no baseline is a *new* file or a *pre-existing* one:
 
-**Mechanism.** [`onDiskCreate`](src/fileWatcher.ts#L337) consults the git baseline before
-declaring a file new. If the watcher's create event lands *while* `snapshotWorkspace` is
-still running, there is no baseline yet, so the file falls through to the new-file path and
-gets `baseline: null`.
+- [`handleDiskCreate`](src/fileWatcher.ts#L390) — new, unless the enable snapshot is running.
+- [`handleDiskChange`](src/fileWatcher.ts#L566) — never new; silently adopts as baseline.
+- [`adoptUntrackedFiles`](src/stateManager.ts#L234) — unconditionally new, no exceptions.
 
-**Why it's plausible that nobody hit it:** the window is the duration of the enable
-snapshot, and normal use has files sitting on disk long before Begin review is invoked.
-It becomes much likelier under agent-driven use, where files may be written seconds before
-the review is opened.
+The third is reached from `rebuildState`, i.e. the `interactiveReview.refresh` command. It
+has no guard and no comment tying it to the other two. It isn't wrong today only because
+refresh doesn't run concurrently with enable in practice — a fact nothing enforces.
 
-**Evidence.** Found while writing `keyboardWalk.test.ts`: the first run reported
-`queue=3 files, +27/-0` immediately after Begin review and before any edit. Inserting a
-500ms settle before enable made it go to `queue=0`. That workaround is still in the test —
-see the comment at the `waitForCondition` guards.
+**Found by:** a test that used `waitForConditionNudged` (which issues a refresh) to observe
+the watcher's classification. The refresh's adopt beat the watcher and won.
 
-**Likely fix.** Activation already guards `load()` with `fileWatcher.suppressAll()`
-([extension.ts:156](src/extension.ts#L156)); the enable path has no equivalent. Wrapping
-`snapshotWorkspace` in the same suppression is the obvious symmetry. Needs care: the
-suppression must be released even if the snapshot throws, and `resumeAll` must not swallow
-genuine creates that happened during the window.
+**If you touch this:** the useful move is probably not a fourth guard but making the
+decision one function that all three call.
 
 ---
 
-## 2. New-then-deleted file routes to the broken diff path
+## ~~2. Files created just before "Begin review" can be treated as new~~ — FIXED
 
-**Severity:** low — narrow race, self-heals.
+Create a file, then immediately Begin review, and it could land in the queue as an
+entirely-new file (null baseline, every line an addition) instead of a quiet baselined file.
+`handleDiskCreate` consulted the git baseline before declaring a file new, so a create event
+arriving while `snapshotWorkspace` was still running found no baseline and fell through to
+the new-file path.
 
-[`isDeleted`](src/stateManager.ts#L362) deliberately excludes `baseline === null`, so a file
-that entered state as untracked-new and was then deleted before the watcher's `onDidDelete`
-cleaned it up is `isNew: true, isDeleted: false`. `openDiffEditor`
-([reviewPanel.ts:339](src/reviewPanel.ts#L339)) then falls through to
-`vscode.diff(baselineUri, file://<missing>)` — the "file not found" error the deleted-file
-surface exists to prevent.
+Fixed with a `_snapshotInProgress` flag on `FileWatcher` (`beginSnapshot`/`endSnapshot`,
+raised across the whole enable window in `enableReview`) that sends the no-baseline case to
+the same silent-adopt branch `handleDiskChange` already used. Deliberately *not*
+`suppressAll`, which would also blind the watcher to deletes and to changes on
+already-baselined files.
 
-The watcher normally wins the race (covered by "external file deletion of new file (null
-baseline) cleans up state"). `advanceToNextFile` firing ahead of it is the window.
+Two follow-on bugs the fix introduced, both since fixed: `snapshotWorkspace` ran its
+`snapshotBatch` off the git queue and so raced the adopt path for `.git/index.lock` (both
+call sites swallow the error, losing the baseline silently); and `enableReview` resolved
+without draining the queue, breaking its documented "baseline is on disk when this resolves"
+contract for exactly the files the window protects.
 
-**Likely fix.** Guard the `openDiffEditor` call site on `!fs.existsSync(filePath)` rather
-than on `isDeleted`, which answers a narrower question than the call site is asking.
+**Residual, by construction:** a file created after `collectWorkspaceFiles` returns but
+before `snapshotBatch` finishes gets no baseline at all, and its next change is absorbed by
+`handleDiskChange`'s Cause B adopt. Closing it means making the snapshot atomic against the
+filesystem, which it cannot be. Documented at the adopt branch.
 
 ---
 
@@ -74,30 +74,9 @@ undesirable — but decide, don't leave the comment lying.
 
 ---
 
-## 4. `collectUntrackedFiles` fans out over every workspace file
-
-**Severity:** low — allocation, not risk.
-
-[stateManager.ts:151](src/stateManager.ts#L151) materializes every non-ignored workspace
-file, then fires `fs.promises.access` for all of them in one unbounded `Promise.all`,
-discarding the result for every tracked file. The pre-refactor version pruned tracked files
-*inside* the walk and awaited sequentially.
-
-No EMFILE cliff — `access` doesn't hold a descriptor — so this is wasted allocation rather
-than a failure mode. `trackedSet` is already in hand, so filtering before the fan-out is
-free:
-
-```ts
-await Promise.all(all.filter(f => !trackedSet.has(f)).map(async full => { ... }));
-```
-
-Also note `untracked.push` inside concurrent callbacks makes result ordering
-nondeterministic where the old walk was deterministic. Only affects log output and Map
-insertion order.
-
----
-
 we need to confirm accept/discard big buttons that do all files at once
 it seem,s like sometimes it is grabbing bigger chunks of code
 It shows @line x even when its a multiline change
 Accept/Discard showing up seems to be occurring much more slowly (possibly because the repo I'm workign in is on a VM?)
+if edits overlap each other, we should have an option that allows one to show a single edit at a time
+interactive review doesn't show the number of fiules in (x) like say problems or ports do

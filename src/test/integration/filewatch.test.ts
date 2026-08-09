@@ -5,7 +5,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
   sleep, waitForCondition, waitForConditionNudged, waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager,
+  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -82,6 +82,51 @@ suite('interactive-review file watcher integration', function () {
     const rel = path.relative(root, filePath);
     const gitBaseline = gitGetBaseline(root, rel);
     assert.strictEqual(gitBaseline, undefined, 'Null-baseline files should not be in git');
+  });
+
+  /**
+   * The same external create, but classified while the enable-time snapshot is notionally
+   * still running: it must be adopted as a baseline instead of queued as a new file.
+   *
+   * The flag is held open by hand rather than by racing a real `beginReview`. Reproducing
+   * the original race would mean writing a timing-dependent test to prove a timing bug is
+   * fixed — it would pass or fail on how fast the box is, in the opposite direction from
+   * the bug. Driving the classification input directly is deterministic, and
+   * `keyboardWalk.test.ts` (which now enables with no settle) carries the end-to-end
+   * evidence that the real window is covered.
+   */
+  test('external file creation during the enable snapshot is baselined, not queued', async () => {
+    const root = getWorkspaceRoot();
+    await enableReview();
+
+    const sm = getStateManager();
+    const fw = getFileWatcher();
+    assert.ok(sm && fw, 'StateManager and FileWatcher should be available');
+
+    const filePath = path.join(root, 'during-snapshot.txt');
+    const content = 'written while the snapshot was running\n';
+    const rel = path.relative(root, filePath);
+
+    fw.beginSnapshot();
+    try {
+      writeFileExternally(filePath, content);
+      // Plain wait, not `waitForConditionNudged`: the nudge issues an
+      // `interactiveReview.refresh`, and `rebuildState`'s `adoptUntrackedFiles` is a
+      // separate classifier that turns any untracked on-disk file into a null-baseline
+      // new file. It would race this assertion and win.
+      await waitForCondition(() => gitGetBaseline(root, rel) === content);
+    } finally {
+      fw.endSnapshot();
+    }
+
+    assert.strictEqual(
+      sm.getFile(filePath)?.status, undefined,
+      'File created during the enable snapshot should not be in the review queue'
+    );
+    assert.strictEqual(
+      gitGetBaseline(root, rel), content,
+      'File created during the enable snapshot should be adopted as a baseline'
+    );
   });
 
   test('external file modification preserves original baseline', async () => {

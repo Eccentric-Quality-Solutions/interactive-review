@@ -117,15 +117,31 @@ async function enableReview(
     await Promise.all([
       new Promise(resolve => setTimeout(resolve, 750)),
       (async () => {
-        await stateManager.setEnabled(true);
-        // The state dir gitignores itself (BaselineGit.ensureGitignore writes a
-        // `*` rule inside .vscode/interactive-review/ on first write), so review
-        // state stays out of the project's git without touching the user's files.
-        // Re-read .gitignore synchronously so a gitignore file that existed before
-        // enabling is honored by the snapshot below, rather than depending on the
-        // async file watcher having already fired (unreliable on Linux).
-        fileWatcher.reloadGitignore();
-        await stateManager.snapshotWorkspace((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
+        // Raised before `setEnabled` rather than just around `snapshotWorkspace`: the
+        // watcher starts delivering events the moment `enabled` flips, and a create that
+        // lands in the gap before the snapshot begins is every bit as pre-existing as one
+        // that lands during it.
+        fileWatcher.beginSnapshot();
+        try {
+          await stateManager.setEnabled(true);
+          // The state dir gitignores itself (BaselineGit.ensureGitignore writes a
+          // `*` rule inside .vscode/interactive-review/ on first write), so review
+          // state stays out of the project's git without touching the user's files.
+          // Re-read .gitignore synchronously so a gitignore file that existed before
+          // enabling is honored by the snapshot below, rather than depending on the
+          // async file watcher having already fired (unreliable on Linux).
+          fileWatcher.reloadGitignore();
+          await stateManager.snapshotWorkspace((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
+          // A create adopted by the watcher during the window enqueues its git write
+          // behind the snapshot's, so the snapshot returning does not mean every baseline
+          // is on disk. Drain before resolving, or the contract above ("the baseline is
+          // already on disk when this resolves") is false for exactly the files this
+          // window exists to protect — and the agent's first edit to one of them lands on
+          // an undefined baseline and gets silently absorbed.
+          await stateManager.flush();
+        } finally {
+          fileWatcher.endSnapshot();
+        }
       })(),
     ]);
   } finally {
