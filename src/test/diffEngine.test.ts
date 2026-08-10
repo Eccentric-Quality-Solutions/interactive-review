@@ -174,6 +174,72 @@ describe('computeHunks', () => {
     assert.equal(hunks[0].oldLines, 10);
     assert.equal(hunks[0].newLines, 1);
   });
+  // ── line endings ──────────────────────────────────────────────────────────
+  // Without `stripTrailingCr`, every one of these produced a single hunk spanning the
+  // whole input, because the `\r` is part of the token jsdiff compares.
+
+  it('ignores a pure LF -> CRLF conversion', () => {
+    const baseline = 'a\nb\nc\n';
+    const current  = 'a\r\nb\r\nc\r\n';
+    assert.deepEqual(computeHunks(baseline, current), []);
+  });
+
+  it('ignores a pure CRLF -> LF conversion', () => {
+    const baseline = 'a\r\nb\r\nc\r\n';
+    const current  = 'a\nb\nc\n';
+    assert.deepEqual(computeHunks(baseline, current), []);
+  });
+
+  it('surfaces only the real edit when it rides along with an EOL conversion', () => {
+    // The case that actually costs the user something: an agent rewrites a file, changing
+    // one word and normalizing line endings in the same write. The edit must not be buried.
+    const baseline = 'alpha\nbeta\ngamma\ndelta\n';
+    const current  = 'alpha\r\nbeta CHANGED\r\ngamma\r\ndelta\r\n';
+    const hunks = computeHunks(baseline, current);
+    assert.equal(hunks.length, 1);
+    assert.equal(hunks[0].newStart, 2);
+    assert.equal(hunks[0].newLines, 1);
+    assert.equal(hunks[0].oldLines, 1);
+  });
+
+  it('reports no carriage returns in hunk content for a CRLF file', () => {
+    const baseline = 'a\r\nb\r\nc\r\n';
+    const current  = 'a\r\nX\r\nc\r\n';
+    const hunks = computeHunks(baseline, current);
+    assert.equal(hunks.length, 1);
+    assert.deepEqual(hunks[0].addedContent, ['X']);
+    assert.deepEqual(hunks[0].removedContent, ['b']);
+  });
+
+  it('ignores EOL differences confined to part of a file (mixed endings)', () => {
+    const baseline = 'a\nb\nc\nd\n';
+    const current  = 'a\nb\r\nc\r\nd\n';
+    assert.deepEqual(computeHunks(baseline, current), []);
+  });
+
+  it('keeps acceptHunk line arithmetic valid across an EOL conversion', () => {
+    // Guards the reason this option is safe: hunks are computed on EOL-normalized text but
+    // `acceptHunk` splices the RAW baseline and document lines by index. Normalization
+    // cannot change line counts, so the indices must still line up — replicated here
+    // verbatim from commands.ts so a change to that arithmetic trips this test.
+    const baseline = 'alpha\nbeta\ngamma\n';
+    const current  = 'alpha\r\nbeta CHANGED\r\ngamma\r\n';
+    const hunk = computeHunks(baseline, current)[0];
+
+    const currentLines = current.split('\n');
+    const baselineLines = baseline.split('\n');
+    const newBaseline = [
+      ...baselineLines.slice(0, hunk.oldStart - 1),
+      ...currentLines.slice(hunk.newStart - 1, hunk.newStart - 1 + hunk.newLines),
+      ...baselineLines.slice(hunk.oldStart - 1 + hunk.oldLines),
+    ].join('\n');
+
+    // The accepted line carries its CRLF over; the untouched lines keep the baseline's LF.
+    assert.equal(newBaseline, 'alpha\nbeta CHANGED\r\ngamma\n');
+    // Which is the point: the resulting baseline has mixed endings, and the next diff must
+    // still see the file as fully resolved rather than re-reporting the line.
+    assert.deepEqual(computeHunks(newBaseline, current), []);
+  });
 });  // end computeHunks
 
 describe('hunkId', () => {

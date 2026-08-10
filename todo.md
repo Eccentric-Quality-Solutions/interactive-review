@@ -30,33 +30,6 @@ decision one function that all three call.
 
 ---
 
-## ~~2. Files created just before "Begin review" can be treated as new~~ — FIXED
-
-Create a file, then immediately Begin review, and it could land in the queue as an
-entirely-new file (null baseline, every line an addition) instead of a quiet baselined file.
-`handleDiskCreate` consulted the git baseline before declaring a file new, so a create event
-arriving while `snapshotWorkspace` was still running found no baseline and fell through to
-the new-file path.
-
-Fixed with a `_snapshotInProgress` flag on `FileWatcher` (`beginSnapshot`/`endSnapshot`,
-raised across the whole enable window in `enableReview`) that sends the no-baseline case to
-the same silent-adopt branch `handleDiskChange` already used. Deliberately *not*
-`suppressAll`, which would also blind the watcher to deletes and to changes on
-already-baselined files.
-
-Two follow-on bugs the fix introduced, both since fixed: `snapshotWorkspace` ran its
-`snapshotBatch` off the git queue and so raced the adopt path for `.git/index.lock` (both
-call sites swallow the error, losing the baseline silently); and `enableReview` resolved
-without draining the queue, breaking its documented "baseline is on disk when this resolves"
-contract for exactly the files the window protects.
-
-**Residual, by construction:** a file created after `collectWorkspaceFiles` returns but
-before `snapshotBatch` finishes gets no baseline at all, and its next change is absorbed by
-`handleDiskChange`'s Cause B adopt. Closing it means making the snapshot atomic against the
-filesystem, which it cannot be. Documented at the adopt branch.
-
----
-
 ## 3. `readBatch` docstring claims binary files are skipped — they are not
 
 **Severity:** low — wrong comment, correct behavior.

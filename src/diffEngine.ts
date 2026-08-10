@@ -1,5 +1,18 @@
 import * as Diff from 'diff';
 
+/**
+ * `stripTrailingCr` is implemented by the pinned runtime (`diff@5.2.2`, see
+ * `lib/diff/line.js`) but missing from `@types/diff@5.2.3`'s `LinesOptions`. Augmenting is
+ * preferred over casting the options object: a cast would silence a genuine typo just as
+ * happily, whereas this keeps the call site type-checked and documents exactly which
+ * upstream gap is being papered over. Delete this block when the typings gain the field.
+ */
+declare module 'diff' {
+  interface LinesOptions {
+    stripTrailingCr?: boolean | undefined;
+  }
+}
+
 export interface ParsedHunk {
   oldStart: number;
   oldLines: number;
@@ -71,8 +84,32 @@ export function splitHunkByRange(
   };
 }
 
+/**
+ * `stripTrailingCr` makes the comparison EOL-insensitive, and it is load-bearing rather
+ * than cosmetic. jsdiff splits on `\n` and compares whole tokens with `===`, so the `\r`
+ * of a CRLF file is part of every token: converting a file's line endings leaves no token
+ * in the old sequence equal to any token in the new one, Myers finds a zero-length common
+ * subsequence, and the loop below folds the resulting delete-all/insert-all into a SINGLE
+ * hunk spanning the entire file. Measured on this repo: 696 of 697 lines of fileWatcher.ts
+ * in one hunk, for a change no human would call a change — and it buries any real edit made
+ * in the same write, which is the case that actually costs the user something.
+ *
+ * VSCode's diff editor cannot show an EOL difference at all: its text model stores lines
+ * plus one EOL setting, so mixed endings are not representable. Without this option the
+ * extension reports a whole-file hunk against a diff editor painting nothing.
+ *
+ * Safe for every consumer. Normalization cannot change line counts, so `newStart`/`newLines`
+ * and the line-indexed splices in `acceptHunk`/`discardHunk` are unaffected — those build
+ * their arrays from the raw baseline and document text and never read `addedContent`.
+ * The only visible effect is that `addedContent`/`removedContent` come back without `\r`;
+ * nothing in production reads them.
+ *
+ * Deliberately NOT paired with `ignoreWhitespace`. A whitespace-only change is sometimes
+ * exactly what a reviewer needs to see, so reindents and trailing-whitespace strips keep
+ * costing what they cost.
+ */
 export function computeHunks(baseline: string | null, current: string): ParsedHunk[] {
-  const changes = Diff.diffLines(baseline ?? '', current);
+  const changes = Diff.diffLines(baseline ?? '', current, { stripTrailingCr: true });
 
   const hunks: ParsedHunk[] = [];
   let oldLine = 1;
