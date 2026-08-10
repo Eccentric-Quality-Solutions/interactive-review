@@ -4,7 +4,10 @@ Panel findings, 2026-08-09. Convened after a report that the review surface "som
 highlights the entire file, but accepting acts as if it had only done a smaller portion —
 it's hard to tell when one clicks Accept exactly what one is accepting."
 
-Status: **diagnosis complete, nothing implemented.** Staged plan at the end.
+Status (2026-08-10): **diagnosis complete.** One item shipped — EOL-insensitive diffing
+(§7, commit `18e80c1`). One item **withdrawn** — gated hunk coalescing (§5 Stage 2 / §8).
+Everything else was triaged into the prioritized backlog in [`../todo.md`](../todo.md),
+which is the place to look for *what to do next*; this document is the *why*.
 
 ---
 
@@ -66,8 +69,13 @@ block **above**.
 ### 2c. Nothing shows a hunk's extent
 
 The lens title is exactly `$(check) Accept`. No line count, no range, no gutter marker, no
-hover. The panel row shows `@line N` only — the start, never the extent. The information
-is computed and then discarded.
+hover.
+
+(Correction, 2026-08-10: an earlier draft said the panel shows `@line N` "never the extent".
+That is wrong — `media/panel.js:651-655` renders `@line N` *and* `+N -M` per hunk. The real
+asymmetry is that the panel states the extent and the lens does not, which makes the fix
+cheaper than described: copy the panel's wording. The separate complaint that `@line N`
+reads oddly for a multi-line change stands on its own.)
 
 ---
 
@@ -166,7 +174,21 @@ proposals, not different values.
    user feedback** — at four separate boundaries (webview postMessage, CodeLens arguments,
    keyboard commands, jumpToHunk). Reported slowness on a VM widens exactly this window.
 
-### Stage 2 — gated coalescing. Ships as one commit with the selection fix.
+*Stage 1 status: not yet implemented. Items 1–2 are backlog item **B**, item 3 is backlog item
+**E** in [`../todo.md`](../todo.md) — with narrower scoping than proposed here (the stale-id
+window turned out to be one repaint, so the recommendation there is two warnings, not five).*
+
+### Stage 2 — gated coalescing — **WITHDRAWN (2026-08-10)**
+
+> Not implemented and not planned. Whole-file Accept from the panel row already collapses a
+> fragmented prose edit to one click, so this bought a cosmetic win over a shipped workaround —
+> at the cost of a `computeHunks` rewrite, a *mandatory* companion fix to
+> `splitHunkByRange`/`acceptSelection`/`rejectSelection`, and the unresolved §8 question about
+> code files. Multi-hunk selection (§6, backlog item **C**) reaches the same goal — one gesture
+> per logical edit — without touching the differ. Rationale of record: [`../todo.md`](../todo.md),
+> "Dropped: gated hunk coalescing". Reopen only if C ships and fragmentation still bites.
+
+The original proposal, kept for the analysis:
 
 Implement inside `computeHunks` as a post-pass (rename the current body to
 `computeAtomicHunks`), so every call site inherits it and lens ids match command ids.
@@ -200,13 +222,21 @@ Revisit if any of these becomes true:
 
 ## 6. Separate bugs surfaced along the way
 
-- **Multi-hunk selection does not work.** `acceptSelection` resolves a selection to *one*
-  hunk, so selecting six paragraphs and accepting takes only the first. There is currently
-  no one-gesture way to accept a visual region short of whole-file Accept. Fixable at the
-  command layer (~30-40 lines) by iterating every intersecting hunk — an alternative route
-  to "one action per logical edit" that does not touch the differ at all.
-- **`pendingCount` is sent to the webview and never rendered.**
-- **Stale ids fail silently at four boundaries**, log-only, no toast, no refresh.
+*All still open; tracked with current scoping in [`../todo.md`](../todo.md) — do not
+re-triage them here.*
+
+- **Multi-hunk selection does not work** *(backlog **C**)*. `acceptSelection` resolves a
+  selection to *one* hunk, so selecting six paragraphs and accepting takes only the first.
+  There is currently no one-gesture way to accept a visual region short of whole-file Accept.
+  Fixable at the command layer (~30-40 lines) by iterating every intersecting hunk — an
+  alternative route to "one action per logical edit" that does not touch the differ at all.
+  With Stage 2 withdrawn, this is now *the* route to that goal.
+- **`pendingCount` is sent to the webview and never rendered.** Still true —
+  [reviewPanel.ts:198](../src/reviewPanel.ts#L198) populates it; no `media/panel.js` read.
+  Adjacent to the standing request that the panel show a file count in its tab title the way
+  Problems and Ports do.
+- **Stale ids fail silently at four boundaries**, log-only, no toast, no refresh
+  *(backlog **E**)*.
 
 ---
 
@@ -266,6 +296,9 @@ grep for `\r\n`, `eol`, `autocrlf` returns nothing.
 
 ### The causes that paint whole-file with no real diff at all
 
+*Cause 1 is backlog item **F**; causes 2 and 3 are both backlog item **A**, which fixes them
+with the same ~5 lines. See [`../todo.md`](../todo.md).*
+
 The archetypes above are all cases where the bytes genuinely differ. The audit found three
 where the *paint* is whole-file while the model says something small or nothing. These are
 closer to the literal complaint and are ordered by how likely they are to fire.
@@ -292,7 +325,9 @@ the entire file as one added block — until the async `closeStaleTabs` removes 
 
 - **`acceptHunk` folds the buffer into the baseline; `acceptFileByPath` folds disk.** Accept
   a hunk with unsaved edits in the buffer and the recorded baseline contains text that was
-  never written to disk. Undo the buffer and you get hunks you never made. Still open.
+  never written to disk. Undo the buffer and you get hunks you never made. Still open —
+  backlog item **D**, where it is upgraded from an undo problem to a data-loss one
+  (`scanTrackedIntoState` rebuilds from disk, so a reload resurrects an inverted hunk).
 - **RETRACTED: "`discardHunk` writes LF endings unconditionally, leaving a phantom hunk in
   CRLF files."** The reading of the source was right — `originalLines.join('\n') + '\n'`,
   no consultation of `doc.eol` — but the conclusion did not follow, because it depends on
@@ -331,11 +366,13 @@ condition ("whole file reformatted") would beat presenting a 700-line hunk.
 
 ---
 
-## 8. Open decision
+## 8. The open decision — closed by withdrawing the feature (2026-08-10)
 
-The gate on **code** is the real judgment call. Roughly half of single-line gaps in `.ts`
+The gate on **code** was the real judgment call. Roughly half of single-line gaps in `.ts`
 files here are blank lines, so two edits separated by one blank line inside a function would
 merge. For prose that is obviously right. For code it is arguable, and there is a standing
 complaint pointing the *other* way ("sometimes it is grabbing bigger chunks of code").
 
-Decide deliberately whether the gate applies everywhere or only to prose-ish files.
+**Resolution:** the question was never answered because coalescing itself was withdrawn (§5
+Stage 2). Being unable to settle the code gate cheaply was part of why. If coalescing is ever
+reopened, this is the question that must be answered first.

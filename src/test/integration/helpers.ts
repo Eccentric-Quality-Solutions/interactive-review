@@ -70,8 +70,17 @@ export async function waitForCondition(fn: () => boolean, timeoutMs = 10000, int
  * Wait until `filePath` is in reviewing state, nudging a synchronous rescan each poll.
  *
  * Detection of a brand-new externally-created file relies on VS Code's
- * createFileSystemWatcher firing onDidCreate — which is unreliable in the headless
- * Linux test host (events for external raw-fs writes are dropped or badly delayed).
+ * createFileSystemWatcher firing onDidCreate — which was believed unreliable in the
+ * headless Linux test host (events for external raw-fs writes dropped or badly delayed).
+ *
+ * CAUTION (2026-08-10): that premise was RETRACTED — see design.md §4c.1. A direct probe
+ * on a headless Linux host at stock inotify limits delivered 30/30 onDidCreate events at
+ * ~130ms. The original failures were inotify *starvation* on a saturated workstation, not
+ * a platform limit. This nudge therefore compensates for a cause that no longer
+ * reproduces, and it has a real cost: because it drives interactiveReview.refresh, every
+ * test using it asserts the synchronous rescan path works — such a test CANNOT FAIL if
+ * the watcher breaks. Kept for now as margin; if you are adding a test that is genuinely
+ * about watcher delivery, use a plain waitForCondition instead.
  * The synchronous rebuildState path (interactiveReview.refresh) detects the same file
  * deterministically via collectUntrackedFiles, so we drive it as a fallback. This tests
  * the end-state (file enters reviewing with the right baseline) without depending on the

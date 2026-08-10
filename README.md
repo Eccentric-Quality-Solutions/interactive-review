@@ -19,8 +19,18 @@ NOTE: **Interactive Review is a fork of [hunkwise](https://github.com/molon/hunk
 
 Early development. The single-file review loop (baseline → per-hunk `Accept`/`Discard`
 CodeLens in a native diff editor → baseline update) works today, along with the
-bounded-changeset flow (cross-file auto-advance and an explicit review-complete state). See
-[`docs/design.md`](docs/design.md) for the architecture and phased plan.
+bounded-changeset flow (cross-file auto-advance and an explicit review-complete state).
+
+**Documentation map:**
+
+| Doc | What it answers |
+| --- | --- |
+| [`docs/design.md`](docs/design.md) | Architecture, phased plan, and the dated record of every design decision |
+| [`todo.md`](todo.md) | **The prioritized backlog** — known, unfixed issues, in recommended order |
+| [`docs/review-ui-legibility.md`](docs/review-ui-legibility.md) | Why one edit can become six Accept buttons, and why a file sometimes paints whole |
+| [`docs/terminal-edits-not-captured.md`](docs/terminal-edits-not-captured.md) | How a user's save is told apart from an agent's write |
+| [`docs/interactive-review-model.md`](docs/interactive-review-model.md) | The review-flow *concept* this reproduces |
+| [`docs/prior-art-and-alternatives.md`](docs/prior-art-and-alternatives.md) · [`docs/hunkwise-evaluation.md`](docs/hunkwise-evaluation.md) | What else exists, and why this is a fork of hunkwise |
 
 ## Install
 

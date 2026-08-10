@@ -25,6 +25,14 @@ Target = the "Cursor classic" review flow: chat-driven, multi-file, walk-a-queue
 
 Legend: ✓ yes · ~ partial · ✗ no · — n/a
 
+> **Where the "Target" column stands (2026-08-10).** Everything in it ships today except
+> *marketplace-published* (built locally as a `.vsix`; the proposed-API blocker was removed,
+> so nothing structural is in the way) and *chat-driven changeset boundary*, which landed as
+> **snapshot-on-command** rather than a chat hook — `interactiveReview.beginReview` is
+> agent-callable and tool-agnostic, which keeps the bounded-changeset property without
+> binding to one agent. Per-line/range actions ship as partial-hunk accept/reject over a
+> selection. See [design.md §4d–§4g](design.md).
+
 ## The players
 
 - **[hunkwise](https://github.com/molon/hunkwise)** — the closest existing thing: a real,
@@ -88,8 +96,14 @@ fork-debt assessment, decides between paths 1 and 3.
 
 > **Update (2026-07-04):** the API question is decided — **stable API only**, no
 > `editorInsets` (see [hunkwise-evaluation.md §8](hunkwise-evaluation.md)). Architecture and
-> phased plan are in [design.md](design.md). Still open: fork hunkwise vs. build fresh (both
-> stable-only).
+> phased plan are in [design.md](design.md).
+>
+> **Update (2026-07-04, later): path 1 chosen — forked.** hunkwise is vendored into this
+> repo, stripped of the proposed API, rebranded, and extended with the flow layer
+> (cross-file auto-advance + review-complete). Fork debt is now *our* debt: see
+> [design.md §4a](design.md) for what the fork changed and [`../todo.md`](../todo.md) for
+> what it left us. Path 2 (contribute upstream) was not attempted — upstream has stayed
+> dormant.
 
 ## Sources
 

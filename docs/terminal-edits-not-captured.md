@@ -1,9 +1,16 @@
 # Bug: Claude/terminal edits not captured when the file is open in the editor
 
-**Status:** Open-file fix + diagnostic logging implemented; regression tests added (2026-07-12). Cause B (closed-file, no baseline) left as a documented decision — see §5.
+**Status:** **Fixed for the open-file cause** — buffer-match heuristic replaced by an
+`onDidSaveTextDocument` save token, diagnostic logging added, regression tests added
+(2026-07-12; see §8). **Cause B** (disk change to a file with no baseline) is a *deliberate,
+now-logged* known gap — see §5 and §8.
 **Reported:** 2026-07-12 — "It does not appear to capture Claude edits when they are made from the terminal."
-**Affected code:** [fileWatcher.ts](../src/fileWatcher.ts) `onDiskChange` (≈L447–454) and its twin in `onDiskCreate` (≈L312–322)
-**Prior art in this repo:** This is the "reload race" already documented as a *known fragility* in [design.md §4f](design.md) — now observed biting.
+**Affected code:** [fileWatcher.ts](../src/fileWatcher.ts) — `handleDiskChange` and its twin
+`handleDiskCreate`. *(§1–§7 below quote line numbers from the pre-fix tree; they no longer
+resolve. Grep for `consumeManualSave` / `handleDiskChange` instead.)*
+**This document is the authoritative account of user-save vs. external-write discrimination.**
+[design.md §4f](design.md) states the product *property* and the VS Code API research; the
+*mechanism* lives here. §1–§7 are the diagnosis as it stood; **§8 is what shipped.**
 
 > **⚠️ Update (2026-07-12):** The reporter clarified the missed files were **not all open** in the
 > editor. The buffer-match heuristic below (§1–§4) only affects *open* files, so it is **not the
@@ -170,7 +177,7 @@ buffer-match heuristic (§1) can only fire for *open* files, it cannot be the so
 cause. For a **closed** file, `onDiskChange` skips the buffer branch and runs:
 
 ```ts
-// fileWatcher.ts:456-470
+// fileWatcher.ts, handleDiskChange — tail
 const gitBaseline = await git.getBaseline(filePath);
 if (gitBaseline === undefined) {
   this.stateManager.snapshotFile(filePath, diskContent);   // silently adopt — NO hunk
@@ -179,7 +186,7 @@ if (gitBaseline === undefined) {
 this.enterReviewing(filePath, gitBaseline, diskContent);   // review it
 ```
 
-`snapshotWorkspace` ([stateManager.ts:473](../src/stateManager.ts)) baselines **every non-ignored
+`snapshotWorkspace` ([stateManager.ts](../src/stateManager.ts)) baselines **every non-ignored
 readable file** at enable time, so a normal closed file that existed at enable *has* a baseline and
 should reach `enterReviewing`. A closed-file edit therefore goes missing only via:
 
@@ -199,16 +206,26 @@ should reach `enterReviewing`. A closed-file edit therefore goes missing only vi
 
 ### Cause B — event arrives but `getBaseline` returns `undefined` → silent snapshot (L467)
 
-Happens only for files with no baseline: binary / non-UTF-8 / unreadable at enable time (skipped at
-[stateManager.ts:504](../src/stateManager.ts)), or files that were gitignored at enable (but those
-are already filtered by Cause A.1). Also absorbs a terminal *modify* of a file that was untracked at
-enable time. Worth fixing (surface for review or at least log), but a narrower cause than A.
+Happens only for files with no baseline: files **unreadable** at enable time (skipped by
+`readBatch`'s `catch` in [stateManager.ts](../src/stateManager.ts)), or files that were
+gitignored at enable (but those are already filtered by Cause A.1). Also absorbs a terminal
+*modify* of a file that was untracked at enable time. Worth fixing (surface for review or at
+least log), but a narrower cause than A.
 
-### The decisive gap: `onDiskChange` has no entry logging
+> **Correction (2026-08-10):** an earlier draft listed *binary / non-UTF-8* files here as
+> skipped. They are **not** — `fs.promises.readFile(fp, 'utf-8')` does not throw on binary
+> input, it returns lossy U+FFFD text which is then snapshotted as a baseline. Only genuinely
+> unreadable files reach the `catch`. The `readBatch` docstring still asserts the wrong
+> guarantee; tracked as item 3 in [`../todo.md`](../todo.md).
+
+### The decisive gap: `onDiskChange` has no entry logging — FIXED (§8)
+
+*Resolved 2026-07-12: `handleDiskChange` now logs at entry and on every branch, including a loud
+line on the Cause B absorb path. The diagnosis below is why.*
 
 Every other handler (`onDiskCreate`, `onDiskDelete`) logs at entry and per-branch; `onDiskChange`
-logs nothing at entry, and both silent-drop paths (`shouldIgnore` early-return at L424, and the
-`getBaseline === undefined` snapshot at L467) emit **no** log line. A swallowed edit is invisible in
+logs nothing at entry, and both silent-drop paths (the `shouldIgnore` early-return and the
+`getBaseline === undefined` snapshot) emit **no** log line. A swallowed edit is invisible in
 the "Interactive Review" output channel — you cannot tell Cause A (event never arrived) from Cause B
 (baseline path swallowed it). **First action: add diagnostic logging** — entry line + which branch
 fired — so a reproduction reveals the real cause instead of guessing. This also justifies making the
@@ -267,8 +284,8 @@ integration tier (real vscode API) plus the injected seam for a fast unit test.
 5. Scope the save token so a save with no following disk-change can't later swallow an external edit.
 6. Add tests A–F with an injected seam; make them timer-free.
 7. Decide the dirty-buffer product behavior (§4.5) explicitly.
-8. Separately: rule out `files.watcherExclude`/gitignore for any closed-file reports (§5), and fix
-   the null-baseline silent snapshot (§5.5).
+8. Separately: rule out `files.watcherExclude`/gitignore for any closed-file reports (§5 Cause A),
+   and decide on the null-baseline silent snapshot (§5 Cause B).
 
 **Residual risk after the fix:** narrow — a save whose disk event is lost, and the rapid
 same-file-churn window — both far smaller than the bug being replaced, and both testable.
@@ -302,6 +319,27 @@ note.
 missed-create edit. Flipping it to `enterReviewing(null)` would recover those edits at the risk of
 spurious hunks during transient enable states. Left as-is, now **logged**, with a characterization
 test — a deliberate decision to make explicitly rather than change unilaterally.
+
+---
+
+## 9. Later hardening of the save-token path (2026-07-12 → 2026-08-09)
+
+The §7 recommendation's item 5 — *"scope the save token so a save with no following disk-change
+can't later swallow an external edit"* — was tightened after the initial fix:
+
+- **Stranded tokens are reclaimed by construction** (`b236a6f`). Tokens are tracked by object
+  identity and dropped in a `finally` wrapper around the disk handlers, so a handler that
+  early-returns (ignored path, self-edit, unreadable file) cannot leave one behind. This is
+  belt-and-braces on top of the exact-content match, which already fails safe toward reviewing.
+- **The enable-window create race got its own guard** (`ccb994d`,
+  [snapshotCreateTracker.ts](../src/snapshotCreateTracker.ts)): a file created *while*
+  `snapshotWorkspace` is running is adopted as a baseline rather than classified as new. That
+  guard is one of the three independent "is this file new" decisions now noted as a drift hazard
+  in [`../todo.md`](../todo.md) item 1.
+
+**Cause B remains open by decision**, and the code says so — `handleDiskChange` carries a
+`KNOWN GAP (Cause B)` comment pointing back at §5, plus the loud log line and a characterization
+test pinning the current behavior.
 
 ---
 

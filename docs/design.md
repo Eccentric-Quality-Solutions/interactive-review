@@ -5,6 +5,18 @@ extension using **stable APIs only** (decision recorded in
 [hunkwise-evaluation.md §8](hunkwise-evaluation.md)). `editorInsets` is deferred to a possible
 future enhanced mode. This doc is the architecture + phased plan.*
 
+> **Where things live.** This file is the architecture and the *dated record of decisions*
+> — sections marked with a date are history, kept so the reasoning isn't rediscovered, not
+> a description of today's code. For current state:
+> - **Open, unfixed work** → [`../todo.md`](../todo.md) (the single prioritized backlog).
+> - **Why one edit becomes six Accept buttons / whole-file paint** →
+>   [review-ui-legibility.md](review-ui-legibility.md).
+> - **How a user save is told from an agent write** →
+>   [terminal-edits-not-captured.md](terminal-edits-not-captured.md) (supersedes §4f below).
+> - **Concept / prior art / fork evaluation** → [interactive-review-model.md](interactive-review-model.md),
+>   [prior-art-and-alternatives.md](prior-art-and-alternatives.md),
+>   [hunkwise-evaluation.md](hunkwise-evaluation.md).
+
 ---
 
 ## 1. Two layers
@@ -83,11 +95,15 @@ status:  open ──(all hunks dispositioned)──▶ complete ──(user clos
   and remains the review surface.
 - **Rebranded** `package.json` → `eccentricqualitysolutions.vsc-interactive-review` / "Interactive Review",
   v0.0.1. Scoped `tsconfig` to `src/**` (was globbing the reference clone).
-- **Verifies:** `npm run compile` clean; `72/73` unit tests pass.
+- **Verifies:** `npm run compile` clean; `72/73` unit tests pass *(count as of this date; see
+  §4g for the current suite)*.
 
-**Known issue (pre-existing, not ours):** 1 unit test fails —
-`HunkwiseGit › NFD paths … found as NFC` — a Unicode-normalization test that assumes macOS
-filesystem behavior; fails on Linux. We didn't touch the relevant files. Investigate later.
+**Known issue at the time (pre-existing, not ours) — RESOLVED.** 1 unit test failed —
+`HunkwiseGit › NFD paths … found as NFC` — a Unicode-normalization test that assumed macOS
+filesystem behavior and failed on Linux. The test has since been rewritten to assert the
+platform-conditional contract it actually means (`NFD→NFC on macOS, identity elsewhere`,
+[baselineGit.test.ts:427](../src/test/baselineGit.test.ts#L427)) and passes everywhere. The
+unit suite is green — no known-failing unit tests remain.
 
 **Follow-ups before real feature work:**
 - **Publisher id** — set to `eccentricqualitysolutions` (2026-07-05).
@@ -117,7 +133,7 @@ no new code needed. Verification exercised the real extension in headless VS Cod
   integration tests pass: `diff editor` suite (CodeLens visibility, accept-by-file-scheme,
   last-hunk-closes-tab), hunk navigation (accept/discard jumps to next hunk; last hunk exits
   reviewing), and baseline-update edge cases (empty file, new file null→content, restore).
-- **Unit:** 72/73 (the 1 fail = known macOS-only Unicode NFC/NFD test, not ours).
+- **Unit:** 72/73 (the 1 fail = the Unicode NFC/NFD test, since fixed — see §4a).
 - **Integration:** 50 passing / 1 pending / **17 failing** — see known-issue below.
 
 **Known issue — 17 integration failures in the continuous-monitor layer (pre-existing, not a
@@ -156,7 +172,7 @@ causes, in priority order:**
    flakiness, or a real Linux product limitation?** hunkwise has a known Linux watcher caveat
    (eval-doc source: hunkwise issue #20). May need a polling fallback for the watcher on Linux.
 2. **No synchronous gitignore reload on enable (product bug).** `loadGitignore()` runs *once* at
-   activation ([fileWatcher.ts:64](src/fileWatcher.ts#L64)) and thereafter only on watcher
+   activation ([fileWatcher.ts:64](../src/fileWatcher.ts#L64)) and thereafter only on watcher
    events. A `.gitignore` written before `enableReview()` is respected only if the async watcher
    happens to fire during the test's `sleep(300)`. Fix: reload gitignore synchronously in the
    enable / initial-scan path. This is a genuine robustness fix, not just a test fix.
@@ -178,24 +194,67 @@ Integration suite now **67 passing / 1 pending / 0 failing**, confirmed across t
 runs (the 1 pending is a pre-existing self-skip: the `.git/HEAD` branch-switch watcher test
 skips when the test workspace has no `.git/HEAD` at activation). Fixes applied:
 
-- **#3 state leak (product) — [stateManager.ts](src/stateManager.ts) `setEnabled`.** Enable now
+- **#3 state leak (product) — [stateManager.ts](../src/stateManager.ts) `setEnabled`.** Enable now
   bases its settings merge on `g.loadSettings()` (which applies true defaults for an absent
   file) instead of `currentSettings()` (stale in-memory values). A fresh enable no longer
   inherits a prior session's settings.
-- **#2 gitignore-on-enable (product) — [commands.ts](src/commands.ts) `enableReview` +
-  [fileWatcher.ts](src/fileWatcher.ts) `reloadGitignore()`.** The enable path now re-reads all
+- **#2 gitignore-on-enable (product) — [commands.ts](../src/commands.ts) `enableReview` +
+  [fileWatcher.ts](../src/fileWatcher.ts) `reloadGitignore()`.** The enable path now re-reads all
   `.gitignore` files synchronously before `snapshotWorkspace`, so a gitignore present before
   enabling is honored without depending on the async watcher.
-- **settings.json watcher (product) — [extension.ts](src/extension.ts).** Added an mtime-poll
+- **settings.json watcher (product) — [extension.ts](../src/extension.ts).** Added an mtime-poll
   fallback (folded into the existing 1s git-dir poll) because `fs.watch` on the state dir drops
   external writes on Linux. Fixed the settings-sync test outright.
 - **#1 watcher latency (test harness).** Two moves: (a) `waitForCondition` now enforces a 15s
-  patience floor centrally ([helpers.ts](src/test/integration/helpers.ts)) — one change covers
+  patience floor centrally ([helpers.ts](../src/test/integration/helpers.ts)) — one change covers
   70+ tight call sites inherited from hunkwise's macOS runs; (b) the **brand-new-external-file
   detection** cluster (5 tests in `filewatch`/`deleteRestore`) now uses `waitForReviewing` /
   `waitForConditionNudged`, which drive `interactiveReview.refresh` (synchronous `rebuildState`
   → `collectUntrackedFiles`) as a rescan fallback. These assert the same end-state without
   depending on the flaky async watcher.
+
+> **⚠️ RETRACTED (2026-08-10) — the finding below does not reproduce.** Re-measured directly
+> with a purpose-built probe ([watcherProbe.test.ts](../src/test/integration/watcherProbe.test.ts),
+> run with `WATCHER_PROBE=1`) on a genuinely headless Linux host (Lima VM, no `DISPLAY`, Xvfb,
+> VS Code 1.132, **stock** `max_user_instances=128` / `max_queued_events=16384`):
+>
+> | Event | Delivered | p50 | max |
+> |---|---|---|---|
+> | `onDidCreate` (external raw-fs write) | **30/30** | 129ms | 133ms |
+> | `onDidChange` | **30/30** | 130ms | 131ms |
+> | `onDidDelete` | **30/30** | 130ms | 132ms |
+> | new file → `reviewing`, **no** refresh nudge | **30/30** | 201ms | 203ms |
+>
+> Zero drops, ~130ms latency — against a 15s wait floor. The full integration suite is also
+> green on that VM at stock limits (112 passing / 3 pending / 0 failing; 2 of the pending are
+> the probe itself, which self-skips).
+>
+> **Both halves of the finding are wrong.** The platform claim is wrong: `createFileSystemWatcher`
+> delivers external create/delete reliably and fast. The proposed *mechanism* is also wrong —
+> the probe writes exactly the way the doc blamed ("from inside the extension-host process",
+> raw `fs.writeFileSync`) and events still arrive.
+>
+> **What was actually being measured: inotify starvation, not a platform limit.** The
+> distinguishing variable is *available* instances, not the limit or the OS. Same 128 cap,
+> opposite outcome:
+>
+> | Box | `max_user_instances` | inotify fds in use | Result |
+> |---|---|---|---|
+> | Dev workstation (desktop + VS Code windows + leaked test hosts) | 128 | ~145 | mass watcher timeouts |
+> | Idle Lima VM | 128 | **9** | 30/30 delivered |
+>
+> **Consequence for the code.** `WAIT_FLOOR_MS = 15000` and the `waitForConditionNudged`
+> rescan fallback in [helpers.ts](../src/test/integration/helpers.ts) were built to compensate
+> for a cause that does not reproduce on an unsaturated machine. The nudge is not merely
+> redundant: it drives `interactiveReview.refresh`, so the five brand-new-external-file tests
+> assert that the *synchronous rescan* works, not that the watcher does — they cannot fail if
+> the watcher breaks. Removing the scaffolding is a live option but is **not done**: one run of
+> the VM suite showed a single failure that did not reproduce on the next run, and an
+> unidentified flake is a bad reason to delete safety margin. The conclusion the finding was
+> cited for — *no production polling fallback* — is **unchanged and now better supported**,
+> since the watcher works.
+>
+> The original text follows, retained as the record of what was believed.
 
 **Empirical finding that settles §5-adjacent open question:** VS Code's `createFileSystemWatcher`
 does **not** reliably deliver *external raw-fs create/delete* events in the headless Linux test
@@ -206,7 +265,8 @@ write cross-process, which VS Code's production Parcel watcher handles) — so *
 polling fallback was built** (would be speculative). If Phase 2 commits to the always-on
 reactive monitor as a first-class v1 surface, revisit whether Linux needs a `fs.watch`-recursive
 fallback in `FileWatcher`. If the trigger model is snapshot-on-command (§5 #2), the reactive
-watcher is off the critical path and this is moot.
+watcher is off the critical path and this is moot. **Settled the same day: §5 #2 chose
+snapshot-on-command, so no production polling fallback was ever built.**
 
 ## 4d. Phase 2/3 — status (2026-07-05): the flow's closure DONE
 
@@ -264,7 +324,7 @@ added (green) natively, with no proposed APIs.
 `diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` before each
 `vscode.diff` — VS Code exposes **no per-diff override** for either. Consequence: while enabled
 on this surface, the user's *other* (git, manual) diffs also render inline with CodeLens. This
-is documented as a heads-up in [README](README.md); accept it as the cost of "always inline"
+is documented as a heads-up in [README](../README.md); accept it as the cost of "always inline"
 on stable APIs.
 
 **Bug this surface flip surfaced (same-`fsPath` scheme collision).** With the diff editor as
@@ -275,32 +335,60 @@ doc, so `computeHunks(baseline, baseline)` returned **0 hunks** and the file was
 dropped from the panel — making whole multi-file queues vanish the moment you opened a file in
 the diff. Latent all along; the old decorations surface never opened a diff, so it never fired.
 Fix: filter `scheme === 'file'` at every `fsPath` lookup — `buildPanelState`
-([reviewPanel.ts](src/reviewPanel.ts)), `FileWatcher` (×2), `revealNextHunk`
-([commands.ts](src/commands.ts)). Regression test: *"file stays in the panel while its review
-diff is open"* ([diffEditor.test.ts](src/test/integration/diffEditor.test.ts)), plus the two
+([reviewPanel.ts](../src/reviewPanel.ts)), `FileWatcher` (×2), `revealNextHunk`
+([commands.ts](../src/commands.ts)). Regression test: *"file stays in the panel while its review
+diff is open"* ([diffEditor.test.ts](../src/test/integration/diffEditor.test.ts)), plus the two
 surface-default assertion tests updated. Suite green.
 
 **Lesson:** a same-`fsPath`/different-scheme document is a trap for any `fsPath`-only match;
 `scheme === 'file'` is the standing guard for lookups that must resolve to the editable file.
 
-## 4f. User-edit vs. AI/external-edit discrimination (2026-07-05): documented
+## 4f. User-edit vs. AI/external-edit discrimination (2026-07-05; mechanism replaced 2026-07-12)
+
+> **⚠️ The mechanism described below was replaced.** The buffer-match heuristic
+> (`openDoc.getText() === diskContent`) was **deleted** on 2026-07-12 after the reload race
+> it predicted was observed biting in the field. The current discriminator is an
+> `onDidSaveTextDocument` **save token** consumed against exact disk content
+> ([fileWatcher.ts](../src/fileWatcher.ts) `consumeManualSave`). **Authoritative write-up of
+> both the bug and the replacement: [terminal-edits-not-captured.md](terminal-edits-not-captured.md)
+> §7–§8.** This section is retained because the *property* it states is still the product
+> behavior and because the API research below (no authorship signal exists) is still the
+> reason a heuristic is needed at all.
 
 **The property:** a change you make *by hand in the editor and save* is silently adopted into the baseline (never enters the review queue); a change written *to disk out-of-band* — an AI agent, a script, a formatter — is surfaced for review. This is deliberate and desirable: the
 queue stays focused on the agent's turn, not your own in-flight edits. (Confirmed as intended behavior with the user while dogfooding.)
 
-**How it works — a heuristic, not author metadata.** VS Code exposes **no API for edit authorship**: `onDidChangeTextDocument` fires identically for user typing and for an extension's `WorkspaceEdit`. `TextDocumentChangeReason` ([microsoft/vscode#120617](https://github.com/microsoft/vscode/issues/120617), **closed** — the `userInput` value was *deliberately dropped*, shipping only `Undo`/`Redo`) exposes no user-vs-programmatic source, and a maintainer confirms none is offered ([vscode-discussions#1157](https://github.com/microsoft/vscode-discussions/discussions/1157)). So this gap is settled, not pending. The extension infers the source from a different signal: **did the change arrive through the editor buffer?**
+**How it works — a heuristic, not author metadata.** VS Code exposes **no API for edit authorship**: `onDidChangeTextDocument` fires identically for user typing and for an extension's `WorkspaceEdit`. `TextDocumentChangeReason` ([microsoft/vscode#120617](https://github.com/microsoft/vscode/issues/120617), **closed** — the `userInput` value was *deliberately dropped*, shipping only `Undo`/`Redo`) exposes no user-vs-programmatic source, and a maintainer confirms none is offered ([vscode-discussions#1157](https://github.com/microsoft/vscode-discussions/discussions/1157)). So this gap is settled, not pending. The extension infers the source from a different
+signal: **did a VSCode save event account for exactly these bytes?**
 
-On a disk change to a not-yet-reviewing file ([fileWatcher.ts](src/fileWatcher.ts) `onDiskChange` ≈L450, and the mirror in `onDiskCreate` for new files):
+On a disk change to a not-yet-reviewing file ([fileWatcher.ts](../src/fileWatcher.ts)
+`handleDiskChange`, and the mirror in `handleDiskCreate` for new files):
 
 ```
-open buffer exists AND buffer text === disk content  → user saved it here → snapshotFile()  (baseline, no hunk)
-otherwise (no buffer, or buffer is stale vs disk)     → external/AI write   → enterReviewing() (queued)
+a VSCode save event recorded this exact content  → user saved it here → snapshotFile()   (baseline, no hunk)
+otherwise                                        → external/AI write  → enterReviewing() (queued)
 ```
 
-The insight: when *you* save, the open buffer equals what just hit disk. When an agent writes straight to disk, either the file isn't open or the buffer is **stale** relative to the new disk bytes — the equality fails, and it's treated as external. `snapshotFile` commits the content as the new baseline, so a "user save" leaves a zero diff and drops out of review. (Distinct from the `selfEditFiles` guard, which suppresses the extension's *own* accept/reject writes.)
+`onDidSaveTextDocument` fires for every VSCode-initiated save — explicit *and* all auto-save
+modes, which route through the same `TextFileService.save()` pipeline — and **never** for an
+external write, so it is a positive, unambiguous signal. It is additionally gated on content
+(the token is consumed only if the saved text equals what is now on disk), so neither event
+ordering nor a buffer reload can fool it, and it fails safe toward *reviewing*. `snapshotFile`
+commits the content as the new baseline, so a user save leaves a zero diff and drops out of
+review. (Distinct from the `selfEditFiles` guard, which suppresses the extension's *own*
+accept/reject writes.)
 
-**Known fragility — the reload race.** VS Code **silently reloads a saved/clean open document when its file changes on disk** (reload prompt only for *dirty* buffers). This is the standing default: a request to prompt for clean files too ([microsoft/vscode#50472](https://github.com/microsoft/vscode/issues/50472)) was closed as a duplicate without changing the behavior. So if an agent writes to a file you have open and unmodified, two things race: VS Code's silent buffer reload
-vs. our `onDiskChange` reading `openDoc.getText()`. If the reload wins, the buffer already equals disk → the agent's edit is misread as a user save and folded into the baseline (**missed from review**). In practice `onDiskChange` usually wins (external AI edits are observed to surface reliably), but it is a genuine latent race. If it ever bites, the fix is to capture buffer content at the *start* of the debounce / compare against a pre-change snapshot rather than the possibly-reloaded live buffer — not attempted yet (no observed failure).
+**Why no content comparison can work — the reload race that killed the original heuristic.**
+VS Code **silently reloads a saved/clean open document when its file changes on disk** (reload
+prompt only for *dirty* buffers). This is the standing default: a request to prompt for clean
+files too ([microsoft/vscode#50472](https://github.com/microsoft/vscode/issues/50472)) was
+closed as a duplicate without changing the behavior. So a human's Ctrl+S and an agent's write
+to a clean open buffer are **indistinguishable by content** — in both, buffer == disk. The
+original heuristic (`openDoc.getText() === diskContent`) raced VS Code's reload against its own
+read of the buffer, with no ordering guarantee between them, and lost often enough to silently
+swallow agent edits. Diagnosed, replaced, and regression-tested on 2026-07-12 — see
+[terminal-edits-not-captured.md](terminal-edits-not-captured.md) and
+[saveVsExternalEdit.test.ts](../src/test/integration/saveVsExternalEdit.test.ts).
 
 ## 4g. Phase 4 — status (updated 2026-08-09): DONE pending a manual UI pass
 
@@ -339,8 +427,13 @@ before the phase actually closed, and two things have since falsified it:
 - **Trigger UX (`review-trigger-ux`) was unstarted at the time.** Since delivered
   (2026-08-09) — see above.
 
-Only the manual multi-file keyboard walk (task 5.3) remains. Current suite: **77 unit / 105
-integration passing, 1 pending, 0 failing**.
+Only the manual multi-file keyboard walk (task 5.3) remains from *Phase 4 itself*. Suite at the
+time of writing: 77 unit / 105 integration. **Current (2026-08-10), both measured: unit 102
+passing / 0 failing; integration 112 passing / 1 pending / 0 failing** (the 1 pending is the
+same pre-existing self-skip noted in §4c.1 — the `.git/HEAD` branch-switch watcher test skips
+when the test workspace has no `.git/HEAD` at activation). Post-Phase-4 findings are not tracked here — the
+prioritized backlog lives in [`../todo.md`](../todo.md), and the review-surface investigation
+behind most of it in [review-ui-legibility.md](review-ui-legibility.md).
 
 **The accept/reject asymmetry that shaped the implementation.** Reject *rewrites the buffer*
 (deletes the added lines, needs a `WorkspaceEdit` + save + self-edit guard); accept *never
@@ -353,8 +446,8 @@ replacement hunks, because the removed lines stay in the baseline (still pending
 un-selected added lines stay pending, exactly as a partial reject leaves them. Fallbacks
 mirror reject: a pure-removal hunk delegates to whole-hunk `acceptHunk`; a selection with no
 added lines is a logged no-op; a multi-hunk selection resolves the start hunk only and logs
-the rest. 6 integration tests ([partialAccept.test.ts](src/test/integration/partialAccept.test.ts));
-suite **97 passing / 1 pending / 0 failing**.
+the rest. 6 integration tests ([partialAccept.test.ts](../src/test/integration/partialAccept.test.ts));
+suite at that commit: **97 passing / 1 pending / 0 failing**.
 
 ## 4h. QuickDiffProvider — evaluated, declined (2026-07-12)
 
@@ -392,7 +485,10 @@ it's a minor cleanup, independent of QuickDiff, and untouched for now.
 **Net:** the red/green that motivated this project is already the platform's job via the diff
 editor and is fully stable. QuickDiff is a no-op for our workflow — set aside with no loss.
 
-## 5. Open decisions
+## 5. Open decisions — all four resolved
+
+Kept as the record of *why*. Nothing here is still open; live work is in
+[`../todo.md`](../todo.md).
 
 1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).
 2. **Trigger model** — **RESOLVED (2026-07-05): snapshot-on-command.** "Begin review" explicitly

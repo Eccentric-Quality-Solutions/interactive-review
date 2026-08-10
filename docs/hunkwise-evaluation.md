@@ -100,7 +100,7 @@ proposed API — not a hard dependency.
 
 A side-by-side mockup of the accept/deny affordance in each path — the stable CodeLens
 actions vs. the proposed `editorInsets` floating button bar + inline deleted-block — is at
-[review-flow-comparison.html](review-flow-comparison.html) (open in a browser; it's
+[review-flow-comparison.html](../review-flow-comparison.html) (open in a browser; it's
 theme-aware). The mockups are reconstructed from the real rendering code, not live
 screenshots. The upshot the picture makes obvious: **the proposed API buys polish (floating
 buttons, in-buffer deleted block), not capability.**
@@ -144,8 +144,18 @@ If we fork (path 1 in the build-vs-buy):
   drag-from-Finder timing). Our chat-driven trigger might let us *replace* that heuristic with
   an explicit "changeset opens now" signal — potentially simpler and more robust than what we
   inherit.
+  **Outcome (2026-07-12): the risk was real and materialized.** The inherited buffer-vs-disk
+  comparison silently swallowed agent edits to open files and was deleted, replaced by an
+  `onDidSaveTextDocument` save token. The bounded trigger did *not* obviate the heuristic —
+  even inside a session you still must tell the user's own saves from the agent's writes. Full
+  account: [terminal-edits-not-captured.md](terminal-edits-not-captured.md).
 
-## 7. Recommendation
+## 7. Recommendation — followed (fork executed 2026-07-04)
+
+*All three steps below were taken; the fork landed in `ec138e4` and the stable-only rework in
+`b8b0301`. What actually happened, including the parts of the plan that turned out to be
+unnecessary (Phases 1–2 were largely already met by the fork), is recorded in
+[design.md §4a–§4d](design.md).*
 
 hunkwise is the **right base to prototype against**, not a drop-in solution. Concretely:
 1. **Hands-on trial** first (drive Claude Code through it) to confirm feel and failure points.
@@ -167,6 +177,7 @@ and Cline/Continue ship.
 `editorInsets` is explicitly **deferred to a possible future "enhanced inline mode,"** not a
 dependency. The design and phased plan for the stable build live in [design.md](design.md).
 Open decision that gates scaffolding: **fork hunkwise vs. build fresh** (both stable-only).
+**→ Resolved the same day: fork** ([design.md §4a](design.md), [§5 #1](design.md)).
 
 ## Sources
 
