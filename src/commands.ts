@@ -138,7 +138,27 @@ async function enableReview(
           // already on disk when this resolves") is false for exactly the files this
           // window exists to protect — and the agent's first edit to one of them lands on
           // an undefined baseline and gets silently absorbed.
-          await stateManager.flush();
+          //
+          // Draining `gitQueue` alone does not achieve that: an adopter reaches the queue
+          // only after a disk read and a git read, so `flush` can capture a tail that does
+          // not yet include it. Settle the handlers first, then flush — and repeat, because
+          // awaiting either one gives newly arrived creates time to start. A pass that
+          // waited on no handler proves none could have enqueued since, which makes the
+          // flush that follows it authoritative and ends the loop.
+          //
+          // Bounded rather than `while (true)`: under a process that creates files
+          // continuously (an `npm install` racing Begin review) there may be no quiet
+          // moment, and blocking enable indefinitely is worse than the residual sliver
+          // already documented in `handleDiskCreate`.
+          const MAX_DRAIN_PASSES = 5;
+          for (let pass = 0; pass < MAX_DRAIN_PASSES; pass++) {
+            const settled = await fileWatcher.settleSnapshotCreates();
+            await stateManager.flush();
+            if (settled === 0) break;
+            if (pass === MAX_DRAIN_PASSES - 1) {
+              log(`enable: creates still arriving after ${MAX_DRAIN_PASSES} drain passes; proceeding`);
+            }
+          }
         } finally {
           fileWatcher.endSnapshot();
         }

@@ -7,7 +7,19 @@
     "rootDir": "src",
     "sourceMap": true,
     "strict": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    // Explicit, matching tsconfig.json and tsconfig.integration.json. Omitting `types`
+    // used to mean "load every package under node_modules/@types", which is why this
+    // built for a long time without the field. TypeScript 6 dropped that implicit
+    // inclusion, so an omitted `types` now yields no @types at all — every `fs`, `path`
+    // and `node:test` import in the suite reports TS2591 "Cannot find name … Try
+    // `npm i --save-dev @types/node`", advice that is already satisfied.
+    //
+    // It surfaces in the editor before the build: VS Code ships its own TypeScript
+    // (6.0.3 here) while `npm run compile` uses the repo's devDependency (5.9.3), so the
+    // Problems panel fails against a config the build still accepts. Being explicit
+    // makes the two agree and pins the intent regardless of version.
+    "types": ["node"]
   },
   "include": [
     "src/test/**/*.ts",

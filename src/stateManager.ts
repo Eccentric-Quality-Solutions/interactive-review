@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FileState } from './types';
-import { BaselineGit, Settings } from './baselineGit';
+import { BaselineGit, BaselineUnreadableError, Settings } from './baselineGit';
+import { hasReportableDiff } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 
@@ -214,7 +215,7 @@ export class StateManager {
         if (err?.code === 'ENOENT') { fileDeleted = true; } // file doesn't exist
         // other errors (e.g. permissions) → diskContent stays undefined, treat as idle
       }
-      if (fileDeleted || (diskContent !== undefined && diskContent !== baseline)) {
+      if (fileDeleted || (diskContent !== undefined && hasReportableDiff(baseline, diskContent))) {
         this.state.set(filePath, { status: 'reviewing', baseline });
         reviewing.push(filePath);
       } else {
@@ -243,6 +244,60 @@ export class StateManager {
   }
 
   /**
+   * Recover from a baseline repo whose contents are gone or unreadable, without ever
+   * routing through `adoptUntrackedFiles`.
+   *
+   * The baselines are unrecoverable, so the prior session's pending review cannot be
+   * resumed — but the files on disk are untouched and correct. The safe reading of
+   * "no trustworthy baseline" is therefore "nothing to review yet": reset the repo and
+   * re-snapshot the workspace exactly as `Begin review` would, which leaves current
+   * disk content as the new baseline and the review queue empty.
+   *
+   * The alternative — letting the caller fall through to adopting every untracked file
+   * — is what turned one crashed VM into a 3807-file queue of null-baseline entries,
+   * each of which `Discard` deletes from disk. A lost review session is a nuisance; a
+   * "Discard all" that unlinks the whole workspace is not.
+   *
+   * Surfaced to the user rather than logged only: the session silently emptying looks
+   * identical to having finished reviewing everything.
+   */
+  private async recoverLostBaseline(
+    g: BaselineGit,
+    reason: string,
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<void> {
+    log(`load: ${reason} — prior baselines are unrecoverable, resetting to a fresh snapshot`);
+    this.state.clear();
+    let rebuilt = false;
+    try {
+      await g.resetRepo();
+      await this.snapshotWorkspace((fp, isDir) => shouldIgnore?.(fp, isDir) ?? false);
+      rebuilt = true;
+      log('load: baseline rebuilt from current workspace contents; review queue is empty');
+    } catch (err) {
+      log(`load: baseline rebuild failed: ${err}`);
+    }
+    // Report what actually happened. A failed rebuild leaves review enabled over a repo
+    // that cannot store baselines, so every subsequent edit goes uncaptured — the one
+    // state where an empty panel does not mean "nothing to review". Claiming success
+    // here would make that indistinguishable from a clean recovery.
+    if (rebuilt) {
+      void vscode.window.showWarningMessage(
+        'Interactive Review: the saved baselines for this workspace were unreadable ' +
+        '(most often an unclean shutdown) and could not be recovered. Your files are ' +
+        'untouched, but the pending review was lost. A fresh baseline has been taken ' +
+        'from the current contents.'
+      );
+    } else {
+      void vscode.window.showErrorMessage(
+        'Interactive Review: the saved baselines for this workspace were unreadable and ' +
+        'a replacement could not be written. Your files are untouched, but changes are ' +
+        'not being tracked. Run "Interactive Review: End review", then "Begin review".'
+      );
+    }
+  }
+
+  /**
    * Load persistent state from settings.json + git repo.
    * Must be called once at activation. Async because reading baselines
    * from git requires exec calls.
@@ -260,7 +315,21 @@ export class StateManager {
 
     // Initialize git (idempotent) then restore in-memory state from HEAD
     await g.initGit();
-    const tracked = await g.listTrackedFiles();
+    // Both branches below mean "there is no baseline to restore from", which is only
+    // ever a recovery case here: reaching load() at all means a previous session
+    // enabled review and snapshotted, so its baselines should still be readable.
+    if (g.baselineLost) {
+      await this.recoverLostBaseline(g, 'baseline repo had to be re-initialized', shouldIgnore);
+      return;
+    }
+    let tracked: string[];
+    try {
+      tracked = await g.listTrackedFiles();
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      await this.recoverLostBaseline(g, `${err.message}`, shouldIgnore);
+      return;
+    }
     const { reviewing, idle, skippedNoBaseline, ignored } =
       await this.scanTrackedIntoState(g, tracked, shouldIgnore);
     if (skippedNoBaseline.length > 0) {
@@ -308,10 +377,20 @@ export class StateManager {
       oldState.set(fp, { ...st });
     }
 
-    // Rebuild: clear and reload from git via the shared tracked-file scan
-    this.state.clear();
+    // Rebuild: clear and reload from git via the shared tracked-file scan.
+    // Read before clearing — an unreadable baseline must leave the in-memory state
+    // intact (it is now the only surviving record of the session) rather than swap it
+    // for a workspace-wide list of null-baseline "new" files.
     await g.initGit();
-    const tracked = await g.listTrackedFiles();
+    let tracked: string[];
+    try {
+      tracked = await g.listTrackedFiles();
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      log(`rebuildState: aborting, in-memory state left untouched — ${err.message}`);
+      return;
+    }
+    this.state.clear();
     await this.scanTrackedIntoState(g, tracked, shouldIgnore);
 
     // Detect files on disk not tracked in git — these are externally created new files
@@ -638,10 +717,20 @@ export class StateManager {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
-    const [allowedFiles, trackedFiles] = await Promise.all([
-      this.collectWorkspaceFiles(shouldIgnore),
-      g.listTrackedFiles(),
-    ]);
+    let allowedFiles: string[];
+    let trackedFiles: string[];
+    try {
+      [allowedFiles, trackedFiles] = await Promise.all([
+        this.collectWorkspaceFiles(shouldIgnore),
+        g.listTrackedFiles(),
+      ]);
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      // Without a readable tracked list every allowed file looks un-snapshotted, so
+      // proceeding would re-snapshot the entire workspace over a damaged repo.
+      log(`syncIgnoreState: aborting — ${err.message}`);
+      return;
+    }
 
     // Remove tracked files that are now ignored (from git and from in-memory state).
     //
@@ -712,14 +801,24 @@ export class StateManager {
     const reviewingCount = Array.from(this.state.values()).filter(s => s.status === 'reviewing').length;
     log(`clearHunksOnBranchSwitch: clearing ${reviewingCount} reviewing file(s), re-syncing all baselines`);
 
+    // Collect all current workspace files (respecting ignore rules).
+    // Read before clearing, for the same reason as rebuildState: a damaged baseline
+    // repo must not cost the caller its in-memory state on the way out.
+    let diskFiles: string[];
+    let trackedFiles: string[];
+    try {
+      [diskFiles, trackedFiles] = await Promise.all([
+        this.collectWorkspaceFiles(shouldIgnore),
+        g.listTrackedFiles(),
+      ]);
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      log(`clearHunksOnBranchSwitch: aborting — ${err.message}`);
+      return;
+    }
+
     // Clear all in-memory state — fresh start
     this.state.clear();
-
-    // Collect all current workspace files (respecting ignore rules)
-    const [diskFiles, trackedFiles] = await Promise.all([
-      this.collectWorkspaceFiles(shouldIgnore),
-      g.listTrackedFiles(),
-    ]);
 
     // Snapshot all disk files as new baselines
     const diskSet = new Set(diskFiles);

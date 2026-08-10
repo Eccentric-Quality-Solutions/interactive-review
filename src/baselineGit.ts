@@ -13,6 +13,25 @@ export interface Settings {
   quoteRotationInterval: number;
 }
 
+/**
+ * The baseline repo exists and claims to have a HEAD commit, but its object
+ * database can't be read — the classic shape is zero-length object files left
+ * behind when the machine died mid-write (ext4 delayed allocation), e.g. a VM
+ * suspended while a snapshot was being committed.
+ *
+ * This is deliberately distinct from "the repo has no commits yet", which is a
+ * legitimately empty baseline. Conflating the two is actively dangerous: callers
+ * treat every file absent from the tracked list as *externally created*, so an
+ * empty list turns the whole workspace into null-baseline "new" files — and
+ * discarding a new file deletes it from disk.
+ */
+export class BaselineUnreadableError extends Error {
+  constructor(operation: string, public readonly cause: unknown) {
+    super(`baseline repo unreadable during ${operation}: ${cause}`);
+    this.name = 'BaselineUnreadableError';
+  }
+}
+
 const DEFAULT_SETTINGS: Settings = {
   ignorePatterns: process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'],
   respectGitignore: true,
@@ -44,6 +63,7 @@ export class BaselineGit {
   private destroyed = false;
   private initPromise: Promise<void> | undefined;
   private log: (message: string) => void;
+  private _baselineLost = false;
 
   constructor(stateDir: string, workspaceRoot: string, logger?: (message: string) => void) {
     this.stateDir = stateDir;
@@ -51,6 +71,14 @@ export class BaselineGit {
     this.workTree = workspaceRoot;
     this.log = logger ?? ((msg: string) => console.warn(`[interactive-review] ${msg}`));
   }
+
+  /**
+   * True when `initGit` had to throw away an existing repo and start over, so the
+   * empty tracked list it now returns reflects *destroyed* baselines rather than a
+   * session that never had any. Callers must not read that emptiness as "every file
+   * on disk is new" — see `BaselineUnreadableError`. Cleared by `resetRepo`.
+   */
+  get baselineLost(): boolean { return this._baselineLost; }
 
   // ── env / low-level git ───────────────────────────────────────────────────
 
@@ -164,6 +192,10 @@ export class BaselineGit {
     if (!fs.existsSync(this.gitDir) || !fs.existsSync(headPath)) {
       if (fs.existsSync(this.gitDir)) {
         this.log('initGit: corrupted git dir detected (HEAD missing), re-initializing');
+        // Whatever baselines this repo held are gone. Flag it so `load()` reports a
+        // lost session instead of reading the fresh repo's empty tracked list as
+        // proof that every file in the workspace is newly created.
+        this._baselineLost = true;
         try {
           fs.rmSync(this.gitDir, { recursive: true, force: true });
         } catch (err) {
@@ -369,9 +401,21 @@ export class BaselineGit {
 
   /**
    * Return absolute paths of all files currently tracked in HEAD.
+   *
+   * Throws `BaselineUnreadableError` if the repo has a HEAD commit that cannot be
+   * walked. It must never answer "[]" for a repo it failed to read: callers treat
+   * an untracked file as externally created, so a failure reported as emptiness
+   * silently reclassifies the entire workspace as new files. Only a repo with no
+   * commits at all — a genuinely empty baseline — returns [].
+   *
+   * `hasHead` is what separates the two, and it has to be checked *before* the walk
+   * rather than inferred from the walk's failure: `rev-parse HEAD` resolves the ref
+   * out of the ref store without touching the object database, so it still succeeds
+   * when the objects behind it are damaged, while a repo with no commits fails it.
    */
   async listTrackedFiles(): Promise<string[]> {
     await this.initGit();
+    if (!(await this.hasHead())) return [];
     try {
       const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r']);
       return out
@@ -379,9 +423,27 @@ export class BaselineGit {
         .map(l => l.trim())
         .filter(Boolean)
         .map(rel => normalizePath(path.join(this.workTree, rel)));
-    } catch {
-      return [];
+    } catch (err) {
+      this.log(`listTrackedFiles failed — baseline repo has a HEAD but is unreadable: ${err}`);
+      throw new BaselineUnreadableError('listTrackedFiles', err);
     }
+  }
+
+  /**
+   * Throw away the current repo and start a fresh, empty one, clearing the
+   * `baselineLost` flag. The recovery path for an unreadable baseline: unlike
+   * `destroyGit` this leaves the instance usable, so the caller can immediately
+   * re-snapshot the workspace into a clean baseline.
+   */
+  async resetRepo(): Promise<void> {
+    if (fs.existsSync(this.gitDir)) {
+      fs.rmSync(this.gitDir, { recursive: true, force: true });
+    }
+    this.gitInitialized = false;
+    await this.initGit();
+    // Set after initGit: the re-init above sees no gitDir and so never raises the
+    // flag itself, but an earlier raise must not survive a completed recovery.
+    this._baselineLost = false;
   }
 
   // ── destroy ───────────────────────────────────────────────────────────────

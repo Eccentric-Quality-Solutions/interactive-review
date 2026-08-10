@@ -129,6 +129,24 @@ suite('interactive-review trigger UX', function () {
     );
   });
 
+  /*
+   * Not covered here: a create that lands *inside* the enable window, whose baseline must
+   * be committed before `beginReview` resolves (the `settleSnapshotCreates` drain).
+   *
+   * The window is the snapshot's duration, not the command's — `endSnapshot()` fires when
+   * `snapshotWorkspace` returns, racing the 750ms presentation floor rather than waiting
+   * for it. On this workspace that is a few tens of milliseconds, too narrow to aim a
+   * create at; a file written after it has genuinely been created after the baseline was
+   * taken, so queueing it as new is correct and a test asserting otherwise would be
+   * asserting a bug. Widening the window by bulk-creating 4000 files does make it
+   * reachable, but that test ran for four minutes and drove the extension host
+   * unresponsive repeatedly, taking a sibling test down with it.
+   *
+   * The scheduling guarantee is unit-tested instead, against `SnapshotCreateTracker` —
+   * deterministic, no watcher timing, milliseconds. What stays untested is the wiring
+   * between the watcher and that tracker.
+   */
+
   test('begin review is idempotent enough to be called on an already-open session', async () => {
     const root = getWorkspaceRoot();
     writeFileExternally(path.join(root, 'twice.txt'), 'v1\n');

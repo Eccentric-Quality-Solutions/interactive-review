@@ -279,6 +279,113 @@ describe('BaselineGit', () => {
       fs.rmSync(dir2, { recursive: true, force: true });
     });
 
+    /**
+     * Reproduce the corruption an unclean shutdown leaves behind: the object file
+     * exists but has zero length, because ext4 allocated the inode and lost the
+     * contents. Truncating rather than deleting matters — git reports the two
+     * differently, and it was the empty-file form that appeared in the wild.
+     */
+    const zeroObject = (gitDir: string, sha: string) => {
+      const objPath = path.join(gitDir, 'objects', sha.slice(0, 2), sha.slice(2));
+      fs.rmSync(objPath, { force: true }); // objects are mode 444
+      fs.writeFileSync(objPath, '');
+    };
+
+    it('throws BaselineUnreadableError when HEAD exists but its objects are corrupt', async () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-corrupt-'));
+      const stateDir2 = path.join(dir2, '.vscode', 'interactive-review');
+      const g2 = new BaselineGit(stateDir2, dir2);
+      await g2.initGit();
+      await g2.snapshotBatch([{ filePath: path.join(dir2, 'a.txt'), content: 'a\n' }]);
+
+      // Corrupt the commit object HEAD points at.
+      const gitDir = path.join(stateDir2, 'git');
+      const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf-8').trim();
+      const ref = head.startsWith('ref: ') ? head.slice(5) : undefined;
+      const sha = ref
+        ? fs.readFileSync(path.join(gitDir, ref), 'utf-8').trim()
+        : head;
+      zeroObject(gitDir, sha);
+
+      // The whole point: this must NOT come back as an empty list, which callers
+      // would read as "no file in this workspace has a baseline".
+      await assert.rejects(
+        () => g2.listTrackedFiles(),
+        (err: Error) => err.name === 'BaselineUnreadableError',
+        'a corrupt object database must surface as an error, not as []'
+      );
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+
+    it('resetRepo makes a corrupt repo usable again', async () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-reset-'));
+      const stateDir2 = path.join(dir2, '.vscode', 'interactive-review');
+      const g2 = new BaselineGit(stateDir2, dir2);
+      await g2.initGit();
+      await g2.snapshotBatch([{ filePath: path.join(dir2, 'a.txt'), content: 'a\n' }]);
+      const gitDir = path.join(stateDir2, 'git');
+      const ref = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf-8').trim().slice(5);
+      zeroObject(gitDir, fs.readFileSync(path.join(gitDir, ref), 'utf-8').trim());
+
+      await g2.resetRepo();
+      assert.deepEqual(await g2.listTrackedFiles(), [], 'reset repo reads as legitimately empty');
+      assert.strictEqual(g2.baselineLost, false, 'flag cleared once recovery completed');
+      // And it must still accept new baselines.
+      const f = path.join(dir2, 'b.txt');
+      await g2.snapshotBatch([{ filePath: f, content: 'b\n' }]);
+      assert.deepEqual(await g2.listTrackedFiles(), [f]);
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+
+    it('flags baselineLost when initGit discards a repo with no HEAD', async () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-nohead-'));
+      const stateDir2 = path.join(dir2, '.vscode', 'interactive-review');
+      // A git dir that exists but has no HEAD — initGit throws it away and starts over,
+      // so its empty tracked list reflects destroyed baselines, not an unused session.
+      fs.mkdirSync(path.join(stateDir2, 'git'), { recursive: true });
+      const g2 = new BaselineGit(stateDir2, dir2);
+      await g2.initGit();
+      assert.strictEqual(g2.baselineLost, true);
+      assert.deepEqual(await g2.listTrackedFiles(), []);
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+
+    it('does not flag baselineLost for a normal first-time init', async () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-firstinit-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
+      await g2.initGit();
+      assert.strictEqual(g2.baselineLost, false);
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+
+    it('a corrupt blob still lists tracked files and fails only on that baseline', async () => {
+      // Blob-level damage is the benign class: ls-tree walks commits and trees only,
+      // so enumeration stays correct and the loss is contained to getBaseline, which
+      // callers already treat as "no baseline recorded" rather than "newly created".
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-blob-'));
+      const stateDir2 = path.join(dir2, '.vscode', 'interactive-review');
+      const g2 = new BaselineGit(stateDir2, dir2);
+      await g2.initGit();
+      const f1 = path.join(dir2, 'a.txt');
+      const f2 = path.join(dir2, 'b.txt');
+      await g2.snapshotBatch([
+        { filePath: f1, content: 'a\n' },
+        { filePath: f2, content: 'b\n' },
+      ]);
+      const { execFileSync } = require('child_process') as typeof import('child_process');
+      const gitDir = path.join(stateDir2, 'git');
+      const blob = execFileSync('git', ['rev-parse', 'HEAD:a.txt'], {
+        env: { ...process.env, GIT_DIR: gitDir, GIT_WORK_TREE: dir2 }, encoding: 'utf-8',
+      }).trim();
+      zeroObject(gitDir, blob);
+
+      const tracked = await g2.listTrackedFiles();
+      assert.ok(tracked.includes(f1) && tracked.includes(f2), 'enumeration is unaffected');
+      assert.strictEqual(await g2.getBaseline(f1), undefined, 'damaged baseline reads as absent');
+      assert.strictEqual(await g2.getBaseline(f2), 'b\n', 'intact baseline still readable');
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+
     it('returns tracked file paths', async () => {
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-list2-'));
       const root = dir2;

@@ -1,6 +1,58 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHunks, hunkAtLine, hunkId, splitHunkByRange } from '../diffEngine';
+import { computeHunks, hasReportableDiff, hunkAtLine, hunkId, splitHunkByRange } from '../diffEngine';
+
+describe('hasReportableDiff', () => {
+  /**
+   * The invariant that matters: this predicate and computeHunks must never disagree.
+   * When they did, an EOL-only write entered `reviewing` with zero hunks — invisible in
+   * the panel, still counted by the status bar, and blocking `reviewComplete` forever.
+   */
+  const agrees = (baseline: string | null, current: string) =>
+    assert.equal(
+      hasReportableDiff(baseline, current),
+      computeHunks(baseline, current).length > 0,
+      `disagreed on ${JSON.stringify({ baseline, current })}`
+    );
+
+  it('reports no diff for an LF→CRLF conversion', () => {
+    assert.equal(hasReportableDiff('a\nb\nc\n', 'a\r\nb\r\nc\r\n'), false);
+    agrees('a\nb\nc\n', 'a\r\nb\r\nc\r\n');
+  });
+
+  it('reports no diff for a CRLF→LF conversion', () => {
+    assert.equal(hasReportableDiff('a\r\nb\r\n', 'a\nb\n'), false);
+    agrees('a\r\nb\r\n', 'a\nb\n');
+  });
+
+  it('reports identical content as unchanged', () => {
+    assert.equal(hasReportableDiff('a\nb\n', 'a\nb\n'), false);
+    agrees('a\nb\n', 'a\nb\n');
+  });
+
+  it('still reports a real edit made in the same write as an EOL conversion', () => {
+    // The case the EOL-insensitivity exists to protect: one changed word must not be
+    // swallowed just because the line endings flipped alongside it.
+    assert.equal(hasReportableDiff('a\nb\nc\n', 'a\r\nB\r\nc\r\n'), true);
+    agrees('a\nb\nc\n', 'a\r\nB\r\nc\r\n');
+  });
+
+  it('reports ordinary edits, additions and deletions', () => {
+    agrees('a\nb\n', 'a\nb\nc\n');
+    agrees('a\nb\nc\n', 'a\nc\n');
+    agrees('a\n', 'z\n');
+  });
+
+  it('treats a null baseline (new file) as changed', () => {
+    assert.equal(hasReportableDiff(null, 'anything\n'), true);
+  });
+
+  it('does not ignore whitespace changes other than line endings', () => {
+    // Deliberately narrower than ignoreWhitespace — a reindent still costs what it costs.
+    assert.equal(hasReportableDiff('a\n', '  a\n'), true);
+    agrees('a\n', '  a\n');
+  });
+});
 
 describe('computeHunks', () => {
   it('returns empty for identical content', () => {

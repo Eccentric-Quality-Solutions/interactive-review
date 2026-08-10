@@ -8,6 +8,7 @@ import { StateManager } from './stateManager';
 import { computeHunks } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
+import { SnapshotCreateTracker } from './snapshotCreateTracker';
 
 // Transform gitignore rules from a sub-directory so they work in a single
 // root-level matcher. Adds the directory's relative path as prefix, handling
@@ -65,8 +66,9 @@ export class FileWatcher {
   private gitignoreMatcher: Ignore = ignoreLib();
   // When true, all file-system events are suppressed (used during branch switch)
   private _suppressed: boolean = false;
-  // When true, `snapshotWorkspace` is mid-flight — see `snapshotInProgress`.
-  private _snapshotInProgress: boolean = false;
+  // Enable-window state: whether `snapshotWorkspace` is mid-flight (see
+  // `snapshotInProgress`) plus the create handlers that began inside it.
+  private snapshotCreates: SnapshotCreateTracker = new SnapshotCreateTracker();
 
   constructor(
     private stateManager: StateManager,
@@ -99,7 +101,7 @@ export class FileWatcher {
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     watcher.onDidChange(uri => this.onDiskChange(uri));
     watcher.onDidDelete(uri => this.onDiskDelete(uri));
-    watcher.onDidCreate(uri => this.onDiskCreate(uri));
+    watcher.onDidCreate(uri => this.snapshotCreates.track(this.onDiskCreate(uri)));
     this.disposables.push(watcher);
 
     // onWillDeleteFiles fires for user-initiated deletes (explorer, applyEdit),
@@ -267,12 +269,32 @@ export class FileWatcher {
    * permanently deaf watcher.
    */
   beginSnapshot(): void {
-    this._snapshotInProgress = true;
+    this.snapshotCreates.open();
   }
 
   /** Clear the enable-window flag. Must run even if the snapshot throws. */
   endSnapshot(): void {
-    this._snapshotInProgress = false;
+    this.snapshotCreates.close();
+  }
+
+  /**
+   * Wait for every create handler that began inside the enable window to finish, and
+   * report how many there were.
+   *
+   * `snapshotWorkspace` returning does not mean the enable window's work is done. A
+   * create adopted by `handleDiskCreate` enqueues its baseline write only after a disk
+   * read and a git read, so a handler still in that prelude has put *nothing* on
+   * `gitQueue` yet — and `StateManager.flush` awaits the queue as it stands when called.
+   * Draining the queue without first draining these handlers therefore resolves
+   * `beginReview` while the baseline for exactly the files the enable window exists to
+   * protect is still unwritten; the agent's first edit to one then lands on an undefined
+   * baseline and is silently absorbed by `handleDiskChange`'s adopt branch.
+   *
+   * The count lets the caller alternate settle/flush until a pass finds nothing, which is
+   * the only sound stopping condition: waiting can itself admit new creates.
+   */
+  settleSnapshotCreates(): Promise<number> {
+    return this.snapshotCreates.settle();
   }
 
   /**
@@ -394,7 +416,7 @@ export class FileWatcher {
     // reading the field late would classify a create that arrived *inside* the enable
     // window against a flag that has since cleared, reinstating the exact false-new-file
     // race the flag was added to remove. Arrival time is the property being tested.
-    const duringSnapshot = this._snapshotInProgress;
+    const duringSnapshot = this.snapshotCreates.active;
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
     if (this.shouldIgnore(filePath)) return;

@@ -85,6 +85,27 @@ export function splitHunkByRange(
 }
 
 /**
+ * Does this content differ from its baseline in a way `computeHunks` will report?
+ *
+ * The authority on "has this file changed", and it exists so that question has exactly one
+ * answer. `computeHunks` is EOL-insensitive (see below), so a caller that gates on a raw
+ * `current !== baseline` disagrees with it for EOL-only writes: the file enters `reviewing`
+ * and then renders zero hunks. The panel skips such an entry while `reviewingCount` still
+ * counts it, so the status bar reads "N files to review" over an empty panel and
+ * `reviewComplete` can never fire — permanently, since nothing rewrites the old-EOL baseline.
+ *
+ * Kept as a string compare rather than `computeHunks(...).length > 0`: this runs once per
+ * tracked file on every load and rebuild (thousands of files in a large workspace), and
+ * running Myers over each one to answer a yes/no question is work the fast path can't afford.
+ * The normalization below is the same equivalence `stripTrailingCr` applies token-wise.
+ */
+export function hasReportableDiff(baseline: string | null, current: string): boolean {
+  if (baseline === null) return true; // new file — no baseline to match
+  const normalize = (s: string) => s.replace(/\r\n/g, '\n');
+  return normalize(baseline) !== normalize(current);
+}
+
+/**
  * `stripTrailingCr` makes the comparison EOL-insensitive, and it is load-bearing rather
  * than cosmetic. jsdiff splits on `\n` and compares whole tokens with `===`, so the `\r`
  * of a CRLF file is part of every token: converting a file's line endings leaves no token

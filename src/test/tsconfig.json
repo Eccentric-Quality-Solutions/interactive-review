@@ -1,0 +1,14 @@
+{
+  // IDE-only project association, mirroring src/test/integration/tsconfig.json. VS Code's
+  // TypeScript server matches a file to its nearest ancestor tsconfig.json; the repo-root
+  // tsconfig.json *excludes* src/test, so without this file the unit tests land in an
+  // inferred project with no @types/node and report phantom errors like TS2591 "Cannot
+  // find name 'node:test'". The build itself uses ../../tsconfig.test.json (via
+  // `npm run test`), which is what this extends so the editor matches the compiler.
+  //
+  // `src/test/integration/` is excluded here as it is there: those files need @types/mocha
+  // and the `vscode` mock, and they already have their own nearer tsconfig.json.
+  "extends": "../../tsconfig.test.json",
+  "include": ["**/*.ts"],
+  "exclude": ["integration/**"]
+}
