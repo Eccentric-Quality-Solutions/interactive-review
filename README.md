@@ -25,7 +25,8 @@ bounded-changeset flow (cross-file auto-advance and an explicit review-complete 
 
 | Doc | What it answers |
 | --- | --- |
-| [`docs/design.md`](docs/design.md) | Architecture, phased plan, and the dated record of every design decision |
+| [`docs/adr/`](docs/adr/README.md) | **Settled decisions** — one record per verdict, with the fact that forced it |
+| [`docs/design.md`](docs/design.md) | Architecture, phased plan, and the dated narrative of how the build went |
 | [`todo.md`](todo.md) | **The prioritized backlog** — known, unfixed issues, in recommended order |
 | [`docs/review-ui-legibility.md`](docs/review-ui-legibility.md) | Why one edit can become six Accept buttons, and why a file sometimes paints whole |
 | [`docs/terminal-edits-not-captured.md`](docs/terminal-edits-not-captured.md) | How a user's save is told apart from an agent's write |
@@ -101,11 +102,25 @@ selection actions work on messy hunks where you want only *some* of the added li
 folds the selected added lines into the baseline (the rest stay pending), reject deletes
 them. When the last hunk across all files is resolved, the panel shows **review complete**.
 
-> **Heads-up:** while enabled, the extension sets the *global* VS
+> **Heads-up:** while a review session is open, the extension borrows the *global* VS
 > Code settings `diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` so
 > review diffs render inline with visible Accept/Discard buttons. VS Code has no per-diff
-> override for these, so the change also affects your **other** (git, manual) diffs. Flip
-> them back in Settings if you prefer side-by-side.
+> override for these, so the change also affects your **other** (git, manual) diffs while
+> the session lasts. **Ending the review** puts your previous values back — including
+> removing the keys entirely if you never set them. Closing VS Code (or uninstalling)
+> with a review still open leaves them forced, since the session is what holds them;
+> run **End review** first.
+
+### File types and encodings
+
+Review is a **text** operation, and the scope is deliberate:
+
+- **UTF-8 is assumed**, with or without a BOM — a BOM is normalized away for comparison
+  and left untouched in the file itself. Other encodings (UTF-16, legacy code pages) are
+  read as UTF-8 and will diff as nonsense; they are not supported.
+- **Binary files are never baselined.** A binary file created during a session still
+  appears in the queue so you can accept or discard it, but its contents are never stored
+  as a baseline and never written back over the file.
 
 ### Settings
 

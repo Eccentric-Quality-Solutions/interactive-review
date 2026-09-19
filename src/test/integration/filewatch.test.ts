@@ -235,11 +235,14 @@ suite('interactive-review file watcher integration', function () {
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
 
-    // Wait for FileWatcher to detect and enter reviewing with null baseline
-    await waitForCondition(() => {
+    // Rescan-nudged: reaching reviewing is this test's *precondition*; what it asserts is
+    // that a refresh does not lose the file afterwards. A plain wait makes it fail whenever
+    // the host's create event is merely late, which is a different test's subject (`external
+    // file creation is tracked with null baseline`, just above, still takes the plain wait).
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing' && f?.baseline === null;
-    }, 8000);
+    });
 
     // Execute the refresh command (same as clicking the refresh button in the panel)
     await vscode.commands.executeCommand('interactiveReview.refresh');

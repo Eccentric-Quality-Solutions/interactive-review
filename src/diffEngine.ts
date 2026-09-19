@@ -1,4 +1,5 @@
 import * as Diff from 'diff';
+import { stripBom } from './textFile';
 
 /**
  * `stripTrailingCr` is implemented by the pinned runtime (`diff@5.2.2`, see
@@ -101,7 +102,9 @@ export function splitHunkByRange(
  */
 export function hasReportableDiff(baseline: string | null, current: string): boolean {
   if (baseline === null) return true; // new file — no baseline to match
-  const normalize = (s: string) => s.replace(/\r\n/g, '\n');
+  // Both normalizations must match `computeHunks` exactly. A gate that is stricter than
+  // the differ is the failure described above — reviewing with zero hunks, forever.
+  const normalize = (s: string) => stripBom(s).replace(/\r\n/g, '\n');
   return normalize(baseline) !== normalize(current);
 }
 
@@ -128,9 +131,22 @@ export function hasReportableDiff(baseline: string | null, current: string): boo
  * Deliberately NOT paired with `ignoreWhitespace`. A whitespace-only change is sometimes
  * exactly what a reviewer needs to see, so reindents and trailing-whitespace strips keep
  * costing what they cost.
+ *
+ * `stripBom` is the same kind of normalization applied to the same kind of mismatch: the
+ * baseline carries a BOM (git blob bytes) while the buffer does not (VS Code strips it on
+ * open), so without this every BOM'd file shows an unresolvable phantom hunk on line 1.
+ * It is safe for the same reason `stripTrailingCr` is — removing a leading BOM cannot
+ * change a line count, so `newStart`/`newLines` and the line-indexed splices in
+ * `acceptHunk`/`discardHunk` are unaffected. Note those splices deliberately still slice
+ * the *raw* baseline, which keeps the BOM where it belongs: in the stored baseline and in
+ * the file `discardFileByPath` writes back from it.
  */
 export function computeHunks(baseline: string | null, current: string): ParsedHunk[] {
-  const changes = Diff.diffLines(baseline ?? '', current, { stripTrailingCr: true });
+  const changes = Diff.diffLines(
+    baseline === null ? '' : stripBom(baseline),
+    stripBom(current),
+    { stripTrailingCr: true },
+  );
 
   const hunks: ParsedHunk[] = [];
   let oldLine = 1;

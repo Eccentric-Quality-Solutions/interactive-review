@@ -7,6 +7,10 @@ out-integration/**
 .vscode-test.mjs
 docs/**
 openspec/**
+# Internal working notes — shipping a list of known-unfixed issues to users is not the
+# intent, and `.gitignore` in an installed extension is just noise.
+todo.md
+.gitignore
 skills/**
 design.md
 hunkwise-evaluation.md

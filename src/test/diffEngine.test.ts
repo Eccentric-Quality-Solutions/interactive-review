@@ -2,6 +2,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeHunks, hasReportableDiff, hunkAtLine, hunkId, splitHunkByRange } from '../diffEngine';
 
+/** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
+const BOM = '\uFEFF';
+
 describe('hasReportableDiff', () => {
   /**
    * The invariant that matters: this predicate and computeHunks must never disagree.
@@ -51,6 +54,25 @@ describe('hasReportableDiff', () => {
     // Deliberately narrower than ignoreWhitespace — a reindent still costs what it costs.
     assert.equal(hasReportableDiff('a\n', '  a\n'), true);
     agrees('a\n', '  a\n');
+  });
+
+  it('reports no diff when only a leading BOM differs', () => {
+    // The live shape: baseline from `git show` keeps the BOM, `doc.getText()` has none.
+    assert.equal(hasReportableDiff(`${BOM}a\nb\n`, 'a\nb\n'), false);
+    agrees(`${BOM}a\nb\n`, 'a\nb\n');
+  });
+
+  it('still reports an edit to the first line of a BOM file', () => {
+    // The BOM must not mask a real change to the line it sits on.
+    assert.equal(hasReportableDiff(`${BOM}a\nb\n`, 'z\nb\n'), true);
+    agrees(`${BOM}a\nb\n`, 'z\nb\n');
+  });
+
+  it('does not strip a U+FEFF that is not the first character', () => {
+    // Only position 0 is an encoding marker; elsewhere it is a zero-width no-break space,
+    // i.e. real content, and removing it would hide a genuine edit.
+    assert.equal(hasReportableDiff('a\nb\n', `a\n${BOM}b\n`), true);
+    agrees('a\nb\n', `a\n${BOM}b\n`);
   });
 });
 
@@ -140,6 +162,32 @@ describe('computeHunks', () => {
     const hunks = computeHunks(baseline, current);
     assert.equal(hunks[0].newStart, 3);
     assert.equal(hunks[0].oldStart, 3);
+  });
+
+  it('a BOM on the baseline alone produces no hunk', () => {
+    assert.deepEqual(computeHunks(`${BOM}a\nb\n`, 'a\nb\n'), []);
+  });
+
+  it('BOM stripping does not shift line numbers', () => {
+    // The safety argument for normalizing here: `acceptHunk`/`discardHunk` splice the RAW
+    // baseline and buffer by the line indices this returns, so a normalization that moved
+    // them would corrupt the baseline. Removing a leading BOM cannot — same assertion as
+    // the un-BOM'd case above, and it must match exactly.
+    const hunks = computeHunks(`${BOM}a\nb\nc\n`, 'a\nb\nX\n');
+    assert.equal(hunks.length, 1);
+    assert.equal(hunks[0].newStart, 3);
+    assert.equal(hunks[0].oldStart, 3);
+    assert.deepEqual(hunks[0].removedContent, ['c']);
+    assert.deepEqual(hunks[0].addedContent, ['X']);
+  });
+
+  it('an edit to the first line of a BOM file is reported on line 1', () => {
+    const hunks = computeHunks(`${BOM}a\nb\n`, 'Z\nb\n');
+    assert.equal(hunks.length, 1);
+    assert.equal(hunks[0].newStart, 1);
+    assert.equal(hunks[0].oldStart, 1);
+    assert.deepEqual(hunks[0].removedContent, ['a'], 'the BOM must not travel with the content');
+    assert.deepEqual(hunks[0].addedContent, ['Z']);
   });
 
   it('adjacent changes are merged into one hunk', () => {

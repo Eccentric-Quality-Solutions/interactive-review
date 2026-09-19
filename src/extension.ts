@@ -9,6 +9,7 @@ import {
   activeReviewTarget, hunkAtCursor, neighbourHunk, revealHunk,
 } from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
+import { restoreDiffSettings } from './diffSettings';
 import { hunkId } from './diffEngine';
 import { initLog, log } from './log';
 
@@ -91,10 +92,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     updateInReviewContext();
   }
 
-  /** Notify the diff editor that a specific file's baseline changed (only after accept). */
+  /**
+   * Invalidate VS Code's cached copy of a file's baseline document, so the next
+   * render of the diff editor's original side re-reads `stateManager`.
+   *
+   * Driven off `onDidChangeBaseline` rather than called from the accept/reject
+   * commands: the baseline is state's to own, and hanging the notification off the
+   * commands left every other writer (enter-reviewing, rollback, rename, clear) —
+   * and reject entirely — silently stale. See the event's doc comment.
+   *
+   * Still exported to `ReviewPanel` as a belt-and-braces refresh immediately before
+   * `vscode.diff`, which costs one no-op fire and makes the surface correct even if
+   * a future writer escapes the event.
+   */
   function fireBaselineChange(filePath: string): void {
     baselineChangeEmitter.fire(vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' }));
   }
+  context.subscriptions.push(stateManager, stateManager.onDidChangeBaseline(fireBaselineChange));
 
   /**
    * Close tabs for files that are no longer in reviewing state.
@@ -163,7 +177,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   }
 
   let syncIgnore: () => void;
-  const fileWatcher = new FileWatcher(stateManager, onStateChanged, () => syncIgnore());
+  const fileWatcher = new FileWatcher(stateManager, onStateChanged, () => syncIgnore(),
+    // Watcher-driven exits (undo back to baseline, external delete) leave a diff tab
+    // whose baseline document is now correctly empty — so it would repaint the whole
+    // file as added. The command paths already sweep via `walkAfterResolve`; this gives
+    // the watcher paths the same. Fire-and-forget: nothing downstream awaits the sweep.
+    () => { void closeStaleTabs().catch(err => log(`closeStaleTabs (watcher): ${err}`)); });
   syncIgnore = () => stateManager.syncIgnoreState((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)).then(onStateChanged);
   // Register watcher early so gitignoreMatcher is initialized before load().
   // Suppress events during load to avoid race conditions where file changes
@@ -176,6 +195,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     log(`loaded state: enabled=${stateManager.enabled}, files=${stateManager.getAllFiles().size}`);
   } finally {
     fileWatcher.resumeAll();
+  }
+
+  // A ledger with no session behind it means a previous restore never completed — the
+  // write failed, or the host died between the two. Retry it now rather than leaving
+  // the user's diffEditor settings forced indefinitely. No-op in the normal case.
+  //
+  // KNOWN LIMITATION — multi-window. The gate is *this* window's session, but the
+  // ledger and the settings it guards are global. Opening a second window on another
+  // workspace therefore restores the settings out from under a first window that is
+  // mid-review, whose next diff renders side-by-side with the hunk CodeLenses hidden.
+  //
+  // Left unfixed on purpose. A real fix means the ledger carries a cross-window session
+  // refcount, with its own crash-recovery story for counts that never decrement — more
+  // machinery, and more ways to strand the user's settings, than the fault deserves.
+  // The fault self-heals: `applyInlineDiffSettings` runs before every diff open, so the
+  // damage is one file rendered wrong, not a stuck state. Compare the `deactivate()`
+  // note below, which is the same global-ledger/per-window-session seam seen from the
+  // closing side.
+  if (!stateManager.enabled) {
+    await restoreDiffSettings(context.globalState);
   }
 
   context.subscriptions.push(
@@ -215,7 +254,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     // (the `interactive-review-deleted` doc), which has no file-scheme lenses.
     vscode.languages.registerCodeLensProvider({ scheme: 'interactive-review-deleted' }, diffCodeLensProvider),
     vscode.commands.registerCommand('interactiveReview.codeLensAcceptHunk', (filePath: string, hId: string) => {
-      acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); walkAfterResolve(filePath); }, 'codeLens');
+      acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
       void discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens')
@@ -240,7 +279,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       const hunk = hunkAtCursor(t.editor, t.fileState);
       if (!hunk) return;
       acceptHunk(stateManager, t.filePath, hunkId(hunk),
-        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); }, 'keybinding');
+        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding');
     }),
     vscode.commands.registerCommand('interactiveReview.rejectHunk', () => {
       const t = activeReviewTarget(stateManager);
@@ -264,14 +303,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       if (!t) return;
       const sel = t.editor.selection;
       void acceptSelection(stateManager, t.filePath, sel.start.line, sel.end.line,
-        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); }, 'keybinding')
+        () => { onStateChanged(); walkAfterResolve(t.filePath); }, 'keybinding')
         .catch(reportCommandFailure('Accept selection', t.filePath));
     }),
     vscode.commands.registerCommand('interactiveReview.acceptFile', () => {
       const t = activeReviewTarget(stateManager);
       if (!t) return;
       acceptFileByPath(stateManager, t.filePath,
-        () => { onStateChanged(); fireBaselineChange(t.filePath); walkAfterResolve(t.filePath); });
+        () => { onStateChanged(); walkAfterResolve(t.filePath); });
     }),
     vscode.commands.registerCommand('interactiveReview.rejectFile', () => {
       const t = activeReviewTarget(stateManager);
@@ -374,6 +413,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
         settingsWatcher?.close();
         settingsWatcher = undefined;
         stateManager.resetToDisabled();
+        // Same session-ended contract as `endReview`: give the user's global
+        // diffEditor settings back (ADR-0003).
+        void restoreDiffSettings(context.globalState);
         onStateChanged();
         return;
       }
@@ -472,6 +514,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   activeStateManager = stateManager;
   activeReviewPanel = reviewPanel;
   activeFileWatcher = fileWatcher;
+  activeGlobalState = context.globalState;
 
   return { getReviewPanel, getStateManager, getFileWatcher };
 }
@@ -479,6 +522,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
 let activeStateManager: StateManager | undefined;
 let activeReviewPanel: ReviewPanel | undefined;
 let activeFileWatcher: FileWatcher | undefined;
+let activeGlobalState: vscode.Memento | undefined;
 
 /** Exposed for integration tests */
 export function getReviewPanel(): ReviewPanel | undefined {
@@ -498,4 +542,16 @@ export function getFileWatcher(): FileWatcher | undefined {
 export async function deactivate(): Promise<void> {
   log('deactivate');
   await activeStateManager?.flush();
+  // Only when this window has no session open. A review session outlives a window
+  // reload, so restoring on every shutdown would churn settings.json twice per reload.
+  // A session that has already ended has nothing left to justify holding the settings,
+  // so this is where an uninstall-after-review gets them back.
+  //
+  // The guard is per-window while the ledger is per-extension, so closing an idle window
+  // can still restore out from under a second window that is mid-review. That case
+  // self-heals — the reviewing window re-nudges and re-records on its next diff — and
+  // the same is true of `endReview`; a cross-window lock is not worth the machinery.
+  if (activeGlobalState && !activeStateManager?.enabled) {
+    await restoreDiffSettings(activeGlobalState);
+  }
 }

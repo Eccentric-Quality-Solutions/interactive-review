@@ -105,7 +105,17 @@ suite('interactive-review partial reject', function () {
     await waitForCondition(() => editor.document.getText() === 'l1\nC\nl2\n').catch(() => {});
     assert.strictEqual(editor.document.getText(), 'l1\nC\nl2\n', 'lines deleted');
 
+    // The text matches as soon as the workspace edit applies — which is *before* the
+    // command's tail: the save, and the cross-file walk that can move focus. An undo
+    // issued into that window does not take effect (the document is left exactly as the
+    // edit left it), and the test was reading that as a two-step undo stack. Waiting for
+    // the save to land orders the undo after the whole command.
+    //
+    // Whether a user can hit the same window with a fast Ctrl+Z is a separate question
+    // about the command's tail, not about the size of the undo step this test pins.
+    await waitForCondition(() => !editor.document.isDirty).catch(() => {});
     await vscode.window.showTextDocument(editor.document);
+    await sleep(200);
     await vscode.commands.executeCommand('undo');
     await waitForCondition(() => editor.document.getText() === 'l1\nA\nB\nC\nl2\n').catch(() => {});
     assert.strictEqual(editor.document.getText(), 'l1\nA\nB\nC\nl2\n',

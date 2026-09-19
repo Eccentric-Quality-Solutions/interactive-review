@@ -180,29 +180,9 @@ window turned out to be one repaint, so the recommendation there is two warnings
 
 ### Stage 2 — gated coalescing — **WITHDRAWN (2026-08-10)**
 
-> Not implemented and not planned. Whole-file Accept from the panel row already collapses a
-> fragmented prose edit to one click, so this bought a cosmetic win over a shipped workaround —
-> at the cost of a `computeHunks` rewrite, a *mandatory* companion fix to
-> `splitHunkByRange`/`acceptSelection`/`rejectSelection`, and the unresolved §8 question about
-> code files. Multi-hunk selection (§6, backlog item **C**) reaches the same goal — one gesture
-> per logical edit — without touching the differ. Rationale of record: [`../todo.md`](../todo.md),
-> "Dropped: gated hunk coalescing". Reopen only if C ships and fragmentation still bites.
-
-The original proposal, kept for the analysis:
-
-Implement inside `computeHunks` as a post-pass (rename the current body to
-`computeAtomicHunks`), so every call site inherits it and lens ids match command ids.
-Interior context lines go **into** `addedContent`/`removedContent`, preserving
-`addedContent.length === newLines`.
-
-Required companions in the same commit:
-- `resolveSelectionHunk` re-resolves to `hunkAtLine(hunk.parts, startLine)`.
-- `reviewPanel.buildPanelState` sums `+/-` over `h.parts`, not the merged hunk, or the
-  displayed line totals inflate by the gap size.
-
-Free side effect: `hunkAtLine` currently falls a cursor sitting on an interior blank line
-*forward* to the next hunk. After coalescing that line is inside the hunk, so a keyboard
-accept on it does what the user expects.
+Not implemented and not planned. Decision, rationale, and the conditions for reopening:
+[ADR-0010](adr/0010-withdraw-gated-hunk-coalescing.md). Multi-hunk selection (§6, backlog item
+**C**) is now *the* route to one-gesture-per-logical-edit.
 
 ### Not now — owning the render surface
 
@@ -338,7 +318,7 @@ the entire file as one added block — until the async `closeStaleTabs` removes 
   since nothing else would catch it changing — and with an EOL-insensitive differ, a
   regression there would silently rewrite the user's line endings without ever showing a hunk.
 
-### Resolution: EOL-insensitive diffing (implemented)
+### Resolution: EOL-insensitive diffing ([ADR-0009](adr/0009-eol-insensitive-diffing.md))
 
 `computeHunks` now passes `stripTrailingCr: true` to `Diff.diffLines`. A pure EOL conversion
 produces zero hunks, and an edit made in the same write as a conversion surfaces as just
@@ -373,6 +353,7 @@ files here are blank lines, so two edits separated by one blank line inside a fu
 merge. For prose that is obviously right. For code it is arguable, and there is a standing
 complaint pointing the *other* way ("sometimes it is grabbing bigger chunks of code").
 
-**Resolution:** the question was never answered because coalescing itself was withdrawn (§5
-Stage 2). Being unable to settle the code gate cheaply was part of why. If coalescing is ever
-reopened, this is the question that must be answered first.
+**Resolution:** the question was never answered because coalescing itself was withdrawn
+([ADR-0010](adr/0010-withdraw-gated-hunk-coalescing.md)). Being unable to settle the code gate
+cheaply was part of why. If coalescing is ever reopened, this is the question that must be
+answered first.

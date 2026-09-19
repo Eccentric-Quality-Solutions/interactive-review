@@ -9,6 +9,7 @@ import { computeHunks } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 import { SnapshotCreateTracker } from './snapshotCreateTracker';
+import { readFileForReview, stripBom } from './textFile';
 
 // Transform gitignore rules from a sub-directory so they work in a single
 // root-level matcher. Adds the directory's relative path as prefix, handling
@@ -62,6 +63,27 @@ export class FileWatcher {
   private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
   private onStateChanged: () => void;
   private onIgnoreRulesChanged: (() => void) | undefined;
+  /**
+   * Called after a watcher-driven `exitReviewing`, to close the file's now-stale
+   * diff tab. The command paths (accept/reject) already do this via
+   * `walkAfterResolve`; these three sites are the ones that never did.
+   *
+   * It became load-bearing when `StateManager` started firing `onDidChangeBaseline`
+   * on delete: the baseline document for a dropped entry now correctly re-renders as
+   * `''`, so an open diff tab repaints the whole file as added. Undo-to-baseline with
+   * the diff open is the reachable case. Closing the tab is the fix — suppressing the
+   * notification instead would restore the old behaviour only by pairing two errors.
+   *
+   * Deliberately *not* driven off `onDidChangeBaseline` in `extension.ts`, which would
+   * be the tidier seam: `clearState` fires once per path, so a teardown with N files
+   * would run a full scan of every tab group N times.
+   *
+   * Takes no path for the same reason. The consumer scans every tab group and closes
+   * whatever no longer reviews, so a path would be decoration — and decorating it would
+   * invite one call per file in the directory-delete loop, which is the cost this whole
+   * arrangement exists to avoid. One call per event, after the state settles.
+   */
+  private onFileLeftReview: (() => void) | undefined;
   // Compiled ignore instance from workspace .gitignore
   private gitignoreMatcher: Ignore = ignoreLib();
   // When true, all file-system events are suppressed (used during branch switch)
@@ -73,10 +95,12 @@ export class FileWatcher {
   constructor(
     private stateManager: StateManager,
     onStateChanged: () => void,
-    onIgnoreRulesChanged?: () => void
+    onIgnoreRulesChanged?: () => void,
+    onFileLeftReview?: () => void
   ) {
     this.onStateChanged = onStateChanged;
     this.onIgnoreRulesChanged = onIgnoreRulesChanged;
+    this.onFileLeftReview = onFileLeftReview;
   }
 
   register(context: vscode.ExtensionContext): void {
@@ -288,7 +312,9 @@ export class FileWatcher {
    * Draining the queue without first draining these handlers therefore resolves
    * `beginReview` while the baseline for exactly the files the enable window exists to
    * protect is still unwritten; the agent's first edit to one then lands on an undefined
-   * baseline and is silently absorbed by `handleDiskChange`'s adopt branch.
+   * baseline, and — since ADR-0012 moved that branch from absorb to review — surfaces the
+   * whole pre-existing file as a spurious "new file" hunk. Noisy rather than silent, which
+   * is the direction we want, but still a bug this is here to prevent.
    *
    * The count lets the caller alternate settle/flush until a pass finds nothing, which is
    * the only sound stopping condition: waiting can itself admit new creates.
@@ -300,15 +326,26 @@ export class FileWatcher {
   /**
    * Consume-once check: did VSCode itself just save exactly `diskContent` to `filePath`?
    * Returns true only when a pending save is recorded for the path AND its content matches
-   * the bytes now on disk, then clears the token. Exact match (not normalized) is deliberate:
-   * a mismatch falls through to the review path (safe — at worst a spurious hunk on your own
+   * the bytes now on disk, then clears the token. Whole-file match is deliberate: a
+   * mismatch falls through to the review path (safe — at worst a spurious hunk on your own
    * save), whereas a loose match risks absorbing a genuine external edit (silent data loss).
+   * The single exception, and its reasoning, is at the comparison itself.
    */
   private consumeManualSave(filePath: string, diskContent: string): boolean {
     const saved = this.pendingManualSaves.get(filePath);
     if (saved === undefined) return false;
     this.pendingManualSaves.delete(filePath);
-    return saved.content === diskContent;
+    // BOM-insensitive, and *only* BOM-insensitive. The token holds `doc.getText()`, which
+    // VS Code has already stripped the BOM from, while `diskContent` is the raw bytes it
+    // just wrote — BOM included. Comparing them directly meant every hand-save of a BOM'd
+    // file failed to match and fell through to review, which is precisely the "your own
+    // typing enters the queue" outcome this mechanism exists to prevent.
+    //
+    // This does not loosen the guarantee in ADR-0006. Equality still has to hold across
+    // the entire file; the two strings simply have to agree about content rather than
+    // about an encoding marker neither side chose. Nothing else is normalized here —
+    // matching on EOL or whitespace would let a real external edit be mistaken for a save.
+    return stripBom(saved.content) === stripBom(diskContent);
   }
 
   markSelfEdit(filePath: string): void {
@@ -443,8 +480,9 @@ export class FileWatcher {
     if (!git) { log(`onDiskCreate(${basename}): no git, skip`); return; }
 
     let diskContent: string;
+    let isBinary: boolean;
     try {
-      diskContent = await fs.promises.readFile(filePath, 'utf-8');
+      ({ text: diskContent, binary: isBinary } = await readFileForReview(filePath));
     } catch {
       log(`onDiskCreate(${basename}): read failed, skip`);
       return;
@@ -462,6 +500,7 @@ export class FileWatcher {
     // Was this file just saved by VSCode itself (user created + saved a new file)?
     // Gated on the save event, not buffer==disk — same reasoning as onDiskChange.
     if (this.consumeManualSave(filePath, diskContent)) {
+      if (isBinary) { log(`onDiskCreate(${basename}): saved file is binary — not baselining`); return; }
       log(`onDiskCreate(${basename}): matched VSCode save, snapshot as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
@@ -482,17 +521,22 @@ export class FileWatcher {
     //
     // A residual sliver stays open by construction: a file created after
     // `collectWorkspaceFiles` returns but before `snapshotBatch` finishes gets no baseline
-    // at all, and its next change falls into handleDiskChange's Cause B adopt. Closing it
-    // would mean making the snapshot atomic against the filesystem, which it cannot be.
+    // at all. Since ADR-0012 its next change is *reviewed* as a new file rather than
+    // absorbed, so the sliver now costs a spurious whole-file hunk instead of a lost edit.
+    // Closing it outright would mean making the snapshot atomic against the filesystem,
+    // which it cannot be.
     if (duringSnapshot) {
+      if (isBinary) { log(`onDiskCreate(${basename}): create during enable snapshot is binary — not baselining`); return; }
       log(`onDiskCreate(${basename}): create during enable snapshot, adopt as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
     }
 
-    // External tool created this file — show as new file hunk (null = file didn't exist before)
+    // External tool created this file — show as new file hunk. This is the one site that
+    // actually witnessed the create, so it is the one site allowed to say 'created', which
+    // is what licenses Discard to delete the file again.
     log(`onDiskCreate(${basename}): external create, enterReviewing as NEW`);
-    this.enterReviewing(filePath, null, diskContent);
+    this.enterReviewing(filePath, null, diskContent, 'created');
   }
 
   private async onDiskDelete(uri: vscode.Uri): Promise<void> {
@@ -541,6 +585,7 @@ export class FileWatcher {
     if (fileState?.baseline === null) {
       log(`onDiskDelete(${basename}): new file (null baseline) deleted, removing fileState`);
       this.stateManager.exitReviewing(filePath);
+      this.onFileLeftReview?.();
       this.onStateChanged();
       return;
     }
@@ -562,11 +607,14 @@ export class FileWatcher {
       const dirPrefix = filePath + path.sep;
       const allFiles = this.stateManager.getAllFiles();
       let childrenCleaned = 0;
+      // One tab sweep after the loop, not one per child — see `onFileLeftReview`.
+      let childLeftReview = false;
       for (const [childPath, childState] of allFiles) {
         if (!childPath.startsWith(dirPrefix)) continue;
         if (childState.baseline === null) {
           // New file (no git baseline) — just remove from state
           this.stateManager.exitReviewing(childPath);
+          childLeftReview = true;
         } else {
           // Has baseline — show deletion diff
           this.enterReviewing(childPath, childState.baseline, '');
@@ -575,6 +623,7 @@ export class FileWatcher {
       }
       if (childrenCleaned > 0) {
         log(`onDiskDelete(${basename}): cleaned ${childrenCleaned} child file(s) from deleted directory`);
+        if (childLeftReview) this.onFileLeftReview?.();
         this.onStateChanged();
       }
       return;
@@ -590,6 +639,13 @@ export class FileWatcher {
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
 
+    // Sampled at entry, not at the no-baseline branch far below, and for the same reason
+    // `handleDiskCreate` samples it at entry: arrival time is the property being tested.
+    // This handler awaits a disk read and a git read before reaching that branch, so a
+    // late read would see the window closed for an event that genuinely arrived inside it
+    // — and would then show the enable snapshot's own files as new.
+    const duringSnapshot = this.snapshotCreates.active;
+
     if (this.shouldIgnore(filePath)) { log(`onDiskChange(${basename}): ignored, skip`); return; }
     if (this.selfEditFiles.has(filePath)) {
       // The extension's own write (accept/reject) — its save fired onDidSaveTextDocument
@@ -599,8 +655,9 @@ export class FileWatcher {
     }
 
     let diskContent: string;
+    let isBinary: boolean;
     try {
-      diskContent = await fs.promises.readFile(filePath, 'utf-8');
+      ({ text: diskContent, binary: isBinary } = await readFileForReview(filePath));
     } catch {
       log(`onDiskChange(${basename}): read failed, skip`);
       return;
@@ -628,27 +685,59 @@ export class FileWatcher {
     // open buffer matching disk: VSCode silently reloads a clean open buffer to match
     // an external write, so buffer==disk is true even for an AI edit to an open file.
     if (wasManualSave) {
+      if (isBinary) { log(`onDiskChange(${basename}): saved file is binary — not baselining`); return; }
       log(`onDiskChange(${basename}): matched VSCode save, snapshot as baseline`);
       this.stateManager.snapshotFile(filePath, diskContent);
       return;
     }
 
-    // External change — compare against interactive-review baseline
+    // External change — compare against interactive-review baseline.
+    //
+    // Drained first, because `snapshotFile` only *queues* its write while `getBaseline`
+    // reads the index directly. One save can surface as two change deliveries; the first
+    // consumes the save token and queues the new baseline, and without this the second
+    // reads the pre-save baseline, finds a diff, and puts the user's own typing in the
+    // queue — the exact outcome the save token exists to prevent. Reading a baseline
+    // while writes to it are in flight was never sound.
+    await this.stateManager.flush();
     const gitBaseline = await git.getBaseline(filePath);
     if (gitBaseline === undefined) {
-      // No baseline in git — silently adopt current content as baseline rather than
-      // treating as a new file. This avoids false "new file" hunks in cases like:
-      // - ignore rules just changed (file newly un-ignored, not actually new)
-      // - syncIgnoreState hasn't finished its git queue yet
-      // - first enable where snapshotWorkspace is still in progress
-      // Genuine new files created while interactive-review is running are caught by onDidCreate,
-      // not this path. This is intentionally consistent with syncIgnoreState's toAdd
-      // behavior which also silently snapshots.
-      // KNOWN GAP (Cause B): if an external CREATE was missed and only this CHANGE fired,
-      // the edit is silently absorbed here with no review hunk. See
-      // docs/terminal-edits-not-captured.md §5. Logged loudly so it is findable.
-      log(`onDiskChange(${basename}): external change but NO baseline — silently adopting as baseline (Cause B; edit will NOT be reviewed)`);
-      this.stateManager.snapshotFile(filePath, diskContent);
+      // No baseline in git. Two populations reach here and they want opposite handling
+      // (ADR-0012, superseding ADR-0008's blanket absorb):
+      //
+      // - A file the tool has not finished baselining *yet*: the enable snapshot or an
+      //   ignore-rule sync is mid-flight. It is not new, we are just early, and showing
+      //   it would flood the queue with whole-file "new file" hunks for files the user
+      //   never touched. Absorb.
+      // - Everything else: unreadable at enable, untracked at enable, or — the case this
+      //   branch existed to swallow — an external CREATE the watcher missed, surfacing
+      //   only as a CHANGE. That is a genuine agent edit, and absorbing it is the tool's
+      //   worst failure mode. Review it as a new file.
+      //
+      // Both windows are explicit flags rather than inferred, so the fallthrough is the
+      // safe direction: an unknown state reviews rather than drops.
+      if (duringSnapshot || this.stateManager.ignoreSyncActive) {
+        const why = duringSnapshot ? 'enable snapshot' : 'ignore sync';
+        if (isBinary) { log(`onDiskChange(${basename}): no baseline during ${why}, but file is binary — not baselining`); return; }
+        log(`onDiskChange(${basename}): no baseline during ${why} — adopting as baseline (not yet tracked, not new)`);
+        this.stateManager.snapshotFile(filePath, diskContent);
+        return;
+      }
+      // Binaries are skipped at enable (`readBatch`), so a pre-existing asset reaches
+      // here with no baseline. Skipping is now a *display* decision rather than a safety
+      // one — `nullReason: 'unbaselined'` below already keeps Discard's delete branch off
+      // this population — but a whole-file hunk of replacement characters is not a review,
+      // so there is nothing to gain by queueing it.
+      if (isBinary) {
+        log(`onDiskChange(${basename}): external change, no baseline, binary — skip (nothing legible to review)`);
+        return;
+      }
+      // 'unbaselined', not 'created': this handler sees a *change*, so it has no evidence
+      // the file is new — it may be an asset we never baselined or a create the watcher
+      // missed. Reviewing it either way is the ADR-0012 decision; deleting it on discard
+      // would not be.
+      log(`onDiskChange(${basename}): external change with NO baseline and no snapshot in flight — reviewing as unbaselined (was Cause B)`);
+      this.enterReviewing(filePath, null, diskContent, 'unbaselined');
       return;
     }
     log(`onDiskChange(${basename}): external change, enterReviewing`);
@@ -679,15 +768,38 @@ export class FileWatcher {
     this.debounceTimers.set(filePath, timer);
   }
 
-  private enterReviewing(filePath: string, baseline: string | null, current: string): void {
+  /**
+   * `nullReason` is required in spirit whenever `baseline` is null and ignored otherwise;
+   * it is what decides whether a later Discard *deletes* this file (see
+   * `FileState.nullReason`). Only this class may claim `'created'`, because only the
+   * watcher witnesses a create — every other producer of a null baseline is inferring
+   * from the end state and must say `'unbaselined'`. Omitting it defaults to the
+   * non-deleting reading.
+   */
+  private enterReviewing(
+    filePath: string,
+    baseline: string | null,
+    current: string,
+    nullReason: 'created' | 'unbaselined' = 'unbaselined',
+  ): void {
     const hunks = computeHunks(baseline, current);
-    const isNew = baseline === null;
+    const isNew = baseline === null && nullReason === 'created';
     const isDeleted = !fs.existsSync(filePath) && baseline !== null;
-    // Allow 0-hunk entry for new files (null baseline) and deleted files (file gone, nothing to diff)
-    if (hunks.length === 0 && !isNew && !isDeleted) return;
-    const tag = isNew ? ' (new)' : isDeleted ? ' (deleted)' : '';
+    // Allow 0-hunk entry for new/unbaselined files (null baseline) and deleted files
+    // (file gone, nothing to diff)
+    if (hunks.length === 0 && baseline !== null && !isDeleted) return;
+    const tag = isNew ? ' (new)' : baseline === null ? ' (unbaselined)' : isDeleted ? ' (deleted)' : '';
     log(`reviewing: ${path.basename(filePath)}${tag}`);
-    this.stateManager.setFile(filePath, { status: 'reviewing', baseline });
+    // `skipSnapshot`: every baseline that reaches here was *read from* the baseline repo
+    // (or is null, which is never stored), so writing it back is at best redundant — and
+    // at worst a revert. A duplicate change event arriving just after an accept re-enters
+    // the file with the baseline it read a moment earlier, and without this that stale
+    // value is queued back over the one the accept just stored, permanently undoing it.
+    this.stateManager.setFile(filePath, {
+      status: 'reviewing',
+      baseline,
+      ...(baseline === null ? { nullReason } : {}),
+    }, true);
     this.onStateChanged();
   }
 
@@ -701,6 +813,7 @@ export class FileWatcher {
         return;
       }
       this.stateManager.exitReviewing(filePath);
+      this.onFileLeftReview?.();
     }
     this.onStateChanged();
   }

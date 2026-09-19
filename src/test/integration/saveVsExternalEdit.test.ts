@@ -1,11 +1,16 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import * as path from 'path';
 import assert from 'assert';
+
 import {
   getWorkspaceRoot, gitGetBaseline, sleep, waitForCondition,
   enableReview, disableReview, writeFileExternally, cleanWorkspace,
   getStateManager, getFileWatcher, openDocInEditor, findOpenDoc,
 } from './helpers';
+
+/** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
+const BOM = '\uFEFF';
 
 /**
  * Regression coverage for the "Claude/terminal edits not captured" bug.
@@ -135,11 +140,10 @@ suite('interactive-review save-vs-external-edit classification', function () {
     );
   });
 
-  test('KNOWN GAP (Cause B): external change with no baseline is silently absorbed', async () => {
-    // Documents current behavior so a future intentional change is a visible test diff.
-    // See docs/terminal-edits-not-captured.md §5 Cause B — a missed CREATE that surfaces
-    // only as a CHANGE gets adopted as baseline with no review hunk. If we later decide
-    // to surface these instead, flip this assertion.
+  test('external change with no baseline is reviewed as a new file (former Cause B)', async () => {
+    // Was the ADR-0008 characterization test pinning the silent absorb; flipped by
+    // ADR-0012. A missed CREATE that surfaces only as a CHANGE is a genuine agent edit
+    // and must reach the queue rather than being adopted as baseline.
     const root = getWorkspaceRoot();
     const filePath = path.join(root, 'no-baseline.txt');
     const rel = path.relative(root, filePath);
@@ -152,12 +156,164 @@ suite('interactive-review save-vs-external-edit classification', function () {
     assert.strictEqual(gitGetBaseline(root, rel), undefined, 'precondition: no baseline');
 
     await fireDiskChange(filePath);
-    await sleep(300); // snapshotFile runs on the async git queue
 
     const sm = getStateManager();
+    assert.strictEqual(
+      sm.getFile(filePath)?.status, 'reviewing',
+      'A no-baseline external change must be reviewed, not silently absorbed',
+    );
+    assert.strictEqual(
+      sm.getFile(filePath)?.baseline, null,
+      'Null baseline is what renders it as a new file',
+    );
+  });
+
+  test('external change to a pre-existing binary with no baseline is skipped, not reviewed as new', async () => {
+    // Enable skips binaries (`readBatch`), so a pre-existing asset has no baseline.
+    // ADR-0012's fallthrough would otherwise queue it as a new file; Discard would then
+    // trash an asset that already existed. Create of a new binary stays reviewable —
+    // this test drives only the CHANGE handler (same seam as the Cause B test).
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'logo.png');
+    const rel = path.relative(root, filePath);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+
+    fs.writeFileSync(filePath, bytes);
+    await enableReview();
+    assert.strictEqual(gitGetBaseline(root, rel), undefined, 'precondition: binary never baselined');
+
+    const sm = getStateManager();
+    const watcher = getFileWatcher();
+    // Drop a reviewing entry a late host-watcher create may have installed (create path
+    // is intentionally open for new binaries). Suppress around the rewrite so only the
+    // explicit fireDiskChange below exercises the change-path guard.
+    if (sm.getFile(filePath)?.status === 'reviewing') {
+      sm.removeFile(filePath);
+    }
+    watcher.suppressAll();
+    try {
+      fs.writeFileSync(filePath, Buffer.concat([bytes, Buffer.from([0x01])]));
+    } finally {
+      watcher.resumeAll();
+    }
+    await fireDiskChange(filePath);
+
     assert.notStrictEqual(
       sm.getFile(filePath)?.status, 'reviewing',
-      'Current (documented) behavior: no-baseline external change is absorbed, not reviewed',
+      'A rewrite of a pre-existing binary must not appear as a new file',
     );
+    assert.strictEqual(gitGetBaseline(root, rel), undefined, 'And must still not become a baseline');
+  });
+
+  test('a change during the enable snapshot is still absorbed, not shown as new', async () => {
+    // The other half of ADR-0012: the absorb survives where it was actually justified.
+    // Without this, the flip above would repaint every file the enable snapshot has not
+    // reached yet as a whole-file "new file" hunk.
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'during-snapshot.txt');
+
+    await enableReview();
+
+    const sm = getStateManager();
+    const watcher = getFileWatcher();
+    // Reopen the enable window by hand via the same methods `enableReview` uses.
+    // Reproducing the real race would need a snapshot slow enough to fire a change
+    // inside it — a timing test, not a behaviour one.
+    watcher.beginSnapshot();
+    try {
+      // Created after enable and never seen by onDiskCreate: no baseline, no state
+      // entry — the same precondition as the test above, differing only in the window.
+      writeFileExternally(filePath, 'appeared mid-snapshot\n');
+      await fireDiskChange(filePath);
+      assert.notStrictEqual(
+        sm.getFile(filePath)?.status, 'reviewing',
+        'Mid-snapshot change must be adopted as baseline, not surfaced as a new file',
+      );
+      await waitForCondition(() => gitGetBaseline(root, path.relative(root, filePath)) !== undefined);
+    } finally {
+      watcher.endSnapshot();
+    }
+  });
+
+  test('a hand-save of a BOM file is absorbed, not queued', async () => {
+    // VS Code strips the BOM on open, so the save token holds BOM-less text while the
+    // bytes it just wrote still carry one. The comparison used to be exact, so a user's
+    // own save of any BOM'd file failed to match and landed in the review queue.
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'bom-save.txt');
+    const rel = path.relative(root, filePath);
+
+    fs.writeFileSync(filePath, BOM + 'original\n', 'utf-8');
+    await enableReview();
+    await waitForCondition(() => gitGetBaseline(root, rel) !== undefined);
+
+    const editor = await openDocInEditor(filePath);
+    assert.ok(
+      !editor.document.getText().startsWith(BOM),
+      'precondition: VS Code strips the BOM from the buffer',
+    );
+    await editor.edit(b => b.insert(new vscode.Position(1, 0), 'typed by user\n'));
+    assert.ok(await editor.document.save(), 'document.save() should succeed');
+    await sleep(100); // let the save listener record the token
+
+    await fireDiskChange(filePath);
+
+    assert.notStrictEqual(
+      getStateManager().getFile(filePath)?.status, 'reviewing',
+      'A user save of a BOM file must not enter the review queue',
+    );
+  });
+
+  test('an external edit to a BOM file still enters review', async () => {
+    // The other side of the same normalization: absorbing on BOM difference must not
+    // absorb anything else. This is the edit the tool exists to surface.
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'bom-external.txt');
+    const rel = path.relative(root, filePath);
+
+    fs.writeFileSync(filePath, BOM + 'original\n', 'utf-8');
+    await enableReview();
+    await waitForCondition(() => gitGetBaseline(root, rel) !== undefined);
+
+    fs.writeFileSync(filePath, BOM + 'original\nagent edit\n', 'utf-8');
+    await fireDiskChange(filePath);
+
+    assert.strictEqual(
+      getStateManager().getFile(filePath)?.status, 'reviewing',
+      'An external edit to a BOM file must still be reviewed',
+    );
+  });
+
+  test('binary content is never written to the baseline', async () => {
+    // `fs.readFile(path, 'utf-8')` does not throw on binary — it returns replacement
+    // characters — so the adopt branches used to store a lossy decode as the baseline.
+    // A baseline is what `discardHunk` writes back, so that decode could later overwrite
+    // the real file. Pinned against the same adopt path the text case above exercises:
+    // identical flow, identical window, opposite outcome.
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'asset.bin');
+    const rel = path.relative(root, filePath);
+
+    await enableReview();
+
+    const sm = getStateManager();
+    const watcher = getFileWatcher();
+    watcher.beginSnapshot();
+    try {
+      fs.writeFileSync(filePath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x08, 0x00]));
+      await fireDiskChange(filePath);
+      await sleep(300); // the text case would have drained its git write by now
+
+      assert.strictEqual(
+        gitGetBaseline(root, rel), undefined,
+        'Binary content must not become a baseline',
+      );
+      assert.notStrictEqual(
+        sm.getFile(filePath)?.status, 'reviewing',
+        'Nor should it be diffed as text',
+      );
+    } finally {
+      watcher.endSnapshot();
+    }
   });
 });

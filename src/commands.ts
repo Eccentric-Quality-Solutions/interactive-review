@@ -5,9 +5,57 @@ import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
 import { computeHunks, hunkAtLine, hunkId, ParsedHunk, splitHunkByRange } from './diffEngine';
+import { restoreDiffSettings } from './diffSettings';
 import { FileState } from './types';
 import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
+import { readTextFileSync, stripBom, withBomFrom } from './textFile';
 import { log } from './log';
+
+/**
+ * Delete a file the user is discarding, to the OS trash rather than permanently.
+ *
+ * Discarding the last hunk of an agent-created *new* file removes it from disk. That is
+ * the only operation in the extension whose effect an undo cannot reach: accept and
+ * reject both go through a `WorkspaceEdit` and live on the editor's undo stack, but an
+ * unlinked file has no buffer left to undo into. One keystroke on a mis-aimed lens
+ * therefore destroyed content the agent had just written, silently and for good.
+ *
+ * `useTrash` moves the decision from irreversible to recoverable at the cost of nothing:
+ * the file still leaves the workspace and still leaves review. Where a trash is
+ * unavailable (some remote/container filesystems) VS Code rejects the request, so the
+ * caller falls back to a permanent delete rather than leaving the file stranded in the
+ * queue — the outcome is then no worse than before this existed.
+ */
+async function deleteDiscardedFile(filePath: string, label: string): Promise<void> {
+  const uri = vscode.Uri.file(filePath);
+  try {
+    await vscode.workspace.fs.delete(uri, { useTrash: true });
+    log(`${label}(${path.basename(filePath)}): discarded new file moved to trash`);
+  } catch (err) {
+    log(`${label}(${path.basename(filePath)}): trash delete failed (${err}), falling back to unlink`);
+    try {
+      await vscode.workspace.fs.delete(uri, { useTrash: false });
+    } catch (err2) {
+      log(`${label}(${path.basename(filePath)}): delete failed: ${err2}`);
+    }
+  }
+}
+
+/**
+ * Does discarding this file mean deleting it from disk?
+ *
+ * Only for a file this session watched being created. A null baseline alone is not
+ * enough — it is also what a pre-existing binary, a file unreadable at enable, and a
+ * file created inside the enable snapshot's sliver all carry, and deleting one of those
+ * destroys content the user had before review began. `nullReason` is the discriminator
+ * and absent reads as "do not delete"; see `FileState.nullReason`.
+ *
+ * For the non-deleting null case there is simply nothing to restore — no baseline
+ * exists — so discard drops the file from the queue and leaves the bytes alone.
+ */
+function discardDeletesFile(fileState: FileState): boolean {
+  return fileState.baseline === null && fileState.nullReason === 'created';
+}
 
 // ── Cursor-based resolution for keyboard-driven review ─────────────────────────
 // Keybindings carry no arguments, so accept/reject/navigate commands resolve their
@@ -61,7 +109,7 @@ export function registerCommands(
       enableReview(stateManager, fileWatcher, reviewPanel, onStateChanged)
     ),
     vscode.commands.registerCommand('interactiveReview.endReview', () =>
-      disableReview(stateManager, onStateChanged)
+      disableReview(stateManager, context.globalState, onStateChanged)
     ),
     vscode.commands.registerCommand('interactiveReview.setIgnorePatterns', async (patterns: string[]) => {
       stateManager.setIgnorePatterns(patterns);
@@ -178,12 +226,16 @@ async function enableReview(
  */
 async function disableReview(
   stateManager: StateManager,
+  globalState: vscode.Memento,
   onStateChanged: () => void
 ): Promise<void> {
   log('disable');
   // Awaited: the disable branch of setEnabled happens to run synchronously today, but
   // callers await this command expecting teardown to be finished when it resolves.
   await stateManager.setEnabled(false);
+  // Hand the user's global diffEditor settings back now that no review surface needs
+  // them forced (ADR-0003). Session-scoped, so this is the natural restore point.
+  await restoreDiffSettings(globalState);
   onStateChanged();
 }
 
@@ -222,10 +274,19 @@ export function acceptFileByPath(
     log(`acceptFileByPath(${basename}): file not on disk, removeFile`);
     stateManager.removeFile(filePath);
   } else {
-    // File exists (possibly empty) — accept current content as new baseline
-    const content = fs.readFileSync(filePath, 'utf-8');
-    log(`acceptFileByPath(${basename}): file exists, exitReviewing with content.len=${content.length}`);
-    stateManager.exitReviewing(filePath, content);
+    // File exists (possibly empty) — accept current content as new baseline.
+    const content = readTextFileSync(filePath);
+    if (content === null) {
+      // Binary. `fs.readFile(…, 'utf-8')` would happily hand back a replacement-character
+      // decoding of it, and storing that as a baseline arms a later discard to write the
+      // mush over the real bytes. Accept it out of the queue with no baseline instead:
+      // the file is accepted either way, and nothing exists afterwards to restore from.
+      log(`acceptFileByPath(${basename}): binary, accepting with no baseline`);
+      stateManager.removeFile(filePath);
+    } else {
+      log(`acceptFileByPath(${basename}): file exists, exitReviewing with content.len=${content.length}`);
+      stateManager.exitReviewing(filePath, content);
+    }
   }
   onStateChanged();
 }
@@ -259,11 +320,15 @@ export async function discardFileByPath(
 
   fileWatcher.markSelfEdit(filePath);
   try {
-    if (fileState.baseline === null) {
-      // New file (didn't exist before) — delete it
+    if (discardDeletesFile(fileState)) {
+      // New file (didn't exist before) — delete it, recoverably.
       if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+        await deleteDiscardedFile(filePath, 'discardFileByPath');
       }
+    } else if (fileState.baseline === null) {
+      // Null baseline but the file predates the session — nothing to restore to and
+      // nothing we may delete. Leave the bytes untouched; the drop below clears the queue.
+      log(`discardFileByPath(${path.basename(filePath)}): unbaselined file, leaving on disk`);
     } else if (!fs.existsSync(filePath)) {
       // File was deleted — restore from baseline
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -271,7 +336,7 @@ export async function discardFileByPath(
       await vscode.window.showTextDocument(vscode.Uri.file(filePath));
     } else {
       // File exists (possibly empty) — restore its contents to the baseline.
-      await replaceEntireDocument(vscode.Uri.file(filePath), fileState.baseline);
+      await replaceEntireDocument(vscode.Uri.file(filePath), stripBom(fileState.baseline));
     }
   } finally {
     fileWatcher.clearSelfEdit(filePath);
@@ -312,12 +377,14 @@ export function acceptHunk(
   const originalNewStart = hunk.newStart;
 
   const currentLines = doc.getText().split('\n');
-  const baselineLines = baselineStr.split('\n');
-  const newBaseline = [
+  // Stripped, so line 1 lines up with the buffer's line 1 (and with `computeHunks`, which
+  // strips both sides); `withBomFrom` puts the marker back on the baseline we store.
+  const baselineLines = stripBom(baselineStr).split('\n');
+  const newBaseline = withBomFrom(baselineStr, [
     ...baselineLines.slice(0, hunk.oldStart - 1),
     ...currentLines.slice(hunk.newStart - 1, hunk.newStart - 1 + hunk.newLines),
     ...baselineLines.slice(hunk.oldStart - 1 + hunk.oldLines),
-  ].join('\n');
+  ].join('\n'));
 
   finishBaselineAdvance(stateManager, filePath, newBaseline, doc, originalNewStart, onStateChanged, 'acceptHunk');
 }
@@ -397,10 +464,12 @@ async function applyEditAndAdvance(
     const remainingHunks = computeHunks(fileState.baseline, currentText);
     log(`${label}(${basename}): remainingHunks=${remainingHunks.length}`);
     if (remainingHunks.length === 0) {
-      if (fileState.baseline === null && fs.existsSync(filePath)) {
-        // New file (didn't exist before) fully discarded — remove from disk
+      if (discardDeletesFile(fileState) && fs.existsSync(filePath)) {
+        // New file (didn't exist before) fully discarded — remove from disk, recoverably.
+        // An unbaselined file takes the same path minus the delete: it leaves review, and
+        // its content — which predates the session — stays.
         log(`${label}(${basename}): new file fully discarded, deleting`);
-        try { fs.unlinkSync(filePath); } catch (err) { log(`${label}(${basename}): unlink failed: ${err}`); }
+        await deleteDiscardedFile(filePath, label);
       }
       log(`${label}(${basename}): no hunks left, exitReviewing`);
       stateManager.exitReviewing(filePath);
@@ -439,7 +508,9 @@ export async function discardHunk(
   const originalNewStart = hunk.newStart;
 
   const baselineStr = fileState.baseline ?? '';
-  const baselineLines = baselineStr.split('\n');
+  // Stripped because this text goes into the *document*: VS Code re-adds the file's own
+  // BOM on save, so a carried one would land on disk as a second BOM.
+  const baselineLines = stripBom(baselineStr).split('\n');
   const originalLines = baselineLines.slice(hunk.oldStart - 1, hunk.oldStart - 1 + hunk.oldLines);
 
   const startPos = new vscode.Position(hunk.newStart - 1, 0);
@@ -616,7 +687,8 @@ export async function acceptSelection(
   }
 
   const originalNewStart = hunk.newStart;
-  const baselineLines = (fileState.baseline ?? '').split('\n');
+  const baselineStr = fileState.baseline ?? '';
+  const baselineLines = stripBom(baselineStr).split('\n');
   const currentLines = doc.getText().split('\n');
 
   // Fold the selected added lines into the baseline at the hunk anchor — just after the
@@ -628,11 +700,11 @@ export async function acceptSelection(
     hunk.newStart - 1 + split.addedEndIdx,
   );
   const insertAt = hunk.oldStart - 1 + hunk.oldLines; // 0-based baseline line index
-  const newBaseline = [
+  const newBaseline = withBomFrom(baselineStr, [
     ...baselineLines.slice(0, insertAt),
     ...acceptedLines,
     ...baselineLines.slice(insertAt),
-  ].join('\n');
+  ].join('\n'));
   log(`acceptSelection(${basename}): folding ${acceptedLines.length} added line(s) into baseline at ${insertAt}`);
 
   finishBaselineAdvance(stateManager, filePath, newBaseline, doc, originalNewStart, onStateChanged, 'acceptSelection');

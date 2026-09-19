@@ -1,16 +1,17 @@
 # Bug: Claude/terminal edits not captured when the file is open in the editor
 
 **Status:** **Fixed for the open-file cause** — buffer-match heuristic replaced by an
-`onDidSaveTextDocument` save token, diagnostic logging added, regression tests added
-(2026-07-12; see §8). **Cause B** (disk change to a file with no baseline) is a *deliberate,
-now-logged* known gap — see §5 and §8.
+`onDidSaveTextDocument` save token ([ADR-0006](adr/0006-save-token-provenance.md)), diagnostic
+logging added, regression tests added (2026-07-12; see §8). **Cause B** (disk change to a file
+with no baseline) is a *deliberate, now-logged* known gap —
+[ADR-0008](adr/0008-null-baseline-silent-absorb.md), diagnosed in §5.
 **Reported:** 2026-07-12 — "It does not appear to capture Claude edits when they are made from the terminal."
 **Affected code:** [fileWatcher.ts](../src/fileWatcher.ts) — `handleDiskChange` and its twin
-`handleDiskCreate`. *(§1–§7 below quote line numbers from the pre-fix tree; they no longer
+`handleDiskCreate`. *(§1–§6 describe the pre-fix tree; any line numbers they quote no longer
 resolve. Grep for `consumeManualSave` / `handleDiskChange` instead.)*
-**This document is the authoritative account of user-save vs. external-write discrimination.**
-[design.md §4f](design.md) states the product *property* and the VS Code API research; the
-*mechanism* lives here. §1–§7 are the diagnosis as it stood; **§8 is what shipped.**
+**This document is the diagnosis of record for user-save vs. external-write discrimination**;
+the verdict is ADR-0006 and the product *property* is stated in [design.md §4f](design.md).
+§1–§6 are the investigation as it stood; **§8 is what shipped, §9 the later hardening.**
 
 > **⚠️ Update (2026-07-12):** The reporter clarified the missed files were **not all open** in the
 > editor. The buffer-match heuristic below (§1–§4) only affects *open* files, so it is **not the
@@ -22,20 +23,11 @@ resolve. Grep for `consumeManualSave` / `handleDiskChange` instead.)*
 
 ## 1. Summary
 
-The extension decides whether a disk change is *"the human saved it here"* (absorb silently into
-the baseline, no review hunk) or *"an external tool wrote it"* (queue for review) using a
-**buffer-match heuristic**:
-
-```ts
-// fileWatcher.ts onDiskChange, ~L447
-const openDoc = vscode.workspace.textDocuments.find(
-  d => d.uri.scheme === 'file' && normalizePath(d.uri.fsPath) === filePath
-);
-if (openDoc && openDoc.getText() === diskContent) {
-  this.stateManager.snapshotFile(filePath, diskContent);   // treat as manual save → NO hunk
-  return;
-}
-```
+The extension decided whether a disk change is *"the human saved it here"* (absorb silently into
+the baseline, no review hunk) or *"an external tool wrote it"* (queue for review) with a
+**buffer-match heuristic**: find an open `file`-scheme document for the path, and if
+`openDoc.getText() === diskContent`, treat it as a manual save and snapshot it into the
+baseline with no hunk. *(Since deleted — see [ADR-0006](adr/0006-save-token-provenance.md).)*
 
 The heuristic is fooled by a VSCode behavior: **when an external process writes to a file you
 have open and *unmodified*, VSCode silently reloads the editor buffer to match disk.** By the time
@@ -94,45 +86,14 @@ diagnosis under-weighted.
 
 ## 4. Refinements the panel insists on (beyond the original diagnosis)
 
-### 4.1 The reverse race — gate on saved *content*, not just the event
+### 4.1–4.2 The token design — shipped, see [ADR-0006](adr/0006-save-token-provenance.md)
 
-A naive "was there a save for this path in the last ~1s?" check has a symmetric hole: if the
-watcher event is delivered *before* `onDidSaveTextDocument` fires, a genuine human save is
-misclassified as external → spurious review hunk. Worse (AI specialist): if a human saves at nearly
-the same moment Claude writes, a save event *did* fire but the disk bytes are Claude's — gating on
-the event alone would absorb Claude's edit.
-
-**Fix:** in the save handler, capture the exact text that was saved and store `path → savedText`.
-Absorb-as-baseline only if a save is recorded **and `diskContent === savedText`**. This is robust
-regardless of event ordering and regardless of buffer reloads. *(Pragmatic + AI + VSCode reviewers
-converge here.)*
-
-### 4.2 Timestamp window vs. edge-triggered token — prefer the token (QA)
-
-The QA specialist argues a wall-clock `~1s` window is CI-flaky and needs fake timers to test. The
-simpler, testable design is an **edge-triggered, consume-once token**:
-
-```ts
-// onDidSaveTextDocument(doc):
-this.pendingManualSaves.set(normalizePath(doc.uri.fsPath), doc.getText());
-
-// onDiskChange, replacing the getText()===diskContent block:
-const savedText = this.pendingManualSaves.get(filePath);
-if (savedText !== undefined) {
-  this.pendingManualSaves.delete(filePath);          // consume once
-  if (savedText === diskContent) {                    // it really was our save
-    this.stateManager.snapshotFile(filePath, diskContent);
-    return;
-  }
-}
-// otherwise → enterReviewing (external write)
-```
-
-No timers, no clock, unit-testable by seeding the map. **Edge case to cover:** a save whose watcher
-change never arrives (no-op/coalesced save) must not leave a stale token that later swallows a real
-external edit — scope the token to the next change or clear it on a document-change boundary rather
-than a wall-clock timer. *(If a timestamp window is kept instead, inject the clock — `now: () =>
-number` — so tests advance virtual time.)*
+Two refinements shaped the mechanism and are recorded with it in the ADR: gate on the saved
+**content**, not merely on the event (a bare "was there a save recently?" check is fooled in
+both directions — by a watcher event arriving before the save event, and by a human saving at
+nearly the same moment an agent writes), and prefer an **edge-triggered consume-once token**
+over a wall-clock window (no timers, no injected clock, unit-testable by seeding the map).
+Both shipped as `consumeManualSave`; §8 records the result and §9 the later hardening.
 
 ### 4.3 `onDiskCreate` has the identical bug — fix both paths
 
@@ -240,57 +201,25 @@ worst failure mode.
 
 ---
 
-## 6. Why the tests didn't catch it (QA specialist)
+## 6. Why the tests didn't catch it — and the seam that fixes that
 
-The suite passes for **exactly the wrong reason**: no test ever has an open `file`-scheme document
-in front of `onDiskChange` on a *not-yet-reviewing* file, so the buggy branch is never entered.
+The suite passed for **exactly the wrong reason**: no test ever put an open `file`-scheme document
+in front of `onDiskChange` on a *not-yet-reviewing* file, so the buggy branch was never entered.
+`filewatch.test.ts` writes via raw `fs` or `workspace.fs` and never opens a `TextDocument` into an
+editor, so its test named *"external file modification preserves original baseline"* — the exact
+scenario — passed **vacuously**. `diffEditor.test.ts` and friends open the doc only *after* the
+file is already `reviewing`, so the handler returns early before reaching the heuristic.
 
-- `filewatch.test.ts` writes via raw `fs` or `workspace.fs` — **never opens a TextDocument into an
-  editor**, so `openDoc` is `undefined`. The test named *"external file modification preserves
-  original baseline"* is the exact scenario but passes **vacuously**.
-- `diffEditor.test.ts` etc. open the doc only *after* the file is already `reviewing`, so
-  `onDiskChange` returns early at L438 and never reaches the heuristic.
+**The standing rule this produced:** never race the real watcher against the real reload — such a
+test passes or fails by luck. Drive `onDiskChange` **directly** through the `getFileWatcher()` seam
+in `helpers.ts`, injecting the save signal and the disk content. That is how
+[saveVsExternalEdit.test.ts](../src/test/integration/saveVsExternalEdit.test.ts) is written, and why
+it is deterministic on a headless host. The `src/test/__mocks__/vscode.ts` stub cannot model this;
+the integration tier plus the seam can.
 
-### Required test cases
-
-| # | Scenario | Expected after fix |
-|---|---|---|
-| A | External write to **open + clean** doc (the bug) | Enters `reviewing` with a hunk; baseline preserved |
-| B | External write to **open + dirty** doc | Enters `reviewing`; classification independent of buffer-vs-disk |
-| C | Genuine **manual save** | Absorbed into baseline, **no** hunk |
-| D | Genuine **auto-save** (`files.autoSave`) | Absorbed, no hunk — proves the save gate covers autosave |
-| E | External write to **closed** file (regression guard) | Enters `reviewing` — unchanged |
-| F | External write to an **already-reviewing** file (regression) | Recompute path still taken |
-
-**Determinism:** never race the real watcher against the real reload (passes/fails by luck). Add a
-**test seam** — call `onDiskChange` directly (via `getFileWatcher()` in `helpers.ts`), injecting the
-save-signal and the "open doc text" so a unit test can simulate "buffer already reloaded to match
-disk" and assert the fix ignores content entirely and keys only off the save event. Cases A, C, D,
-E are the priority: A proves the bug, C+D prove the legitimate save-absorption still works, E guards
-against over-correcting. The tiny `src/test/__mocks__/vscode.ts` stub cannot model this; use the
-integration tier (real vscode API) plus the injected seam for a fast unit test.
-
----
-
-## 7. Recommended implementation (synthesis)
-
-1. Add an `onDidSaveTextDocument` listener storing `path → savedText` (normalized path key).
-2. In **both** `onDiskChange` and `onDiskCreate`, replace `openDoc.getText() === diskContent` with:
-   consume the save token for the path; absorb into baseline **iff** a token exists **and**
-   normalized `diskContent === savedText`; otherwise `enterReviewing`.
-3. **Delete** the `openDoc`/`getText()` comparison entirely — it is the defect and must not remain
-   as a fallback. (`selfEditFiles` still handles the extension's own accept/reject writes.)
-4. Normalize EOL + final newline before comparison.
-5. Scope the save token so a save with no following disk-change can't later swallow an external edit.
-6. Add tests A–F with an injected seam; make them timer-free.
-7. Decide the dirty-buffer product behavior (§4.5) explicitly.
-8. Separately: rule out `files.watcherExclude`/gitignore for any closed-file reports (§5 Cause A),
-   and decide on the null-baseline silent snapshot (§5 Cause B).
-
-**Residual risk after the fix:** narrow — a save whose disk event is lost, and the rapid
-same-file-churn window — both far smaller than the bug being replaced, and both testable.
-
----
+*(§7, a synthesis of recommended implementation steps, was removed once every step shipped. The
+mechanism is [ADR-0006](adr/0006-save-token-provenance.md); what landed is §8, and the later
+hardening §9.)*
 
 ---
 
@@ -314,7 +243,7 @@ bug); external edit to a **closed** tracked file → reviewing; genuine **manual
 Cause B **characterization** test pinning current silent-absorb behavior with a "flip this assertion"
 note.
 
-**Not changed — Cause B decision pending.** The null-baseline silent snapshot (L467) is *intentional*
+**Not changed — Cause B, now [ADR-0008](adr/0008-null-baseline-silent-absorb.md).** The null-baseline silent snapshot is *intentional*
 (avoids false "new file" hunks during enable / ignore-rule-change races) but also silently drops a
 missed-create edit. Flipping it to `enterReviewing(null)` would recover those edits at the risk of
 spurious hunks during transient enable states. Left as-is, now **logged**, with a characterization
@@ -324,8 +253,9 @@ test — a deliberate decision to make explicitly rather than change unilaterall
 
 ## 9. Later hardening of the save-token path (2026-07-12 → 2026-08-09)
 
-The §7 recommendation's item 5 — *"scope the save token so a save with no following disk-change
-can't later swallow an external edit"* — was tightened after the initial fix:
+One recommendation from the original synthesis — *"scope the save token so a save with no
+following disk-change can't later swallow an external edit"* — was tightened after the initial
+fix:
 
 - **Stranded tokens are reclaimed by construction** (`b236a6f`). Tokens are tracked by object
   identity and dropped in a `finally` wrapper around the disk handlers, so a handler that

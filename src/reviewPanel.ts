@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { computeHunks, hunkId } from './diffEngine';
+import { applyInlineDiffSettings } from './diffSettings';
 import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
 import { log } from './log';
 
@@ -60,7 +61,13 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     private stateManager: StateManager,
     private fileWatcher: FileWatcher,
     private onStateChanged: () => void,
-    private onBaselineChanged?: (filePath: string) => void,
+    /**
+     * Invalidate VS Code's cached baseline document for a path. Called immediately
+     * before every `vscode.diff` — `StateManager.onDidChangeBaseline` already keeps
+     * the cache honest, so this is a cheap second guarantee at the one place where
+     * being wrong is visible to the user (see extension.ts's `fireBaselineChange`).
+     */
+    private refreshBaselineDoc?: (filePath: string) => void,
     private onAfterHunkAction?: () => Promise<void>
   ) {}
 
@@ -293,7 +300,6 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         if (msg.filePath && msg.hunkId) {
           acceptHunk(this.stateManager, msg.filePath, msg.hunkId, () => {
             this.onStateChanged();
-            this.onBaselineChanged?.(msg.filePath!);
             void this.onAfterHunkAction?.().catch(err => log(`onAfterHunkAction: ${err}`));
           }, 'panel');
         }
@@ -333,25 +339,13 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Force the review diff to render as a single-column inline (unified) view —
-   * removed baseline lines in red directly above the added lines in green — rather
-   * than the default side-by-side panes. `vscode.diff` exposes no per-call override,
-   * so the only levers are global `diffEditor.*` settings; we nudge them (idempotent
-   * — only writes when they differ) whenever we open a review diff:
-   *   - `renderSideBySide` → false: single-column unified view.
-   *   - `codeLens` → true: the diff editor hides CodeLenses by default, which would
-   *     swallow our per-hunk Accept/Discard actions; opt back in.
-   * These are deliberately global: they also affect git and other diffs while the
-   * extension is in use.
+   * Force this diff to render single-column inline with CodeLenses visible — removed
+   * baseline lines in red above the added lines in green, per-hunk Accept/Discard on
+   * each. The only levers are global `diffEditor.*` settings, borrowed for the session
+   * and given back when it ends; `diffSettings.ts` owns the how and the why.
    */
   private async ensureInlineDiff(): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('diffEditor');
-    if (cfg.get<boolean>('renderSideBySide') !== false) {
-      await cfg.update('renderSideBySide', false, vscode.ConfigurationTarget.Global);
-    }
-    if (cfg.get<boolean>('codeLens') !== true) {
-      await cfg.update('codeLens', true, vscode.ConfigurationTarget.Global);
-    }
+    await applyInlineDiffSettings(this.context.globalState);
   }
 
   /**
@@ -366,6 +360,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     // Empty modified side keyed to the real fsPath (see the content provider in
     // extension.ts) so the file-level Accept/Restore lenses render on this side.
     const emptyUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-deleted' });
+    this.refreshBaselineDoc?.(filePath);
     await this.ensureInlineDiff();
     await vscode.commands.executeCommand('vscode.diff', baselineUri, emptyUri, `${fileName} (deleted)`);
   }
@@ -391,6 +386,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
     const currentUri = vscode.Uri.file(filePath);
 
+    this.refreshBaselineDoc?.(filePath);
     await this.ensureInlineDiff();
     await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, `${fileName} (interactive-review)`);
 

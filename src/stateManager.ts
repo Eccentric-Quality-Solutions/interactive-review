@@ -6,6 +6,7 @@ import { BaselineGit, BaselineUnreadableError, Settings } from './baselineGit';
 import { hasReportableDiff } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
+import { isBinaryFile, readTextFile } from './textFile';
 
 const DEFAULT_IGNORE_PATTERNS = process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'];
 
@@ -32,13 +33,59 @@ export class StateManager {
   private _sawReviewingFiles: boolean = false;
   private _git: BaselineGit | undefined;
 
+  /**
+   * Paths this session *witnessed being created* — the evidence behind
+   * `nullReason: 'created'`, and therefore behind Discard's licence to delete a file.
+   *
+   * It exists because `rebuildState` (Refresh) throws the in-memory classification away
+   * and re-derives it from the end state, which cannot distinguish "an agent created this
+   * file" from "we never managed to baseline it". Without a memory of the witnessed
+   * creates, a single Refresh would silently downgrade every genuinely-new file to
+   * unbaselined and Discard would stop deleting agent output — the functionality this
+   * whole mechanism is meant to protect, lost from the other direction.
+   *
+   * Session-scoped and monotonic: entries are added by `writeState` and cleared only when
+   * a session starts or ends, never by `dropState` — `clearState` fires `dropState` for
+   * every path, so shrinking it there would wipe the set on the very rebuild it exists to
+   * survive. A path that leaves review and is later recreated is simply re-witnessed.
+   */
+  private sessionCreated = new Set<string>();
+
   // Serial queue: git ops run one at a time; flush() awaits the tail
   private gitQueue: Promise<void> = Promise.resolve();
+  /** Overlapping-safe depth counter behind `ignoreSyncActive`. */
+  private ignoreSyncDepth: number = 0;
 
   // Optional callback invoked when a git failure causes an in-memory rollback
   // (e.g. exitReviewing snapshot fails and reviewing state is restored).
   // Set by the extension to trigger UI refresh after unexpected state restoration.
   onRollback: (() => void) | undefined;
+
+  /**
+   * Fires the path whose baseline changed — including the path *acquiring* one
+   * (enter reviewing) and *losing* one (exit / remove / clear).
+   *
+   * The diff editor's original side is a virtual document served from this map by
+   * `extension.ts`'s content provider, and VS Code caches that document until told
+   * otherwise. So the baseline has two representations — this map and VS Code's
+   * cache — and only this event keeps them equal.
+   *
+   * It exists because the notification used to hang off the *accept* commands
+   * instead, which got the ordering exactly backwards on the path that matters:
+   * a final accept runs `exitReviewing` (entry deleted) and only *then* notified,
+   * so the provider re-ran against an absent entry and cached `''`. Re-entering
+   * reviewing after the next edit wrote a fresh baseline into the map and notified
+   * nobody, so the next `vscode.diff` was served the empty cache and painted the
+   * whole file as changed — while `computeHunks`, reading this map directly,
+   * reported the one real hunk. Rejecting to completion did the same thing and
+   * never notified at all.
+   *
+   * Hence: fired from the mutation, not from the caller. `writeState`/`dropState`/
+   * `clearState` below are the only writers to `this.state` for that reason — a
+   * bare `this.state.set` anywhere else silently reintroduces the bug.
+   */
+  private readonly baselineChanged = new vscode.EventEmitter<string>();
+  readonly onDidChangeBaseline = this.baselineChanged.event;
 
   constructor() {
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -51,6 +98,19 @@ export class StateManager {
   // ── accessors ─────────────────────────────────────────────────────────────
 
   get enabled(): boolean { return this._enabled; }
+
+  /**
+   * Is a `syncIgnoreState` pass in flight?
+   *
+   * Read by `FileWatcher.handleDiskChange` to tell its two no-baseline cases apart: while
+   * a sync runs, a newly un-ignored file legitimately has no baseline yet and must be
+   * absorbed; outside one, a missing baseline means an edit we would otherwise drop
+   * (ADR-0012). A counter rather than a boolean because the sync is fired from several
+   * independent triggers (`enableReview`, the settings watcher, the `.gitignore` watcher)
+   * and two passes can overlap — a boolean would let the first to finish reopen the gap
+   * while the second is still adding baselines.
+   */
+  get ignoreSyncActive(): boolean { return this.ignoreSyncDepth > 0; }
 
   /** Number of files currently in reviewing state. */
   get reviewingCount(): number {
@@ -122,18 +182,27 @@ export class StateManager {
   }
 
   /**
-   * Read a set of files into a snapshot batch. Files that fail to read are
-   * silently dropped — this is deliberate and load-bearing: binary files and
-   * unreadable files (permissions, transient races) must not abort the batch,
-   * and their UTF-8 content would be meaningless as a baseline anyway.
+   * Read a set of files into a snapshot batch. Binary and unreadable files are dropped:
+   * neither must abort the batch, and neither has content that means anything as a
+   * baseline.
+   *
+   * The binary case needs an explicit test rather than the failed read this comment used
+   * to claim. `fs.readFile(path, 'utf-8')` does not throw on binary input — it returns
+   * replacement characters — so the old form baselined binaries as mush that a later
+   * discard would write back over the real file. See `textFile.ts`.
    */
   private async readBatch(filePaths: string[]): Promise<{ filePath: string; content: string }[]> {
     const batch: { filePath: string; content: string }[] = [];
     await Promise.all(filePaths.map(async filePath => {
       try {
-        batch.push({ filePath, content: await fs.promises.readFile(filePath, 'utf-8') });
+        const content = await readTextFile(filePath);
+        if (content === null) {
+          log(`readBatch: skipping binary file ${path.basename(filePath)}`);
+          return;
+        }
+        batch.push({ filePath, content });
       } catch {
-        // Skip binary/unreadable files — see method doc.
+        // Unreadable (permissions, transient race) — see method doc.
       }
     }));
     return batch;
@@ -155,10 +224,19 @@ export class StateManager {
         // Skip unreadable files (e.g. permission errors) to avoid downstream
         // failures when reading content as UTF-8.
         await fs.promises.access(full, fs.constants.R_OK);
-        untracked.push(full);
       } catch {
-        // unreadable — omit
+        return; // unreadable — omit
       }
+      // A binary nobody watched appear is a pre-existing asset, not a new file.
+      //
+      // "Untracked" here means only "the baseline repo has no blob for it", and
+      // `readBatch` deliberately declines to make one for a binary — so without this,
+      // every asset in the workspace reads as an externally created new file on the next
+      // load/rebuild, floods the queue, and (before `nullReason`) was deletable by
+      // Discard. A binary the watcher *did* see created is a genuinely new file and
+      // belongs in the queue, which is what the witness check preserves across a Refresh.
+      if (!this.sessionCreated.has(full) && await isBinaryFile(full)) return;
+      untracked.push(full);
     }));
     return untracked;
   }
@@ -216,7 +294,7 @@ export class StateManager {
         // other errors (e.g. permissions) → diskContent stays undefined, treat as idle
       }
       if (fileDeleted || (diskContent !== undefined && hasReportableDiff(baseline, diskContent))) {
-        this.state.set(filePath, { status: 'reviewing', baseline });
+        this.writeState(filePath, { status: 'reviewing', baseline });
         reviewing.push(filePath);
       } else {
         idle.push(filePath);
@@ -227,10 +305,14 @@ export class StateManager {
 
   /**
    * Enter every on-disk file that git isn't tracking into `reviewing` with a null
-   * baseline — i.e. treat it as externally created and new. The untracked half of the
-   * shared load/rebuild scan (`scanTrackedIntoState` is the tracked half); kept here so
-   * the two entry points can't drift on what counts as a new file. Returns the adopted
-   * paths so `load()` can log them.
+   * baseline. The untracked half of the shared load/rebuild scan (`scanTrackedIntoState`
+   * is the tracked half); kept here so the two entry points can't drift on what counts as
+   * an unbaselined file. Returns the adopted paths so `load()` can log them.
+   *
+   * Note what this does *not* claim: that the files are new. It cannot — a scan of the
+   * end state cannot distinguish a file an agent just created from one whose baseline we
+   * failed to take — so every entry here is `nullReason: 'unbaselined'` and is therefore
+   * safe from Discard's delete branch. See `FileState.nullReason`.
    */
   private async adoptUntrackedFiles(
     tracked: string[],
@@ -238,7 +320,18 @@ export class StateManager {
   ): Promise<string[]> {
     const untracked = await this.collectUntrackedFiles(new Set(tracked), shouldIgnore);
     for (const filePath of untracked) {
-      this.state.set(filePath, { status: 'reviewing', baseline: null });
+      // A rescan sees only the *result* — on disk, no blob — which a genuinely new file
+      // and one we failed to baseline produce identically. The discrimination therefore
+      // happens in `collectUntrackedFiles` above, not here.
+      //
+      // 'created' is the right answer here despite being the deleting one, because of
+      // what has already been filtered out above: unreadable files are dropped by the
+      // `access` check and unwitnessed binaries by the sniff, and those two *are* the
+      // pre-existing-but-unbaselined population. What is left — readable text with no
+      // blob — is overwhelmingly a real new file, including every new file from a prior
+      // session after a window reload, where the witness set is necessarily empty. Those
+      // must stay deletable or the queue becomes un-actionable.
+      this.writeState(filePath, { status: 'reviewing', baseline: null, nullReason: 'created' });
     }
     return untracked;
   }
@@ -267,7 +360,7 @@ export class StateManager {
     shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
   ): Promise<void> {
     log(`load: ${reason} — prior baselines are unrecoverable, resetting to a fresh snapshot`);
-    this.state.clear();
+    this.clearState();
     let rebuilt = false;
     try {
       await g.resetRepo();
@@ -390,7 +483,7 @@ export class StateManager {
       log(`rebuildState: aborting, in-memory state left untouched — ${err.message}`);
       return;
     }
-    this.state.clear();
+    this.clearState();
     await this.scanTrackedIntoState(g, tracked, shouldIgnore);
 
     // Detect files on disk not tracked in git — these are externally created new files
@@ -438,6 +531,43 @@ export class StateManager {
     return this.state.get(normalizePath(filePath));
   }
 
+  // ── the only writers to `this.state` ──────────────────────────────────────
+  //
+  // Every mutation goes through these three so `onDidChangeBaseline` cannot be
+  // forgotten. They take an already-normalized path: normalization is the public
+  // methods' job, and doing it twice would hide a caller that skipped it.
+
+  /** Set an entry, firing only if the baseline value actually moved. */
+  private writeState(filePath: string, state: FileState): void {
+    const prior = this.state.get(filePath);
+    this.state.set(filePath, state);
+    if (state.baseline === null && state.nullReason === 'created') this.sessionCreated.add(filePath);
+    // A status-only change (reviewing → reviewing with the same baseline) leaves the
+    // virtual document correct, so it is not worth a re-fetch. `!prior` counts as a
+    // move because an absent entry renders as `''`.
+    if (!prior || prior.baseline !== state.baseline) this.baselineChanged.fire(filePath);
+  }
+
+  /** Delete an entry, firing only if one was actually there. */
+  private dropState(filePath: string): void {
+    if (this.state.delete(filePath)) this.baselineChanged.fire(filePath);
+  }
+
+  /**
+   * Drop every entry, firing per path. Keys are snapshotted before the clear so the
+   * listeners (which read `getFile`) observe the post-clear map, not a half-cleared one.
+   */
+  private clearState(): void {
+    const paths = [...this.state.keys()];
+    this.state.clear();
+    for (const fp of paths) this.baselineChanged.fire(fp);
+  }
+
+  /** Releases the baseline-change emitter. Call from `deactivate`. */
+  dispose(): void {
+    this.baselineChanged.dispose();
+  }
+
   /**
    * Canonical "is this a deleted file" test — the single source of truth shared by
    * the panel list, the diff-open routing, and the deleted-file CodeLenses so they
@@ -479,7 +609,7 @@ export class StateManager {
     filePath = normalizePath(filePath);
     // Clone old state so callers mutating the FileState object don't corrupt the rollback snapshot
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
-    this.state.set(filePath, state);
+    this.writeState(filePath, state);
     // Latch review activity at the mutation point so reviewComplete works regardless
     // of whether the caller routes through the extension's onStateChanged funnel.
     if (state.status === 'reviewing') this._sawReviewingFiles = true;
@@ -490,7 +620,7 @@ export class StateManager {
         log(`git queue error (setFile rollback): ${err}`);
         // Only rollback if this exact state object is still current (no newer operation has updated it)
         if (this.state.get(filePath) === state) {
-          if (oldState) { this.state.set(filePath, oldState); } else { this.state.delete(filePath); }
+          if (oldState) { this.writeState(filePath, oldState); } else { this.dropState(filePath); }
           this.onRollback?.();
         }
       });
@@ -501,7 +631,7 @@ export class StateManager {
     filePath = normalizePath(filePath);
     // Clone old state so the rollback has an independent snapshot
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
-    this.state.delete(filePath);
+    this.dropState(filePath);
     // Skip git removal only when we know the file had a null baseline (never stored in git).
     // If oldState is undefined (idle file, not in map) or has a real baseline, queue the removal.
     if (this._git && !(oldState !== undefined && oldState.baseline === null)) {
@@ -510,7 +640,7 @@ export class StateManager {
         log(`git queue error (removeFile rollback): ${err}`);
         // Only rollback if no newer operation has re-added the entry
         if (!this.state.has(filePath) && oldState) {
-          this.state.set(filePath, { ...oldState });
+          this.writeState(filePath, { ...oldState });
           this.onRollback?.();
         }
       });
@@ -528,15 +658,18 @@ export class StateManager {
     const fileState = this.state.get(oldFilePath);
     if (fileState) {
       // Exact match — single file rename
-      this.state.delete(oldFilePath);
-      this.state.set(newFilePath, fileState);
+      this.dropState(oldFilePath);
+      this.writeState(newFilePath, fileState);
+      // The create was witnessed at the old path; a rename does not make the file any
+      // less new, and losing the witness here would strand it as undeletable.
+      if (this.sessionCreated.delete(oldFilePath)) this.sessionCreated.add(newFilePath);
     }
     // Also check for directory children (entries whose path starts with oldFilePath + sep)
     for (const [fp, childState] of [...this.state.entries()]) {
       if (fp.startsWith(oldPrefix)) {
-        this.state.delete(fp);
+        this.dropState(fp);
         const newFp = newFilePath + fp.slice(oldFilePath.length);
-        this.state.set(newFp, childState);
+        this.writeState(newFp, childState);
         hasDirChildren = true;
       }
     }
@@ -582,7 +715,7 @@ export class StateManager {
   exitReviewing(filePath: string, newBaseline?: string | null): void {
     filePath = normalizePath(filePath);
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
-    this.state.delete(filePath);
+    this.dropState(filePath);
     if (newBaseline !== undefined && newBaseline !== null) {
       if (this._git) {
         const g = this._git;
@@ -591,7 +724,7 @@ export class StateManager {
           log(`git queue error (exitReviewing rollback): ${err}`);
           // Restore reviewing state so the user can retry rather than silently getting a stale baseline
           if (!this.state.has(filePath) && oldState) {
-            this.state.set(filePath, { ...oldState });
+            this.writeState(filePath, { ...oldState });
             this.onRollback?.();
             void vscode.window.showErrorMessage(
               `Failed to update review baseline for ${path.basename(filePath)}. The file has been kept in reviewing so you can retry.`
@@ -621,7 +754,8 @@ export class StateManager {
       // settings instead of resetting to disk/defaults.
       this.applySettings(g.mergeDefaultSettings(g.loadSettings()));
     } else {
-      this.state.clear();
+      this.clearState();
+      this.sessionCreated.clear();
       this._git?.destroyGit();
       this._git = undefined;
     }
@@ -714,6 +848,19 @@ export class StateManager {
    * Called after ignorePatterns / respectGitignore / .gitignore changes.
    */
   async syncIgnoreState(shouldIgnore: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
+    // The flag must cover the whole pass including its awaits, and every exit from it —
+    // the early returns and the `BaselineUnreadableError` abort as much as the success
+    // path. A `finally` around a delegating call is the only form that cannot be defeated
+    // by adding another `return` to the body later.
+    this.ignoreSyncDepth++;
+    try {
+      await this.syncIgnoreStateInner(shouldIgnore);
+    } finally {
+      this.ignoreSyncDepth--;
+    }
+  }
+
+  private async syncIgnoreStateInner(shouldIgnore: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
@@ -746,14 +893,14 @@ export class StateManager {
     const removeSet = new Set(toRemove);
     for (const fp of Array.from(this.state.keys())) {
       if (shouldIgnore(fp) && !removeSet.has(fp)) {
-        this.state.delete(fp);
+        this.dropState(fp);
       }
     }
     if (toRemove.length > 0) {
       log(`syncIgnoreState: removing ${toRemove.length} file(s): ${logFileList(toRemove, this.workspaceRoot)}`);
     }
     for (const fp of toRemove) {
-      this.state.delete(fp);
+      this.dropState(fp);
     }
     if (toRemove.length > 0) {
       this.gitQueue = this.gitQueue.then(() => g.removeFileBatch(toRemove)).catch(err => { log(`git queue error: ${err}`); });
@@ -818,7 +965,8 @@ export class StateManager {
     }
 
     // Clear all in-memory state — fresh start
-    this.state.clear();
+    this.clearState();
+    this.sessionCreated.clear();
 
     // Snapshot all disk files as new baselines
     const diskSet = new Set(diskFiles);
@@ -845,7 +993,8 @@ export class StateManager {
     this._enabled = false;
     this._sawReviewingFiles = false;
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
-    this.state.clear();
+    this.clearState();
+    this.sessionCreated.clear();
     this._git = undefined;
     this.gitQueue = Promise.resolve();
   }

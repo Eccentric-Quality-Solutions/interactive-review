@@ -8,6 +8,9 @@ import {
   writeFileExternally, cleanWorkspace, getStateManager, openWithSelection,
 } from './helpers';
 
+/** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
+const BOM = '\uFEFF';
+
 // ── Test suite ────────────────────────────────────────────────────────────────
 //
 // Keyboard-driven review commands resolve their target from the active editor and
@@ -64,6 +67,29 @@ suite('interactive-review keyboard commands', function () {
     assert.strictEqual(fs.readFileSync(f, 'utf-8'), 'l1\nl2\n',
       'rejecting reverts the file to the baseline');
     assert.notStrictEqual(getStateManager().getFile(f)?.status, 'reviewing', 'file resolved');
+  });
+
+  test('rejecting the first line of a BOM file does not double the BOM', async () => {
+    // The baseline keeps its BOM (it is what a restore writes back), but the replacement
+    // text goes into the *document*, and VS Code re-adds the file's own BOM on save. If
+    // the baseline's marker travelled with the line, the file would land on disk with two.
+    const root = getWorkspaceRoot();
+    const f = path.join(root, 'bom-reject.txt');
+    fs.writeFileSync(f, BOM + 'l1\nl2\n', 'utf-8');
+    await enableReview();
+    await waitForCondition(() => gitGetBaseline(root, 'bom-reject.txt') !== undefined);
+
+    fs.writeFileSync(f, BOM + 'CHANGED\nl2\n', 'utf-8');
+    await waitForReviewing(f);
+
+    await openWithSelection(f, 0);
+    await vscode.commands.executeCommand('interactiveReview.rejectHunk');
+    await sleep(300);
+
+    const after = fs.readFileSync(f, 'utf-8');
+    assert.strictEqual(after.indexOf(BOM), 0, 'the file keeps its BOM');
+    assert.strictEqual(after.indexOf(BOM, 1), -1, 'and gains no second one');
+    assert.strictEqual(after, BOM + 'l1\nl2\n', 'content reverts to the baseline');
   });
 
   test('nextHunk past a file’s last hunk opens the next reviewing file', async () => {

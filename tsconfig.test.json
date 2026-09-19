@@ -24,6 +24,8 @@
   "include": [
     "src/test/**/*.ts",
     "src/diffEngine.ts",
+    "src/diffSettings.ts",
+    "src/log.ts",
     "src/baselineGit.ts",
     "src/gitignoreManager.ts",
     "src/pathNormalize.ts"

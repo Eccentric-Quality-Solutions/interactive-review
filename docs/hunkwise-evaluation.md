@@ -165,7 +165,7 @@ hunkwise is the **right base to prototype against**, not a drop-in solution. Con
 3. Keep hunkwise's **baseline-diffing** engine and edge-case handling; that's the value we're
    not reinventing.
 
-## 8. Decision (2026-07-04): stable API only
+## 8. Decision (2026-07-04): stable API only ([ADR-0001](adr/0001-stable-apis-only.md), [ADR-0002](adr/0002-fork-hunkwise.md))
 
 **We are committing to the stable-API path — no `editorInsets`.** The floating in-editor
 button bar is polish we are choosing to forgo (at least initially) in exchange for a
@@ -177,7 +177,8 @@ and Cline/Continue ship.
 `editorInsets` is explicitly **deferred to a possible future "enhanced inline mode,"** not a
 dependency. The design and phased plan for the stable build live in [design.md](design.md).
 Open decision that gates scaffolding: **fork hunkwise vs. build fresh** (both stable-only).
-**→ Resolved the same day: fork** ([design.md §4a](design.md), [§5 #1](design.md)).
+**→ Resolved the same day: fork** ([ADR-0002](adr/0002-fork-hunkwise.md), narrative in
+[design.md §4a](design.md)).
 
 ## Sources
 

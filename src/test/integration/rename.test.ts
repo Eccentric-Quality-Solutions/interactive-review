@@ -4,7 +4,7 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, enableReview, disableReview,
+  sleep, waitForCondition, waitForReviewing, enableReview, disableReview,
   writeFileExternally, renameFileViaVSCode, deleteFileViaVSCode, cleanWorkspace,
   getStateManager,
 } from './helpers';
@@ -33,10 +33,11 @@ suite('interactive-review rename integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForCondition(() => {
-      const f = sm.getFile(oldPath);
-      return f?.status === 'reviewing';
-    }, 8000);
+    // Rescan-nudged: this is the *precondition*, not the subject. The subject is what a
+    // rename does to an already-reviewing file, and a plain wait here makes the test fail
+    // whenever the host's create event is merely late — which under full-suite load it
+    // regularly is. `waitForReviewing` reaches the same state deterministically.
+    await waitForReviewing(oldPath);
 
     // Rename via VSCode API
     const newPath = path.join(root, 'new-file-renamed.txt');

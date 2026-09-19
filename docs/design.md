@@ -5,9 +5,11 @@ extension using **stable APIs only** (decision recorded in
 [hunkwise-evaluation.md §8](hunkwise-evaluation.md)). `editorInsets` is deferred to a possible
 future enhanced mode. This doc is the architecture + phased plan.*
 
-> **Where things live.** This file is the architecture and the *dated record of decisions*
-> — sections marked with a date are history, kept so the reasoning isn't rediscovered, not
-> a description of today's code. For current state:
+> **Where things live.** This file is the architecture and the *dated narrative* of how the
+> build went — sections marked with a date are history, kept so the reasoning isn't
+> rediscovered, not a description of today's code. For current state:
+> - **Settled decisions** → [`adr/`](adr/README.md) (one file per verdict; the authoritative
+>   record). This file keeps the investigation around each one.
 > - **Open, unfixed work** → [`../todo.md`](../todo.md) (the single prioritized backlog).
 > - **Why one edit becomes six Accept buttons / whole-file paint** →
 >   [review-ui-legibility.md](review-ui-legibility.md).
@@ -95,8 +97,7 @@ status:  open ──(all hunks dispositioned)──▶ complete ──(user clos
   and remains the review surface.
 - **Rebranded** `package.json` → `eccentricqualitysolutions.vsc-interactive-review` / "Interactive Review",
   v0.0.1. Scoped `tsconfig` to `src/**` (was globbing the reference clone).
-- **Verifies:** `npm run compile` clean; `72/73` unit tests pass *(count as of this date; see
-  §4g for the current suite)*.
+- **Verifies:** `npm run compile` clean; unit suite green but for one pre-existing failure.
 
 **Known issue at the time (pre-existing, not ours) — RESOLVED.** 1 unit test failed —
 `HunkwiseGit › NFD paths … found as NFC` — a Unicode-normalization test that assumed macOS
@@ -107,17 +108,10 @@ unit suite is green — no known-failing unit tests remain.
 
 **Follow-ups before real feature work:**
 - **Publisher id** — set to `eccentricqualitysolutions` (2026-07-05).
-- **Rename internal ids** — DONE (2026-07-05). Two passes:
-  (1) *contract ids:* `hunkwise.*` commands → `interactiveReview.*`; views
-  `hunkwisePanel`/`hunkwiseToolbar` → `interactiveReview*`; scheme `hunkwise-baseline` →
-  `interactive-review-baseline`; state dir `.vscode/hunkwise/` → `.vscode/interactive-review/`
-  (+ `.gitignore` entry/marker); webview text.
-  (2) *internal identifiers* (per user, no hunkwise left in code): `HunkwiseGit`→`BaselineGit`
-  (`hunkwiseGit.ts`→`baselineGit.ts`), `hunkwiseDir`→`stateDir`, `HUNKWISE_ENTRY`→`IGNORE_ENTRY`,
-  `hunkwiseGitEnv`→`baselineGitEnv`, `enable/disableHunkwise`→`enable/disableReview`,
-  `__hunkwiseTestRoot`→`__reviewTestRoot`, `isActiveHunkwiseDiffTab`→`isActiveReviewDiffTab`,
-  test temp-dir prefixes, labels & comments. Only `molon/hunkwise` (attribution) kept.
-  Verified: compile clean; unit 72/73; integration review-loop suites 100% pass.
+- **Rename internal ids** — DONE (2026-07-05). Two passes: *contract ids* (commands, views, the
+  baseline URI scheme, the `.vscode/` state dir and its `.gitignore` entry, webview text) and
+  *internal identifiers* (no `hunkwise` left anywhere in code — only the `molon/hunkwise`
+  attribution). The identifier-by-identifier mapping is in the commit; it is not restated here.
 - **Attribution** — DONE (2026-07-05). `LICENSE` now carries both molon's (original) and
   Eccentric Quality Solutions' (modifications) MIT copyright; added `README.md` with a prominent
   Credits section stating this is a fork of molon/hunkwise and what changed.
@@ -133,13 +127,12 @@ no new code needed. Verification exercised the real extension in headless VS Cod
   integration tests pass: `diff editor` suite (CodeLens visibility, accept-by-file-scheme,
   last-hunk-closes-tab), hunk navigation (accept/discard jumps to next hunk; last hunk exits
   reviewing), and baseline-update edge cases (empty file, new file null→content, restore).
-- **Unit:** 72/73 (the 1 fail = the Unicode NFC/NFD test, since fixed — see §4a).
-- **Integration:** 50 passing / 1 pending / **17 failing** — see known-issue below.
+- **Unit:** green but for the Unicode NFC/NFD test, since fixed — see §4a.
+- **Integration:** a substantial block of failures — see known-issue below.
 
-**Known issue — 17 integration failures in the continuous-monitor layer (pre-existing, not a
-fork regression):** all 17 are in `fileWatcher` / `gitignoreManager` / branch-switch tests
-(ignore ×11, startup ×2, rename ×2, filewatch ×1, branchSwitch ×1) — code the Phase 0 fork
-never touched. Two causes: (a) Linux `fs.watch` timing/coalescing differs from the macOS fs
+**Known issue — integration failures in the continuous-monitor layer (pre-existing, not a
+fork regression):** all of them in `fileWatcher` / `gitignoreManager` / branch-switch tests —
+code the Phase 0 fork never touched. Two causes: (a) Linux `fs.watch` timing/coalescing differs from the macOS fs
 hunkwise was built on → 10 of 17 are `Condition not met within timeout`; (b) the persistent
 on-disk integration workspace (`src/test/integration/workspace/`, plus accumulated
 `.vscode-test/user-data/`) leaks state across runs → order-dependent assertion failures (e.g.
@@ -150,8 +143,8 @@ and make `waitForCondition` robust to Linux watch latency.
 
 ## 4c. Triage of the integration failures (2026-07-05): DONE
 
-Reproduced (`npm run test:integration`): **54 passing / 1 pending / 13 failing** (not 17 — the
-count is unstable, which is itself a finding). Diagnostic method: run each suite *in isolation*
+Reproduced (`npm run test:integration`). **The failure count moved between runs — which is
+itself the finding.** Diagnostic method: run each suite *in isolation*
 (`vscode-test --grep <suite>`) and compare failure counts to the full run.
 
 | Suite | Fail in full run | Fail in isolation | Reading |
@@ -190,8 +183,8 @@ a production polling fallback on Linux or is acceptable as a test-only concessio
 
 ### 4c.1 Resolution (2026-07-05): DONE — deterministic green
 
-Integration suite now **67 passing / 1 pending / 0 failing**, confirmed across two consecutive
-runs (the 1 pending is a pre-existing self-skip: the `.git/HEAD` branch-switch watcher test
+Integration suite **deterministically green**, confirmed across two consecutive
+runs (with one pre-existing self-skip: the `.git/HEAD` branch-switch watcher test
 skips when the test workspace has no `.git/HEAD` at activation). Fixes applied:
 
 - **#3 state leak (product) — [stateManager.ts](../src/stateManager.ts) `setEnabled`.** Enable now
@@ -226,8 +219,7 @@ skips when the test workspace has no `.git/HEAD` at activation). Fixes applied:
 > | new file → `reviewing`, **no** refresh nudge | **30/30** | 201ms | 203ms |
 >
 > Zero drops, ~130ms latency — against a 15s wait floor. The full integration suite is also
-> green on that VM at stock limits (112 passing / 3 pending / 0 failing; 2 of the pending are
-> the probe itself, which self-skips).
+> green on that VM at stock limits (the probe itself self-skips unless `WATCHER_PROBE=1`).
 >
 > **Both halves of the finding are wrong.** The platform claim is wrong: `createFileSystemWatcher`
 > delivers external create/delete reliably and fast. The proposed *mechanism* is also wrong —
@@ -253,20 +245,13 @@ skips when the test workspace has no `.git/HEAD` at activation). Fixes applied:
 > unidentified flake is a bad reason to delete safety margin. The conclusion the finding was
 > cited for — *no production polling fallback* — is **unchanged and now better supported**,
 > since the watcher works.
->
-> The original text follows, retained as the record of what was believed.
 
-**Empirical finding that settles §5-adjacent open question:** VS Code's `createFileSystemWatcher`
-does **not** reliably deliver *external raw-fs create/delete* events in the headless Linux test
-host (events dropped/badly delayed; a rotating ~2 tests/run failed even at a 15s floor). The
-**synchronous** snapshot/rescan path (`snapshotWorkspace`, `rebuildState`) is fully reliable.
-Likely a harness artifact (test writes from *inside* the extension-host process; real editors
-write cross-process, which VS Code's production Parcel watcher handles) — so **no production
-polling fallback was built** (would be speculative). If Phase 2 commits to the always-on
-reactive monitor as a first-class v1 surface, revisit whether Linux needs a `fs.watch`-recursive
-fallback in `FileWatcher`. If the trigger model is snapshot-on-command (§5 #2), the reactive
-watcher is off the critical path and this is moot. **Settled the same day: §5 #2 chose
-snapshot-on-command, so no production polling fallback was ever built.**
+**What the retracted finding claimed**, for anyone who meets a citation of it: that
+`createFileSystemWatcher` does not reliably deliver external raw-fs create/delete events on
+headless Linux, and that the cause was tests writing from *inside* the extension-host process.
+Both halves are wrong. The conclusion it was cited for — **no production polling fallback** —
+stands independently: snapshot-on-command ([ADR-0004](adr/0004-snapshot-on-command-trigger.md))
+keeps the reactive watcher off the critical path.
 
 ## 4d. Phase 2/3 — status (2026-07-05): the flow's closure DONE
 
@@ -289,10 +274,10 @@ typed model — snapshot-on-command already bounds the reviewing set, so complet
 boolean, not a model. No persistent per-hunk disposition (`pending|accepted|rejected`)
 — resolution stays destructive (accept folds baseline, reject reverts); retained
 disposition would be reimplementing the resolution engine for features (summary stats,
-un-accept) the MVP doesn't have. Revisit only if a concrete feature demands it. Suite:
-**75 passing / 1 pending / 0 failing**.
+un-accept) the MVP doesn't have. Revisit only if a concrete feature demands it.
+Decision of record: [ADR-0005](adr/0005-no-retained-hunk-disposition.md).
 
-## 4e. Primary surface — RESOLVED (2026-07-05): inline diff editor by default
+## 4e. Primary surface — inline diff editor by default ([ADR-0003](adr/0003-inline-diff-editor-sole-surface.md))
 
 Settled by **dogfooding on this repo** (multi-file agent edits, reviewed live). The native
 diff editor, **forced to inline/unified rendering**, is the review surface.
@@ -322,10 +307,17 @@ added (green) natively, with no proposed APIs.
 
 **Implementation + tradeoff.** `ReviewPanel.ensureInlineDiff()` nudges the *global* settings
 `diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` before each
-`vscode.diff` — VS Code exposes **no per-diff override** for either. Consequence: while enabled
-on this surface, the user's *other* (git, manual) diffs also render inline with CodeLens. This
+`vscode.diff` — VS Code exposes **no per-diff override** for either. Consequence: while a review
+session is open, the user's *other* (git, manual) diffs also render inline with CodeLens. This
 is documented as a heads-up in [README](../README.md); accept it as the cost of "always inline"
-on stable APIs.
+on stable APIs. Because these are the user's own `settings.json` entries, the write is
+**borrowed**: [`diffSettings.ts`](../src/diffSettings.ts) ledgers the prior `globalValue` of
+each key it overwrites and restores it when the session ends — `endReview`, an externally
+deleted state dir, `deactivate()` with no session open, or an `activate()` retry after a failed
+restore (session-scoped, not process-scoped, so a window reload doesn't churn settings.json). A
+key with no prior global value is restored by *removing* it, not by pinning the default. Every
+decision reads `inspect().globalValue`, never the effective `get()`, and the ledger re-records
+on every nudge; both rules are load-bearing and the module header says why.
 
 **Bug this surface flip surfaced (same-`fsPath` scheme collision).** With the diff editor as
 default, *every* reviewed file spawns a baseline document at `fileUri.with({ scheme:
@@ -349,11 +341,11 @@ surface-default assertion tests updated. Suite green.
 > (`openDoc.getText() === diskContent`) was **deleted** on 2026-07-12 after the reload race
 > it predicted was observed biting in the field. The current discriminator is an
 > `onDidSaveTextDocument` **save token** consumed against exact disk content
-> ([fileWatcher.ts](../src/fileWatcher.ts) `consumeManualSave`). **Authoritative write-up of
-> both the bug and the replacement: [terminal-edits-not-captured.md](terminal-edits-not-captured.md)
-> §7–§8.** This section is retained because the *property* it states is still the product
-> behavior and because the API research below (no authorship signal exists) is still the
-> reason a heuristic is needed at all.
+> ([fileWatcher.ts](../src/fileWatcher.ts) `consumeManualSave`) —
+> [ADR-0006](adr/0006-save-token-provenance.md), with the full diagnosis in
+> [terminal-edits-not-captured.md](terminal-edits-not-captured.md). This section is retained
+> because the *property* it states is still the product behavior, and because the API research
+> below (no authorship signal exists) is still the reason a heuristic is needed at all.
 
 **The property:** a change you make *by hand in the editor and save* is silently adopted into the baseline (never enters the review queue); a change written *to disk out-of-band* — an AI agent, a script, a formatter — is surfaced for review. This is deliberate and desirable: the
 queue stays focused on the agent's turn, not your own in-flight edits. (Confirmed as intended behavior with the user while dogfooding.)
@@ -422,16 +414,15 @@ before the phase actually closed, and two things have since falsified it:
 - **The in-file decorations surface (`3548dd4`) was removed, not merely demoted.** §4e's
   update of 2026-07-12 deleted the surface outright along with the `useDiffEditor` /
   `showInlineDecorations` settings and the removed-lines peek. The diff editor is the sole
-  review surface — see §4e and §5 #3. The corresponding `inline-decorations-surface`
+  review surface — see §4e and [ADR-0003](adr/0003-inline-diff-editor-sole-surface.md). The corresponding `inline-decorations-surface`
   capability was descoped and its delta spec deleted; it never entered `openspec/specs/`.
 - **Trigger UX (`review-trigger-ux`) was unstarted at the time.** Since delivered
   (2026-08-09) — see above.
 
-Only the manual multi-file keyboard walk (task 5.3) remains from *Phase 4 itself*. Suite at the
-time of writing: 77 unit / 105 integration. **Current (2026-08-10), both measured: unit 102
-passing / 0 failing; integration 112 passing / 1 pending / 0 failing** (the 1 pending is the
-same pre-existing self-skip noted in §4c.1 — the `.git/HEAD` branch-switch watcher test skips
-when the test workspace has no `.git/HEAD` at activation). Post-Phase-4 findings are not tracked here — the
+Only the manual multi-file keyboard walk (task 5.3) remains from *Phase 4 itself*. Both suites
+are green as of 2026-08-10 (`npm test`, `npm run test:integration`), with the one pre-existing
+self-skip noted in §4c.1 — the `.git/HEAD` branch-switch watcher test skips when the test
+workspace has no `.git/HEAD` at activation. Post-Phase-4 findings are not tracked here — the
 prioritized backlog lives in [`../todo.md`](../todo.md), and the review-surface investigation
 behind most of it in [review-ui-legibility.md](review-ui-legibility.md).
 
@@ -446,10 +437,9 @@ replacement hunks, because the removed lines stay in the baseline (still pending
 un-selected added lines stay pending, exactly as a partial reject leaves them. Fallbacks
 mirror reject: a pure-removal hunk delegates to whole-hunk `acceptHunk`; a selection with no
 added lines is a logged no-op; a multi-hunk selection resolves the start hunk only and logs
-the rest. 6 integration tests ([partialAccept.test.ts](../src/test/integration/partialAccept.test.ts));
-suite at that commit: **97 passing / 1 pending / 0 failing**.
+the rest. Covered by [partialAccept.test.ts](../src/test/integration/partialAccept.test.ts).
 
-## 4h. QuickDiffProvider — evaluated, declined (2026-07-12)
+## 4h. QuickDiffProvider — evaluated, declined ([ADR-0007](adr/0007-decline-quickdiffprovider.md))
 
 Considered registering a `QuickDiffProvider` (stable since ~1.11; present in our resolved
 1.110 types at `@types/vscode` `QuickDiffProvider`) to reuse the platform machinery behind the
@@ -485,27 +475,24 @@ it's a minor cleanup, independent of QuickDiff, and untouched for now.
 **Net:** the red/green that motivated this project is already the platform's job via the diff
 editor and is fully stable. QuickDiff is a no-op for our workflow — set aside with no loss.
 
-## 5. Open decisions — all four resolved
+## 5. Decisions — all resolved, recorded as ADRs
 
-Kept as the record of *why*. Nothing here is still open; live work is in
-[`../todo.md`](../todo.md).
+Nothing here is still open; live work is in [`../todo.md`](../todo.md). Each verdict and the
+fact that forced it now lives in [`adr/`](adr/README.md); the sections named below keep the
+investigation that produced it.
 
-1. **Fork hunkwise vs. build fresh** — ~~blocks Phase 0~~ **RESOLVED: fork** (Phase 0 done, §4a).
-2. **Trigger model** — **RESOLVED (2026-07-05): snapshot-on-command.** "Begin review" explicitly
-   snapshots the baseline now and bounds the changeset, using the reliable synchronous
-   `snapshotWorkspace` path. The always-on reactive file watcher is demoted to a *secondary*
-   signal (updates an open changeset when it happens to fire), not the trigger — which matches
-   the [interactive-review model](interactive-review-model.md) and sidesteps the Linux watcher
-   unreliability the triage found (§4c.1). An agent-callable hook to mark turn boundaries stays
-   possible as an additive enhancement later, but is not v1-required.
-3. **Primary surface** — native diff editor (robust) vs. in-file decorations (closer feel,
-   more limited without insets). **RESOLVED (2026-07-05): inline diff editor by default** —
-   decorations can't render removed lines on stable APIs, which fails the review use case. See
-   §4e for the decision, the global-settings tradeoff, and the scheme-collision bug it exposed.
-4. **QuickDiffProvider for gutter change-bars** — **RESOLVED (2026-07-12): declined.** Orthogonal
-   to our red/green (which is the diff editor's, §4e); renders only gutter bars + a click-to-peek,
-   never always-on inline red/green; adds an unwanted Source Control view entry. A no-op for the
-   diff-tab workflow. See §4h.
+| Question | Verdict | Investigation |
+|---|---|---|
+| Proposed vs. stable APIs | [ADR-0001](adr/0001-stable-apis-only.md) — stable only | §4a, [hunkwise-evaluation §3–§4](hunkwise-evaluation.md) |
+| Fork hunkwise vs. build fresh | [ADR-0002](adr/0002-fork-hunkwise.md) — fork | §4a, [hunkwise-evaluation §6](hunkwise-evaluation.md) |
+| Primary review surface | [ADR-0003](adr/0003-inline-diff-editor-sole-surface.md) — inline diff editor, sole surface | §4e |
+| Trigger model | [ADR-0004](adr/0004-snapshot-on-command-trigger.md) — snapshot-on-command | §4c.1 |
+| Typed changeset / retained disposition | [ADR-0005](adr/0005-no-retained-hunk-disposition.md) — neither | §4d |
+| User save vs. external write | [ADR-0006](adr/0006-save-token-provenance.md) — save-event provenance | §4f, [terminal-edits](terminal-edits-not-captured.md) |
+| `QuickDiffProvider` | [ADR-0007](adr/0007-decline-quickdiffprovider.md) — declined | §4h |
+| Null-baseline disk change | [ADR-0008](adr/0008-null-baseline-silent-absorb.md) — absorb, logged, known gap | [terminal-edits §5](terminal-edits-not-captured.md) |
+| EOL handling in the differ | [ADR-0009](adr/0009-eol-insensitive-diffing.md) — EOL-insensitive only | [review-ui-legibility §7](review-ui-legibility.md) |
+| Gated hunk coalescing | [ADR-0010](adr/0010-withdraw-gated-hunk-coalescing.md) — withdrawn | [review-ui-legibility §1–§5](review-ui-legibility.md) |
 
 ## 6. Someday / maybe (parked ideas)
 
