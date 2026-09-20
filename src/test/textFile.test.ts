@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { looksBinary, readTextFile, readFileForReview, stripBom, withBomFrom } from '../textFile';
+import { bomFromFile, looksBinary, readTextFile, readFileForReview, stripBom, withBomFrom } from '../textFile';
 
 /** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
 const BOM = '\uFEFF';
@@ -75,6 +75,34 @@ describe('stripBom', () => {
 
   it('does not disturb other leading whitespace', () => {
     assert.equal(stripBom('  indented'), '  indented');
+  });
+});
+
+describe('bomFromFile', () => {
+  it('reports the BOM of a file that has one', () => {
+    const p = fixture('bom.txt', Buffer.from(`${BOM}hello\n`, 'utf-8'));
+    assert.equal(bomFromFile(p), BOM);
+  });
+
+  it('reports none for ordinary text', () => {
+    const p = fixture('plain.txt', Buffer.from('hello\n', 'utf-8'));
+    assert.equal(bomFromFile(p), '');
+  });
+
+  it('reports none for a file shorter than a BOM', () => {
+    // A 1-2 byte file cannot carry one, and the read must not treat the short
+    // count as a match against an uninitialized buffer.
+    assert.equal(bomFromFile(fixture('tiny.txt', Buffer.from('a', 'utf-8'))), '');
+    assert.equal(bomFromFile(fixture('empty.txt', Buffer.alloc(0))), '');
+  });
+
+  it('reports none for a file that cannot be opened', () => {
+    assert.equal(bomFromFile(path.join(os.tmpdir(), 'ir-does-not-exist-xyz.txt')), '');
+  });
+
+  it('is not fooled by the BOM bytes appearing later', () => {
+    const p = fixture('late.txt', Buffer.from(`a${BOM}b`, 'utf-8'));
+    assert.equal(bomFromFile(p), '');
   });
 });
 

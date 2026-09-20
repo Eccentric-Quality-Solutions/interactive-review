@@ -8,7 +8,7 @@ import { computeHunks, hunkAtLine, hunkId, ParsedHunk, splitHunkByRange } from '
 import { restoreDiffSettings } from './diffSettings';
 import { FileState } from './types';
 import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
-import { readTextFileSync, stripBom, withBomFrom } from './textFile';
+import { bomFromFile, readTextFileSync, stripBom, withBomFrom } from './textFile';
 import { log } from './log';
 
 /**
@@ -366,7 +366,10 @@ export function acceptHunk(
 
   const doc = findFileDocument(filePath);
   if (!doc) { log(`acceptHunk(${basename}): no doc found, skip`); return; }
-  const baselineStr = fileState.baseline ?? '';
+  // `?? bomFromFile` rather than `?? ''`: a null baseline has no marker to carry, so for a
+  // new BOM'd file the disk is the only witness. Seeding it here means every baseline built
+  // below — the partial one and the final one alike — inherits it through `withBomFrom`.
+  const baselineStr = fileState.baseline ?? bomFromFile(filePath);
   log(`acceptHunk(${basename}): doc.scheme=${doc.uri.scheme}, doc.len=${doc.getText().length}, baseline.len=${baselineStr.length}`);
 
   const hunks = computeHunks(fileState.baseline, doc.getText());
@@ -422,7 +425,13 @@ function finishBaselineAdvance(
   log(`${label}(${basename}): remainingHunks=${remainingHunks.length}`);
   if (remainingHunks.length === 0) {
     log(`${label}(${basename}): last change, exitReviewing`);
-    stateManager.exitReviewing(filePath, doc.getText());
+    // The buffer is the right *content* for the new baseline (it carries the user's EOLs
+    // and every accepted line) and the wrong *encoding* for it: VS Code strips the BOM on
+    // the way into a document and re-adds it on save, so `doc.getText()` never has one
+    // while `newBaseline` does. Storing the buffer verbatim would drop the marker on the
+    // single-hunk accept — the common path — and a later restore from that baseline would
+    // write the file back without it. See ADR-0013: normalize at comparison, not storage.
+    stateManager.exitReviewing(filePath, withBomFrom(newBaseline, doc.getText()));
   } else {
     stateManager.setFile(filePath, { status: 'reviewing', baseline: newBaseline });
     revealNextHunk(filePath, remainingHunks, originalNewStart);
@@ -687,7 +696,8 @@ export async function acceptSelection(
   }
 
   const originalNewStart = hunk.newStart;
-  const baselineStr = fileState.baseline ?? '';
+  // See `acceptHunk`: a null baseline carries no BOM, so seed it from disk.
+  const baselineStr = fileState.baseline ?? bomFromFile(filePath);
   const baselineLines = stripBom(baselineStr).split('\n');
   const currentLines = doc.getText().split('\n');
 

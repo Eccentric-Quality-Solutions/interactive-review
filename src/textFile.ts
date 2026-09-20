@@ -63,6 +63,37 @@ export function withBomFrom(source: string, text: string): string {
   return source.charCodeAt(0) === 0xfeff && text.charCodeAt(0) !== 0xfeff ? BOM_CHAR + text : text;
 }
 
+/**
+ * The BOM a file on disk starts with, as a string to prepend — `''` when it has none.
+ *
+ * `withBomFrom` carries the marker from an existing baseline, which covers every file that
+ * has one. A file being reviewed with a `null` baseline has nothing to carry: there is no
+ * prior text to inherit from, and `doc.getText()` never has a BOM regardless of what the
+ * file holds. Accepting a hunk on a new BOM'd file therefore stored a BOM-less baseline
+ * and lost the marker on the next restore — the same bug `withBomFrom` fixes elsewhere,
+ * surviving in the one case it cannot see. Disk is the only remaining witness.
+ *
+ * Three bytes, opened and closed per call. That is affordable on the accept path (one
+ * file, one user action) and is why this is not folded into the whole-file reads.
+ *
+ * An unopenable file reports `''`: the callers are mid-accept on a file they have already
+ * read, so a failure here means the file just vanished, and the accept has bigger problems
+ * than its encoding marker.
+ */
+export function bomFromFile(filePath: string): string {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(3);
+    const bytesRead = fs.readSync(fd, buf, 0, 3, 0);
+    return bytesRead === 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? BOM_CHAR : '';
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
 /** Bytes to sample. A NUL in the first block is the same signal `git` and `grep` use. */
 const SNIFF_BYTES = 8192;
 

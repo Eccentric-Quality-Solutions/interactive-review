@@ -92,6 +92,58 @@ suite('interactive-review keyboard commands', function () {
     assert.strictEqual(after, BOM + 'l1\nl2\n', 'content reverts to the baseline');
   });
 
+  test('accepting the last hunk of a BOM file keeps the BOM in the stored baseline', async () => {
+    // The mirror of the reject case above, and the direction that is easy to get wrong:
+    // reject writes to the *document* (no BOM, VS Code re-adds it), accept writes to
+    // *storage* (must keep it). On the last hunk the buffer becomes the new baseline —
+    // and the buffer never has a BOM, so the marker has to be carried over explicitly.
+    // Without that, the file's next restore-from-baseline silently drops it.
+    const root = getWorkspaceRoot();
+    const f = path.join(root, 'bom-accept.txt');
+    fs.writeFileSync(f, BOM + 'l1\nl2\n', 'utf-8');
+    await enableReview();
+    await waitForCondition(() => gitGetBaseline(root, 'bom-accept.txt') !== undefined);
+
+    // Edit line 2, so the accepted hunk does not touch line 1 at all: any BOM loss here
+    // comes from storing the buffer, not from the splice.
+    fs.writeFileSync(f, BOM + 'l1\nCHANGED\n', 'utf-8');
+    await waitForReviewing(f);
+
+    await openWithSelection(f, 1);
+    await vscode.commands.executeCommand('interactiveReview.acceptHunk');
+    await sleep(300);
+
+    assert.notStrictEqual(getStateManager().getFile(f)?.status, 'reviewing', 'file resolved');
+    const baseline = gitGetBaseline(root, 'bom-accept.txt');
+    assert.strictEqual(baseline, BOM + 'l1\nCHANGED\n',
+      'the accepted content is stored with its BOM intact');
+    assert.strictEqual(fs.readFileSync(f, 'utf-8'), BOM + 'l1\nCHANGED\n',
+      'and accepting leaves the file on disk alone');
+  });
+
+  test('accepting a new BOM file keeps the BOM in the stored baseline', async () => {
+    // The null-baseline case the test above cannot reach. A new file has no prior baseline
+    // to carry a marker from, so the disk is the only witness — `bomFromFile` seeds it.
+    // Without that, accepting the file's only hunk stores it BOM-less and the marker is
+    // gone from every later restore.
+    const root = getWorkspaceRoot();
+    const f = path.join(root, 'bom-new.txt');
+    await enableReview();
+
+    fs.writeFileSync(f, BOM + 'brand\nnew\n', 'utf-8');
+    await waitForReviewing(f);
+
+    await openWithSelection(f, 0);
+    await vscode.commands.executeCommand('interactiveReview.acceptHunk');
+    await sleep(300);
+
+    assert.notStrictEqual(getStateManager().getFile(f)?.status, 'reviewing', 'file resolved');
+    assert.strictEqual(gitGetBaseline(root, 'bom-new.txt'), BOM + 'brand\nnew\n',
+      'a new file’s BOM reaches the baseline');
+    assert.strictEqual(fs.readFileSync(f, 'utf-8'), BOM + 'brand\nnew\n',
+      'and accepting leaves the file on disk alone');
+  });
+
   test('nextHunk past a file’s last hunk opens the next reviewing file', async () => {
     const root = getWorkspaceRoot();
     const a = path.join(root, 'a.txt');

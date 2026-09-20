@@ -37,10 +37,20 @@ Normalize the BOM **at comparison, never at storage**, via `stripBom` in `textFi
 Only position 0 is examined. A U+FEFF elsewhere is a zero-width no-break space — real
 content, and not ours to remove.
 
-**Storage keeps the BOM.** `acceptHunk`/`discardHunk` still splice the raw baseline and the
-raw buffer, so the marker stays in the stored baseline and in the file `discardFileByPath`
-writes back from it. Normalizing on the way in would have made every restore of a BOM'd file
-silently drop its marker.
+**Storage keeps the BOM — by re-attaching it, not by never removing it.** The splices do
+*not* run on raw text: `acceptHunk`/`acceptSelection` strip the baseline before splitting it
+into lines, because the replacement lines come from the buffer and must line up with a
+buffer-indexed hunk. `withBomFrom` then puts the marker back on the baseline that gets
+stored, and `finishBaselineAdvance` does the same when the last hunk resolves and the buffer
+itself becomes the new baseline. So the marker survives into the stored baseline and into the
+file `discardFileByPath` writes back from it — but through an explicit re-attach at each
+storage point, which is a thing that can be forgotten, rather than through the text never
+having been touched. Normalizing on the way in and never restoring would have made every
+restore of a BOM'd file silently drop its marker.
+
+A **null** baseline has no marker to carry, so the accept commands seed it from disk with
+`bomFromFile` — a new BOM'd file would otherwise be stored BOM-less, since neither the
+absent baseline nor the buffer can say what the file holds.
 
 ## Consequences
 
