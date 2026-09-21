@@ -10,7 +10,8 @@ import {
 } from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
 import { restoreDiffSettings } from './diffSettings';
-import { hunkId } from './diffEngine';
+import { computeHunks, hunkId } from './diffEngine';
+import { findFileDocument } from './editorUtils';
 import { initLog, log } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
@@ -108,7 +109,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   function fireBaselineChange(filePath: string): void {
     baselineChangeEmitter.fire(vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' }));
   }
-  context.subscriptions.push(stateManager, stateManager.onDidChangeBaseline(fireBaselineChange));
+  context.subscriptions.push(stateManager, stateManager.onDidChangeBaseline(filePath => {
+    // Do NOT invalidate the cached baseline for a file that has just *left* review.
+    //
+    // This is the whole-file-turns-green flash on the last accept. `exitReviewing` drops
+    // the state entry, `dropState` fires this event, and the content provider answers a
+    // missing entry with `''` — so the diff's original side empties and the editor
+    // repaints every line of the file as added, while the async `closeStaleTabs` is still
+    // on its way to close the tab. It fires on the happy path of every completed file.
+    //
+    // Skipping the notification leaves VS Code holding the *previous* baseline instead of
+    // an empty one. That is stale for the few hundred milliseconds before the tab closes,
+    // and stale-but-plausible beats empty-and-alarming: at worst the tab still shows the
+    // hunk that was just accepted, rather than claiming the entire file is new.
+    //
+    // It does not reintroduce the ADR-0011 defect, which was the *opposite* ordering
+    // problem: re-entering review writes a fresh baseline through `writeState`, and that
+    // still fires here (the entry is `reviewing` by then), so the cache is corrected
+    // before the next diff opens. `ReviewPanel` also re-fires immediately before every
+    // `vscode.diff` as a second guarantee.
+    if (stateManager.getFile(filePath)?.status !== 'reviewing') return;
+    fireBaselineChange(filePath);
+  }));
 
   /**
    * Close tabs for files that are no longer in reviewing state.
@@ -168,6 +190,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
    * unhandled, the failure is invisible: the lens or keybinding appears to have worked
    * while nothing changed. Log it and tell the user, who can then retry.
    */
+  /**
+   * Does this CodeLens click carry a hunk id that no longer resolves?
+   *
+   * Hunk ids are derived from position, so every accept or discard renumbers the ones that
+   * follow it. `acceptHunk`/`discardHunk` handle a stale id by logging and returning, which
+   * from the outside is indistinguishable from the button doing nothing at all — the user
+   * clicks, the block stays, and there is no way to tell whether the tool ignored them or
+   * acted somewhere they could not see.
+   *
+   * Only the two lens entry points are guarded, and only with a message. Re-resolving the
+   * id by position would be a semantic change: it would silently act on whatever hunk now
+   * occupies those coordinates, which is a different edit from the one that was clicked.
+   */
+  function lensTargetIsStale(filePath: string, hId: string, label: string): boolean {
+    const fileState = stateManager.getFile(filePath);
+    const doc = findFileDocument(filePath);
+    // No open document means this is not the lens path we can check cheaply; let the
+    // command run and apply its own guards.
+    if (!fileState || !doc) return false;
+    if (computeHunks(fileState.baseline, doc.getText()).some(h => hunkId(h) === hId)) return false;
+    log(`${label} hunk(${path.basename(filePath)}): stale hunk id ${hId}, nothing to act on`);
+    void vscode.window.showWarningMessage(
+      `Interactive Review: that ${label.toLowerCase()} button was out of date — the changes had already moved. Nothing was applied; try again.`
+    );
+    return true;
+  }
+
   function reportCommandFailure(label: string, filePath: string): (err: unknown) => void {
     return err => {
       const name = path.basename(filePath);
@@ -232,10 +281,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     vscode.window.tabGroups.onDidChangeTabs(() => {
       diffCodeLensProvider?.fire();
     }),
+  );
+
+  // Panel refresh on typing, debounced.
+  //
+  // This was an undebounced `refresh()` on every keystroke in any file, and `refresh`
+  // rebuilds the whole panel: Myers over every reviewing file, reading the unopened ones
+  // from disk. With a sizeable queue that is felt as typing lag, and it is a plausible
+  // cause of the "Accept/Discard showing up much more slowly" report that was attributed
+  // to running on a VM. 150ms is long enough to coalesce a burst of typing and short
+  // enough that the panel still tracks the buffer; the watcher's own document listener
+  // debounces at 50ms for the heavier recompute.
+  let panelRefreshTimer: NodeJS.Timeout | undefined;
+  context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(e => {
       if (e.document.uri.scheme !== 'file') return;
-      reviewPanel?.refresh();
+      // Nothing to repaint when no session is open, and this fires for every edit in
+      // every file regardless.
+      if (!stateManager.enabled) return;
+      if (panelRefreshTimer) clearTimeout(panelRefreshTimer);
+      panelRefreshTimer = setTimeout(() => {
+        panelRefreshTimer = undefined;
+        reviewPanel?.refresh();
+      }, 150);
     }),
+    { dispose: () => { if (panelRefreshTimer) clearTimeout(panelRefreshTimer); } },
   );
 
   reviewPanel = new ReviewPanel(context, stateManager, fileWatcher, onStateChanged, fireBaselineChange, closeStaleTabs);
@@ -254,9 +324,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     // (the `interactive-review-deleted` doc), which has no file-scheme lenses.
     vscode.languages.registerCodeLensProvider({ scheme: 'interactive-review-deleted' }, diffCodeLensProvider),
     vscode.commands.registerCommand('interactiveReview.codeLensAcceptHunk', (filePath: string, hId: string) => {
+      if (lensTargetIsStale(filePath, hId, 'Accept')) return;
       acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens');
     }),
     vscode.commands.registerCommand('interactiveReview.codeLensDiscardHunk', (filePath: string, hId: string) => {
+      if (lensTargetIsStale(filePath, hId, 'Discard')) return;
       void discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); walkAfterResolve(filePath); }, 'codeLens')
         .catch(reportCommandFailure('Discard hunk', filePath));
     }),

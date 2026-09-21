@@ -104,6 +104,42 @@ suite('interactive-review rename integration', function () {
     assert.strictEqual(diskContent, 'original content\nmodified line\n');
   });
 
+  test('deleting a folder via VS Code drops every baseline under it, and refresh does not resurrect them', async () => {
+    // Regression guard for the watcher *wiring*, which is where this bug lived: the
+    // user-delete branch called removeFile(<dir>), which git turns into a successful no-op.
+    // The unit tests pin the mechanism (removePathAndChildren, and git's behaviour); only a
+    // real editor delete exercises the path from onWillDeleteFiles through onDiskDelete.
+    //
+    // `nested/b.txt` is never edited, so it has a baseline in git and no entry in memory.
+    // Those are exactly the files the old code stranded.
+    const root = getWorkspaceRoot();
+    const dir = path.join(root, 'doomed');
+    fs.mkdirSync(path.join(dir, 'nested'), { recursive: true });
+    writeFileExternally(path.join(dir, 'a.txt'), 'a\n');
+    writeFileExternally(path.join(dir, 'nested', 'b.txt'), 'b\n');
+    writeFileExternally(path.join(root, 'survivor.txt'), 's\n');
+
+    await enableReview();
+    await waitForCondition(() => {
+      const t = gitListTracked(root);
+      return t.includes('doomed/a.txt') && t.includes('doomed/nested/b.txt') && t.includes('survivor.txt');
+    }, 8000);
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.deleteFile(vscode.Uri.file(dir), { recursive: true });
+    assert.ok(await vscode.workspace.applyEdit(edit), 'the folder delete itself should succeed');
+
+    await waitForCondition(() => !gitListTracked(root).some(f => f.startsWith('doomed/')), 8000);
+
+    // The user-visible symptom was phantom *deletions* reappearing after a Refresh or window
+    // reload, since a tracked file missing from disk reads as a pending deletion.
+    await vscode.commands.executeCommand('interactiveReview.refresh');
+    const sm = getStateManager()!;
+    assert.strictEqual(sm.getFile(path.join(dir, 'a.txt')), undefined, 'a.txt must not return as a pending deletion');
+    assert.strictEqual(sm.getFile(path.join(dir, 'nested', 'b.txt')), undefined, 'nested/b.txt must not return as a pending deletion');
+    assert.ok(gitListTracked(root).includes('survivor.txt'), 'the sibling outside the folder keeps its baseline');
+  });
+
   test('manual delete via VSCode does not produce a deletion hunk', async () => {
     const root = getWorkspaceRoot();
 

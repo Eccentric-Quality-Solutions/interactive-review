@@ -648,7 +648,17 @@ function renderFileGroup(file) {
           hunkId: hunk.id,
         });
       });
-      const label = el("span", "hunk-label", `@line ${hunk.newStart}`);
+      // A multi-line change read as "@line 12", which said nothing about how much of the
+      // file the button would act on. Show the span the hunk actually covers. newLines is
+      // floored to 1 so a pure-removal hunk still names the line it is anchored to.
+      const lastLine = hunk.newStart + Math.max(1, hunk.newLines) - 1;
+      const label = el(
+        "span",
+        "hunk-label",
+        lastLine > hunk.newStart
+          ? `@lines ${hunk.newStart}-${lastLine}`
+          : `@line ${hunk.newStart}`,
+      );
       const hunkStats = el("div", "hunk-stats");
       hunkStats.appendChild(el("span", "stat-added", `+${hunk.newLines}`));
       hunkStats.appendChild(document.createTextNode(" "));

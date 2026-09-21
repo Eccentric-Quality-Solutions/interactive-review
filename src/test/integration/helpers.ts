@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 
 export function getWorkspaceRoot(): string {
   const folders = vscode.workspace.workspaceFolders;
@@ -31,12 +31,21 @@ export function gitListTracked(root: string): string[] {
   }
 }
 
+/**
+ * `cat-file blob`, matching `BaselineGit.getBaseline` and for the same reason: `git show
+ * :<path>` exits 0 for an untracked path whose name contains glob characters, so a test
+ * asserting "not tracked" through this helper could pass while the file was in fact
+ * mishandled. `execFileSync` with an argument array also removes the shell-quoting that
+ * the old interpolated command depended on. The explicit `:0:` stage stops a name like
+ * `1:notes.txt` being read as stage 1 of `notes.txt`.
+ */
 export function gitGetBaseline(root: string, relPath: string): string | undefined {
   try {
-    return execSync(`git show ":${relPath}"`, {
+    return execFileSync('git', ['cat-file', 'blob', `:0:${relPath}`], {
       cwd: root,
       env: baselineGitEnv(root),
       encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch {
     return undefined;

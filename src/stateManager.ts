@@ -647,6 +647,54 @@ export class StateManager {
     }
   }
 
+  /**
+   * Remove `dirPath` and everything beneath it, from memory and from the baseline repo.
+   *
+   * `removeFile` cannot do this job, and fails at it *silently*: it runs
+   * `git update-index --force-remove -- <dir>`, which **exits 0 having removed nothing**
+   * (confirmed against a scratch repo with two tracked files under one directory, both
+   * still present afterwards). Git's index has no directory entries to remove.
+   *
+   * The visible consequence was a folder deleted in the Explorer leaving every file under
+   * it still tracked with a baseline, so the next Refresh or window reload surfaced the
+   * whole folder as a queue of pending deletions the user had already carried out.
+   *
+   * The in-memory sweep alone is not enough either, which is why this reads the tracked
+   * list: a file that was never edited has a baseline in git but no entry in `state`, and
+   * those are exactly the ones that came back as phantom deletions.
+   *
+   * No rollback, deliberately. The directory is already gone from disk, so restoring the
+   * entries would only re-desync state from the filesystem — the same reasoning
+   * `renameFile` gives for not rolling back a path migration.
+   */
+  removePathAndChildren(dirPath: string): void {
+    dirPath = normalizePath(dirPath);
+    const prefix = dirPath + path.sep;
+    const under = (fp: string) => fp === dirPath || fp.startsWith(prefix);
+
+    for (const fp of Array.from(this.state.keys())) {
+      if (under(fp)) this.dropState(fp);
+    }
+
+    const g = this._git;
+    if (!g) return;
+    this.gitQueue = this.gitQueue.then(async () => {
+      let tracked: string[];
+      try {
+        tracked = await g.listTrackedFiles();
+      } catch (err) {
+        // A damaged repo must not turn a delete into a workspace-wide reclassification;
+        // leave the index alone and let load()/rebuildState's recovery handle it.
+        log(`removePathAndChildren: skipping git removal — ${err}`);
+        return;
+      }
+      const toRemove = tracked.filter(under);
+      if (toRemove.length === 0) return;
+      log(`removePathAndChildren: removing ${toRemove.length} baseline(s) under ${path.basename(dirPath)}`);
+      await g.removeFileBatch(toRemove);
+    }).catch(err => { log(`git queue error (removePathAndChildren): ${err}`); });
+  }
+
   renameFile(oldFilePath: string, newFilePath: string): void {
     oldFilePath = normalizePath(oldFilePath);
     newFilePath = normalizePath(newFilePath);
@@ -772,6 +820,7 @@ export class StateManager {
 
     const filePaths = await this.collectWorkspaceFiles(shouldIgnore);
     const batch = await this.readBatch(filePaths);
+    let failure: unknown;
     if (batch.length > 0) {
       // Through `gitQueue`, not a bare await, matching every other `snapshotBatch` call
       // site. The queue exists because concurrent git invocations contend on
@@ -779,9 +828,28 @@ export class StateManager {
       // error, so a collision costs a file its baseline silently. Running off-queue was
       // survivable only while nothing else wrote git during enable; `handleDiskCreate`'s
       // adopt-during-snapshot branch now does exactly that.
-      this.gitQueue = this.gitQueue.then(() => g.snapshotBatch(batch)).catch(err => { log(`git queue error: ${err}`); });
+      //
+      // The failure is captured and re-thrown. A snapshot that fails leaves the session
+      // enabled over a repo with no baselines, which renders as an empty review queue —
+      // indistinguishable from a clean start with nothing to review, while every later edit
+      // surfaces as a whole-file "unbaselined" hunk. That is the one state where silence
+      // actively misleads.
+      //
+      // Re-thrown rather than reported from here, because the two callers must react
+      // differently and only they know how. `enableReview` tells the user and rejects, so an
+      // agent awaiting Begin review learns the baseline is not on disk instead of being told
+      // it succeeded. `recoverLostBaseline` needs it to reach its own failure branch: it
+      // sets `rebuilt = true` on the next line, so swallowing here made it announce "a fresh
+      // baseline has been taken" *alongside* the failure message — two notifications
+      // contradicting each other.
+      //
+      // The queue's own `.catch` stays: the chain must remain usable for later operations.
+      this.gitQueue = this.gitQueue
+        .then(() => g.snapshotBatch(batch))
+        .catch(err => { failure = err; log(`git queue error: ${err}`); });
     }
     await this.gitQueue;
+    if (failure !== undefined) throw failure;
   }
 
   private currentSettings(): Settings {

@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHunks, hasReportableDiff, hunkAtLine, hunkId, splitHunkByRange } from '../diffEngine';
+import { computeHunks, hasReportableDiff, hunkAtLine, hunkId, lensLineForHunk, splitHunkByRange } from '../diffEngine';
+import { cases } from './generators';
 
 /** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
 const BOM = '\uFEFF';
@@ -455,5 +456,61 @@ describe('splitHunkByRange', () => {
     assert.equal(h.newLines, 0);
     const split = splitHunkByRange(h, 1, 1);
     assert.equal(split.hasAddedInRange, false);
+  });
+});
+
+describe('lensLineForHunk', () => {
+  /**
+   * Where a hunk's Accept/Discard buttons are drawn decides which block the user believes
+   * they act on. The defect this guards: lenses were anchored on the line AFTER their hunk,
+   * and a CodeLens renders above its anchor, so each hunk's buttons sat directly above the
+   * NEXT block. A user clicked Accept beside a 13-line deletion and a one-line neighbour
+   * resolved instead.
+   *
+   * Both properties fail immediately against the old anchor.
+   */
+  const lineCountOf = (text: string) => text.split('\n').length; // VS Code's own line count
+
+  it('property: every anchor lies inside its own hunk', () => {
+    for (const c of cases(1500)) {
+      const hunks = computeHunks(c.baseline, c.current);
+      const lineCount = lineCountOf(c.current);
+      for (const h of hunks) {
+        const anchor = lensLineForHunk(h, lineCount);
+        const owner = hunkAtLine(hunks, anchor + 1);
+        assert.equal(owner && hunkId(owner), hunkId(h),
+          `seed=${c.seed} hunk ${hunkId(h)} anchored at line ${anchor + 1}, which belongs to ${owner && hunkId(owner)}`);
+      }
+    }
+  });
+
+  it('property: no two hunks share an anchor line', () => {
+    // Two hunks' buttons on one line are indistinguishable, whichever block they sit by.
+    for (const c of cases(1500)) {
+      const hunks = computeHunks(c.baseline, c.current);
+      const lineCount = lineCountOf(c.current);
+      const anchors = hunks.map(h => lensLineForHunk(h, lineCount));
+      assert.equal(new Set(anchors).size, anchors.length, `seed=${c.seed} anchors ${anchors.join(',')}`);
+    }
+  });
+
+  it('regression: a large deletion next to a one-line change gets its own buttons', () => {
+    // The shape from the live report: a 13-line removal that occupies a single modified
+    // line, immediately followed by an unrelated one-line edit.
+    const removed = Array.from({ length: 13 }, (_, i) => `old ${i}`);
+    const baseline = ['head', ...removed, 'mid', 'tail-old', 'end'].join('\n') + '\n';
+    const current = ['head', 'replacement', 'mid', 'tail-new', 'end'].join('\n') + '\n';
+    const hunks = computeHunks(baseline, current);
+    assert.equal(hunks.length, 2, 'precondition: the big deletion and the small edit are separate hunks');
+    const [big, small] = hunks;
+    assert.equal(big.oldLines, 13);
+
+    const lineCount = lineCountOf(current);
+    assert.equal(hunkId(hunkAtLine(hunks, lensLineForHunk(big, lineCount) + 1)!), hunkId(big));
+    assert.equal(hunkId(hunkAtLine(hunks, lensLineForHunk(small, lineCount) + 1)!), hunkId(small));
+  });
+
+  it('clamps into the document for a hunk anchored past the last line', () => {
+    assert.equal(lensLineForHunk({ oldStart: 3, oldLines: 1, newStart: 9, newLines: 0, removedContent: [], addedContent: [] }, 4), 3);
   });
 });

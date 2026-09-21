@@ -45,6 +45,23 @@ export function hunkAtLine(hunks: ParsedHunk[], line1Based: number): ParsedHunk 
     ?? hunks.find(h => h.newStart >= line1Based);
 }
 
+/**
+ * The 0-based document line a hunk's Accept/Discard CodeLens is anchored to.
+ *
+ * A CodeLens renders immediately *above* its anchor line, so the anchor decides which block
+ * the buttons appear to belong to. It is the hunk's first line, which puts the buttons
+ * directly above the block they act on.
+ *
+ * Pure and here rather than in `diffCodeLens.ts` so the property that matters can be tested
+ * without an editor: **the anchor must resolve, via `hunkAtLine`, back to its own hunk.**
+ * The previous anchor — the line *after* the hunk — failed that property for any hunk with
+ * a neighbour, which is how a user clicking Accept on a 13-line deletion resolved a
+ * different, one-line hunk instead.
+ */
+export function lensLineForHunk(hunk: ParsedHunk, lineCount: number): number {
+  return Math.min(Math.max(0, hunk.newStart - 1), Math.max(0, lineCount - 1));
+}
+
 export interface HunkRangeSplit {
   hasAddedInRange: boolean;
   addedStartIdx: number; // inclusive index into hunk.addedContent

@@ -246,7 +246,11 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
   }): Promise<void> {
     switch (msg.command) {
       case 'beginReview':
-        await vscode.commands.executeCommand('interactiveReview.beginReview');
+        // `enableReview` reports its own failure with a specific message, so a rejection
+        // here is already on screen; letting it reach this method's generic catch would
+        // show the user two notifications for one failure.
+        await vscode.commands.executeCommand('interactiveReview.beginReview')
+          .then(undefined, err => log(`beginReview failed (already reported): ${err}`));
         break;
       case 'endReview':
         await vscode.commands.executeCommand('interactiveReview.endReview');

@@ -32,6 +32,40 @@ export class BaselineUnreadableError extends Error {
   }
 }
 
+/**
+ * How many `git hash-object` processes may run at once during a batch snapshot.
+ *
+ * Each one is a process plus a pipe, so the ceiling that matters is the file-descriptor
+ * limit, not the CPU count. 32 keeps a large workspace comfortably inside a 1024-fd
+ * default while still being far faster than serial hashing — the work is dominated by
+ * process startup, so concurrency past this buys very little.
+ */
+const HASH_CONCURRENCY = 32;
+
+/**
+ * `Promise.all` with a ceiling on how many run concurrently. Results keep input order.
+ *
+ * A worker-pool rather than chunked batches: chunking makes every batch wait for its
+ * slowest member, which matters here because file sizes vary by orders of magnitude.
+ */
+async function mapWithLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 const DEFAULT_SETTINGS: Settings = {
   ignorePatterns: process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'],
   respectGitignore: true,
@@ -88,11 +122,27 @@ export class BaselineGit {
       GIT_DIR: this.gitDir,
       GIT_WORK_TREE: this.workTree,
       GIT_TERMINAL_PROMPT: '0',
+      // Every path this class hands to git is a literal filename, never a pattern. Without
+      // this git reads `[...]`, `*` and `?` in a pathspec as glob syntax, so a file named
+      // `x[1].txt` matched `x1.txt` as well — confirmed against a scratch repo, where
+      // renaming one file rewrote the other's baseline entry. Set on the environment rather
+      // than per-call so `ls-files`, `update-index --force-remove` and any future pathspec
+      // site are covered by construction.
+      GIT_LITERAL_PATHSPECS: '1',
     };
   }
 
   private async git(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', ...args], {
+    const { stdout } = await execFileAsync('git', [
+      '-c', 'core.quotepath=false',
+      // The baseline repo runs against the user's work tree and therefore inherits their
+      // global git config. Two settings there break it outright: `commit.gpgsign=true`
+      // makes every snapshot block on pinentry or fail, and `core.hooksPath` points our
+      // private commits at the project's own hooks. Neither is ours to run.
+      '-c', 'commit.gpgsign=false',
+      '-c', 'core.hooksPath=',
+      ...args,
+    ], {
       cwd: this.workTree,
       env: this.env,
       maxBuffer: 10 * 1024 * 1024, // 10 MB — default 1 MB is too small for large files
@@ -327,23 +377,29 @@ export class BaselineGit {
     if (files.length === 0) return;
     await this.initGit();
     try {
-      // Hash all blobs in parallel, then stage all at once and commit once
-      const entries = await Promise.all(
-        files.map(({ filePath, content }) =>
-          new Promise<{ rel: string; hash: string }>((resolve, reject) => {
-            const rel = normalizePath(path.relative(this.workTree, filePath));
-            const child = execFile(
-              'git',
-              ['hash-object', '-w', '--stdin'],
-              { env: this.env },
-              (err, stdout) => (err ? reject(err) : resolve({ rel, hash: stdout.trim() }))
-            );
-            // Guard against an uncaught EPIPE crashing the host if git exits early;
-            // routes the stream error into the promise so the try/catch handles it.
-            child.stdin!.on('error', reject);
-            child.stdin!.end(content, 'utf-8');
-          })
-        )
+      // Hash blobs concurrently but BOUNDED. This was a bare `Promise.all` over every
+      // file, which spawns one `git hash-object` process per workspace file — a few
+      // thousand at once in a real repo, which fails as a group on EMFILE/EAGAIN.
+      //
+      // The failure mode was what made it serious rather than slow: the catch below
+      // swallowed it, so `Begin review` came up enabled with an *empty* baseline repo,
+      // which looks exactly like "nothing to review". Every subsequent edit then surfaced
+      // as a whole-file unbaselined hunk. `snapshotWorkspace` now reports the throw to the
+      // user; this cap is what stops it happening in the first place.
+      const entries = await mapWithLimit(files, HASH_CONCURRENCY, ({ filePath, content }) =>
+        new Promise<{ rel: string; hash: string }>((resolve, reject) => {
+          const rel = normalizePath(path.relative(this.workTree, filePath));
+          const child = execFile(
+            'git',
+            ['hash-object', '-w', '--stdin'],
+            { env: this.env },
+            (err, stdout) => (err ? reject(err) : resolve({ rel, hash: stdout.trim() }))
+          );
+          // Guard against an uncaught EPIPE crashing the host if git exits early;
+          // routes the stream error into the promise so the try/catch handles it.
+          child.stdin!.on('error', reject);
+          child.stdin!.end(content, 'utf-8');
+        })
       );
       // Stage all entries, chunked to avoid OS argument length limits
       const CHUNK = 100;
@@ -353,7 +409,11 @@ export class BaselineGit {
       }
       await this.commit();
     } catch (err) {
+      // Logged *and* rethrown. Callers that route through `gitQueue` still swallow it into
+      // the log exactly as before; `snapshotWorkspace` awaits it directly so it can tell
+      // the user that this session has no baselines rather than showing an empty queue.
       this.log(`snapshotBatch failed (${files.length} files): ${err}`);
+      throw err;
     }
   }
 
@@ -377,11 +437,16 @@ export class BaselineGit {
     }
   }
 
+  /**
+   * `--no-verify` is redundant with the empty `core.hooksPath` in `git()` and kept anyway:
+   * it states the intent at the call site, and it does not depend on the empty-path
+   * override behaving identically across git versions.
+   */
   private async commit(): Promise<void> {
     if (await this.hasHead()) {
-      await this.git(['commit', '--amend', '--no-edit', '--allow-empty']);
+      await this.git(['commit', '--amend', '--no-edit', '--allow-empty', '--no-verify']);
     } else {
-      await this.git(['commit', '-m', 'interactive-review baselines']);
+      await this.git(['commit', '-m', 'interactive-review baselines', '--no-verify']);
     }
   }
 
@@ -393,7 +458,31 @@ export class BaselineGit {
     await this.initGit();
     const rel = normalizePath(path.relative(this.workTree, filePath));
     try {
-      return await this.git(['show', `:${rel}`]);
+      // `cat-file blob`, NOT `show`. This method's whole contract is "undefined means not
+      // tracked", and it relies on git FAILING for a path with no index entry. `git show`
+      // does not reliably fail: when `:<path>` does not resolve as an object, show falls
+      // back to reading the argument as a *pathspec*, and git accepts any argument
+      // containing glob characters as a pathspec without it having to match anything.
+      //
+      // So for an untracked `x[1].txt`, `git show :x[1].txt` exited 0. Before
+      // GIT_LITERAL_PATHSPECS it printed the HEAD commit — a commit header and diff
+      // returned as if it were the file's baseline. With literal pathspecs it printed
+      // nothing, which callers read as "tracked, and the file was empty". Both routed an
+      // untracked file down the tracked-file path. Plain names were never affected, which
+      // is why nothing caught it; the pathspec regression test exposed it.
+      //
+      // `cat-file` is plumbing that takes an object name and never falls back to a
+      // pathspec, and `blob` asserts the type. It returns the raw bytes with no porcelain
+      // processing in between.
+      //
+      // The explicit stage number is load-bearing. `:<path>` is itself ambiguous: git reads
+      // `:<n>:<rest>` as "stage n of <rest>", so a root file named `1:notes.txt` was looked
+      // up as stage 1 of `notes.txt` and reported untracked. `:0:<path>` pins stage 0 — the
+      // only stage this repo ever writes — so the path is never reparsed. (An earlier
+      // version of this comment claimed `cat-file` could never reinterpret its argument;
+      // that was true of pathspecs and false of this. Pinned by
+      // baselineGitHardening.test.ts.)
+      return await this.git(['cat-file', 'blob', `:0:${rel}`]);
     } catch {
       return undefined;
     }

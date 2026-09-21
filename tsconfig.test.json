@@ -24,10 +24,10 @@
   "include": [
     "src/test/**/*.ts",
     "src/diffEngine.ts",
+    "src/hunkApply.ts",
     "src/diffSettings.ts",
     "src/log.ts",
     "src/baselineGit.ts",
-    "src/gitignoreManager.ts",
     "src/pathNormalize.ts"
   ],
   "exclude": [

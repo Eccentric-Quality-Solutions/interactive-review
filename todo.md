@@ -16,42 +16,9 @@ re-verified against the current tree, not carried over from the investigation.
 Ordered by value, and the order is the recommendation — do them top-down, stop wherever the
 returns stop being worth it.
 
-## A. Baseline provider serves `''` after the last accept — whole file flashes green
-
-**Do first.** ~5 lines, fires on *every completed file review*.
-
-`finishBaselineAdvance` calls `exitReviewing` when zero hunks remain, which deletes the
-state entry ([stateManager.ts](src/stateManager.ts)). The content provider then returns
-`fileState?.baseline ?? ''` ([extension.ts:31](src/extension.ts#L31)) — an empty left side.
-And `fireBaselineChange` runs on the very next statement in the accept callback
-([extension.ts:218](src/extension.ts#L218): `onStateChanged(); fireBaselineChange(filePath); walkAfterResolve(filePath)`),
-so the diff repaints the entire file as one added block while the async `closeStaleTabs`
-is still catching up.
-
-This is a real contributor to the "sometimes it highlights the entire file" report, and
-unlike the EOL cause it is on the happy path.
-
-**Fix:** no-op `fireBaselineChange` when the file is no longer reviewing, and fire once at
-the top of `openDiffEditor`. The second half covers `enterReviewing`, `rebuildState`/Refresh,
-`clearHunksOnBranchSwitch` and the adopt paths in one stroke, since every diff opens through
-there — today `fireBaselineChange` is called only from the five accept paths, so a diff
-reopened after any of those paints against stale cached content.
-
-## B. CodeLens anchoring and titles
-
-**Do second.** ~5 lines, one file, no test asserts a lens range.
-
-- [diffCodeLens.ts:43](src/diffCodeLens.ts#L43) anchors at `newStart - 1 + newLines` — the
-  line *after* the hunk — and a lens renders *above* its anchor, so with short gaps the
-  buttons float between two changed blocks, visually attached to the block below while
-  acting on the block above. Anchor to the hunk's first line instead.
-- [diffCodeLens.ts:50](src/diffCodeLens.ts#L50) is literally `'$(check) Accept'`. Add the
-  extent: `Accept +3/-4`, mirroring the wording the panel already uses at
-  [panel.js:653-655](media/panel.js#L653-L655).
-
 ## C. Multi-hunk selection accept/reject
 
-**Do third.** ~30-40 lines, command layer only, no differ change.
+**Do first.** ~30-40 lines, command layer only, no differ change.
 
 [commands.ts:497-504](src/commands.ts#L497-L504) already computes the set of hunks a
 selection spans, then deliberately acts on one and logs the overreach. Iterate the set
@@ -60,7 +27,7 @@ coalescing idea below — without touching hunk arithmetic.
 
 ## D. `acceptHunk` folds the buffer; `acceptFileByPath` folds disk
 
-**Do fourth.** 3-line guard now, proper fix later.
+**Do second.** 3-line guard now, proper fix later.
 
 `acceptHunk` folds `doc.getText()` into the baseline while `acceptFileByPath` folds
 `fs.readFileSync`. Accept with a dirty buffer and the baseline holds text never written to
@@ -73,19 +40,6 @@ diff *is* the real editor.
 
 **Fix now:** refuse on `doc.isDirty` with a warning. **Fix properly later:** `await doc.save()`
 before folding, which makes `acceptHunk` async and ripples to four call sites.
-
-## E. Stale hunk ids fail silently
-
-**Do fifth, cheap version only.**
-
-`hunkId` is position-derived, so ids go stale after every accept. Both lens paths hit
-`if (!hunk) { log(...); return; }` and return with no user feedback. Narrower than it first
-appeared — `onStateChanged` fires the lens provider synchronously, so the window is one
-repaint — but it is exactly the window that widens on a slow VM, which matches the reported
-"Accept/Discard showing up much more slowly".
-
-**Fix:** one `showWarningMessage` at the two lens entry points. Not all five silent returns,
-and do not attempt re-resolution by position — that is a semantic change.
 
 ## F. `git pull` mid-review floods the queue
 
@@ -201,7 +155,6 @@ If it *stays*, give it assertions — it currently only checks that it ran.
 
 we need to confirm accept/discard big buttons that do all files at once
 it seem,s like sometimes it is grabbing bigger chunks of code
-It shows @line x even when its a multiline change
 Accept/Discard showing up seems to be occurring much more slowly (possibly because the repo I'm workign in is on a VM?)
 if edits overlap each other, we should have an option that allows one to show a single edit at a time
 interactive review doesn't show the number of fiules in (x) like say problems or ports do

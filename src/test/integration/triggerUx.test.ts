@@ -147,16 +147,46 @@ suite('interactive-review trigger UX', function () {
    * between the watcher and that tracker.
    */
 
-  test('begin review is idempotent enough to be called on an already-open session', async () => {
+  test('a Begin review issued while another is still running waits for it', async () => {
+    // The agent contract is that Begin review resolves only once the baseline is on disk.
+    // The "session already open" guard broke that for concurrent callers: `setEnabled`
+    // flips `enabled` synchronously before its first await, so a second Begin arriving
+    // mid-snapshot saw an open session and returned immediately, with nothing baselined
+    // yet. Two agents, or an agent and the panel button, are enough to reach it.
     const root = getWorkspaceRoot();
-    writeFileExternally(path.join(root, 'twice.txt'), 'v1\n');
+    writeFileExternally(path.join(root, 'concurrent.txt'), 'pre-existing\n');
+
+    const first = vscode.commands.executeCommand('interactiveReview.beginReview');
+    const second = vscode.commands.executeCommand('interactiveReview.beginReview');
+
+    await second;
+    assert.strictEqual(gitGetBaseline(root, 'concurrent.txt'), 'pre-existing\n',
+      'the second caller must not resolve before the baseline exists');
+    await first;
+  });
+
+  test('begin review on an already-open session keeps the pending review intact', async () => {
+    const root = getWorkspaceRoot();
+    const file = path.join(root, 'twice.txt');
+    writeFileExternally(file, 'v1\n');
     await vscode.commands.executeCommand('interactiveReview.beginReview');
 
+    // The edit between the two begins is the whole point of this test, and its absence is
+    // why the previous version could not fail. A second begin used to re-snapshot every
+    // file, overwriting each baseline with current disk content — so the only observable
+    // damage is to a file that has *changed* since the first begin. With nothing changed,
+    // the re-snapshot rewrote 'v1' with 'v1' and the assertion passed on the broken code.
+    writeFileExternally(file, 'v2\n');
+    await waitForReviewing(file);
+
     // An agent may not know whether a session is already open; a second begin must not
-    // throw or wedge the extension.
+    // throw, wedge the extension, or discard review the user has not dispositioned.
     await vscode.commands.executeCommand('interactiveReview.beginReview');
 
     assert.strictEqual(getStateManager().enabled, true, 'session should still be open');
-    assert.strictEqual(gitGetBaseline(root, 'twice.txt'), 'v1\n', 'baseline should survive');
+    assert.strictEqual(gitGetBaseline(root, 'twice.txt'), 'v1\n',
+      'the original baseline must survive — a re-snapshot would have replaced it with v2');
+    assert.strictEqual(getStateManager().getFile(file)?.status, 'reviewing',
+      'the pending edit must still be in the queue');
   });
 });

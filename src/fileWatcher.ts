@@ -559,20 +559,22 @@ export class FileWatcher {
 
     if (this.pendingUserDeletes.has(filePath)) {
       // User-initiated delete (explorer / VSCode API) — treat as manual, remove baseline.
-      // Always go through stateManager.removeFile so git ops are serialized via gitQueue.
+      // Always go through the state manager so git ops are serialized via gitQueue.
+      //
+      // `removePathAndChildren` rather than `removeFile` plus a loop over in-memory state:
+      // the path may be a directory, in which case git removes nothing for it and every
+      // tracked file underneath keeps its baseline. Files under that directory that were
+      // never edited are not in `state` at all, so only a pass over the tracked list finds
+      // them. See the method's own note for what that left behind.
       this.pendingUserDeletes.delete(filePath);
-      log(`onDiskDelete(${basename}): user delete, removeFile`);
-      this.stateManager.removeFile(filePath);
-      // Also clean up child files when a directory is deleted via VSCode
-      const dirPrefix = filePath + path.sep;
-      let needsRefresh = !!fileState;
-      for (const [childPath] of this.stateManager.getAllFiles()) {
-        if (childPath.startsWith(dirPrefix)) {
-          this.stateManager.removeFile(childPath);
-          needsRefresh = true;
-        }
-      }
-      if (needsRefresh) {
+      log(`onDiskDelete(${basename}): user delete, removing path and any children`);
+      const hadChildren = Array.from(this.stateManager.getAllFiles().keys())
+        .some(childPath => childPath.startsWith(filePath + path.sep));
+      this.stateManager.removePathAndChildren(filePath);
+      if (fileState || hadChildren) {
+        // These entries have left review, so their diff tabs are now stale — the same
+        // sweep the other two exits from this handler already perform.
+        this.onFileLeftReview?.();
         this.onStateChanged();
       }
       return;
