@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import {
   getWorkspaceRoot, gitGetBaseline,
   sleep, waitForCondition, waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
+  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher, settle,
 } from './helpers';
 import { acceptFileByPath, discardAllFiles } from '../../commands';
 
@@ -152,7 +152,7 @@ suite('interactive-review pre-existing files survive review', function () {
     await waitForReviewing(png);
 
     acceptFileByPath(getStateManager(), png, () => {});
-    await sleep(500);
+    await settle();
 
     const stored = gitGetBaseline(root, 'new-asset.png');
     assert.strictEqual(stored, undefined, 'accepting a binary stored a decoded baseline');

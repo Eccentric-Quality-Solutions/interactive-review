@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { StateManager } from '../stateManager';
 import { computeHunks } from '../diffEngine';
-import { acceptHunkBaseline } from '../hunkApply';
+import { acceptHunkBaseline, discardHunkText } from '../hunkApply';
 import { FileState } from '../types';
 import { log } from '../log';
 import { makeRng, randomLines } from './generators';
@@ -190,8 +190,30 @@ function discardFile(fp: string): void {
   } else if (st.baseline !== null) {
     writeDisk(fp, st.baseline);
   }
-  if (st.baseline === null) sm.removeFile(fp);
+  if (st.baseline === null && st.nullReason === 'created') sm.removeFile(fp);
+  else if (st.baseline === null) acceptFile(fp);
   else sm.exitReviewing(fp);
+}
+
+/**
+ * `discardHunk` + `applyEditAndAdvance`, with the buffer equal to disk (no BOM). The edit is
+ * the extension's own, so no event handler runs. An unbaselined file is resolved whole, as
+ * `keepsUnbaselinedFile` does.
+ */
+function discardOneHunk(fp: string, rnd: () => number): void {
+  const st = sm.getFile(fp);
+  const content = readDisk(fp);
+  if (!st || content === undefined) return;
+  if (st.baseline === null && st.nullReason !== 'created') { discardFile(fp); return; }
+  const hunks = computeHunks(st.baseline, content);
+  if (hunks.length === 0) return;
+  const hunk = hunks[Math.floor(rnd() * hunks.length)];
+  const next = discardHunkText(st.baseline ?? '', content, hunk);
+  writeDisk(fp, next);
+  if (computeHunks(st.baseline, next).length === 0) {
+    if (st.baseline === null) fs.rmSync(fp, { force: true });
+    sm.exitReviewing(fp);
+  }
 }
 
 /** `runBeginReview`, minus the snapshot-window plumbing. */
@@ -250,9 +272,16 @@ function pickOp(rnd: () => number): Op {
     const text = randomText(rnd);
     return { name: `save-in-editor ${rel(existing)}`, run: async () => { writeDisk(existing, text); await onDiskChange(existing, true); } };
   }
-  if (r < 0.40 && !fs.existsSync(anyFile)) {
+  if (r < 0.36 && !fs.existsSync(anyFile)) {
     const text = randomText(rnd);
     return { name: `create ${rel(anyFile)}`, run: async () => { writeDisk(anyFile, text); await onDiskCreate(anyFile); } };
+  }
+  if (r < 0.40 && !fs.existsSync(anyFile)) {
+    // A create the watcher missed, surfacing only as a change: the ADR-0012 path, and the
+    // way a text file becomes `nullReason: 'unbaselined'`. Without it the generator never
+    // produces that population, and every defect it has had lived there.
+    const text = randomText(rnd);
+    return { name: `missed-create ${rel(anyFile)}`, run: async () => { writeDisk(anyFile, text); await onDiskChange(anyFile, false); } };
   }
   if (r < 0.48 && existing) {
     return { name: `external-delete ${rel(existing)}`, run: async () => { fs.rmSync(existing); await onExternalDelete(existing); } };
@@ -283,11 +312,27 @@ function pickOp(rnd: () => number): Op {
   }
   if (r < 0.74 && inQueue) return { name: `accept-file ${rel(inQueue)}`, run: async () => acceptFile(inQueue) };
   if (r < 0.84 && inQueue) return { name: `accept-hunk ${rel(inQueue)}`, run: async () => acceptOneHunk(inQueue, rnd) };
-  if (r < 0.91 && inQueue) return { name: `discard-file ${rel(inQueue)}`, run: async () => discardFile(inQueue) };
-  if (r < 0.95) {
+  if (r < 0.88 && inQueue) return { name: `discard-file ${rel(inQueue)}`, run: async () => discardFile(inQueue) };
+  if (r < 0.91 && inQueue) return { name: `discard-hunk ${rel(inQueue)}`, run: async () => discardOneHunk(inQueue, rnd) };
+  if (r < 0.93) {
     // A second Begin review on an open session is refused by `enableReview`; this is the
     // End-then-Begin cycle, which must leave an empty queue that a reload agrees with.
     return { name: 'end+begin review', run: async () => { await sm.setEnabled(false); await beginReview(); } };
+  }
+  if (r < 0.97) {
+    // `interactiveReview.refresh`. A Refresh re-derives the queue from git and disk, so it
+    // must be a no-op on a correct queue. Asserted here rather than left to the next reload
+    // check, because a Refresh that *changed* memory would also make that check pass: it
+    // would have overwritten the wrong answer with git's.
+    return {
+      name: 'refresh',
+      run: async () => {
+        await sm.flush();
+        const before = queueOf(sm);
+        await sm.rebuildState(ignore);
+        assert.deepEqual(queueOf(sm), before, 'Refresh changed the review queue');
+      },
+    };
   }
   return { name: 'window reload', run: async () => { sm = await assertReloadEqualsMemory('at a window reload'); } };
 }
@@ -305,7 +350,12 @@ describe('reload equals memory', () => {
         trail.push(op.name);
         // Interleaved with StateManager's own lines under INTERACTIVE_REVIEW_LOG_FILE.
         log(`[reload-equals-memory seed ${seed}] step ${step}: ${op.name}`);
-        await op.run();
+        try {
+          await op.run();
+        } catch (err) {
+          if (err instanceof assert.AssertionError) err.message += `\n  after: ${trail.join(' → ')}`;
+          throw err;
+        }
         if (step % 5 === 4) await assertReloadEqualsMemory(`after: ${trail.join(' → ')}`);
       }
       await assertReloadEqualsMemory(`after: ${trail.join(' → ')}`);
@@ -395,6 +445,23 @@ describe('reload equals memory — pinned sequences', () => {
 
     assert.equal(sm.getAllFiles().size, 0, 'an ended session holds no review entries');
     assertNoErrorsReported('after End review');
+  });
+
+  // Found by this property (seed 114, once `missed-create` existed). Discard leaves an
+  // unbaselined file on disk and dropped only its entry, so nothing a rescan reads said it
+  // had been dealt with, and the next Refresh or window reload queued it again.
+  it('discarding an unbaselined file keeps it out of the queue after a reload', async () => {
+    writeDisk(abs('a.txt'), 'a\n');
+    await beginReview();
+    writeDisk(abs('g.txt'), 'the watcher missed this create\n');
+    await onDiskChange(abs('g.txt'), false);
+    assert.equal(sm.getFile(abs('g.txt'))?.nullReason, 'unbaselined');
+
+    discardFile(abs('g.txt'));
+
+    assert.equal(readDisk(abs('g.txt')), 'the watcher missed this create\n', 'Discard keeps an unbaselined file');
+    await assertReloadEqualsMemory('after discarding an unbaselined file');
+    assert.equal(sm.getAllFiles().size, 0);
   });
 
   it('a renamed file keeps its pending review across a reload', async () => {

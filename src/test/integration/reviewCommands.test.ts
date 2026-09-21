@@ -5,7 +5,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline, sleep, waitForCondition,
   waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager, openWithSelection,
+  writeFileExternally, cleanWorkspace, getStateManager, openWithSelection, settle,
 } from './helpers';
 
 /** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
@@ -183,7 +183,7 @@ suite('interactive-review keyboard commands', function () {
     // No reviewing target → command resolves nothing and must not mutate.
     await vscode.commands.executeCommand('interactiveReview.acceptHunk');
     await vscode.commands.executeCommand('interactiveReview.rejectHunk');
-    await sleep(200);
+    await settle();
 
     assert.strictEqual(fs.readFileSync(plain, 'utf-8'), before, 'no mutation on a non-reviewing file');
     assert.strictEqual(getStateManager().getFile(plain)?.status, undefined, 'plain never entered reviewing');

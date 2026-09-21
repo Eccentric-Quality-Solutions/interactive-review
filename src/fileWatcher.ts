@@ -859,6 +859,27 @@ export class FileWatcher {
     this.onStateChanged();
   }
 
+  /**
+   * Resolves once nothing this watcher has received is still being handled: no disk-event
+   * handler queued or running, no typing debounce pending, and the baseline writes they
+   * queued drained. For integration tests, ahead of a negative assertion ("was not
+   * queued"), where a fixed sleep passes whenever the extension is merely late and so can
+   * pass on broken code.
+   *
+   * It cannot see an event the OS has not delivered yet. When the assertion is about a disk
+   * event, pair it with a canary — `settle({ canary: true })` in the integration helpers.
+   */
+  async whenIdle(): Promise<void> {
+    for (;;) {
+      if (this.perPath.activeKeys === 0 && this.debounceTimers.size === 0) {
+        // Every handler writes before it finishes, so its writes are queued by now.
+        await this.stateManager.flush();
+        if (this.perPath.activeKeys === 0 && this.debounceTimers.size === 0) return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+
   dispose(): void {
     for (const timer of this.debounceTimers.values()) {
       clearTimeout(timer);

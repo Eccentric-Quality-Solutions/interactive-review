@@ -6,7 +6,7 @@ import { execSync } from 'child_process';
 import {
   getWorkspaceRoot, baselineGitEnv, gitListTracked, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
-  writeFileExternally, writeFileViaVSCode, cleanWorkspace, getStateManager,
+  writeFileExternally, writeFileViaVSCode, cleanWorkspace, getStateManager, settle,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -313,7 +313,7 @@ suite('interactive-review ignore/gitignore integration', function () {
 
     // Now externally write a NEW file in the ignored dir.
     writeFileExternally(path.join(root, 'tmpdir', 'new.txt'), 'new content\n');
-    await sleep(500);
+    await settle({ canary: true });
 
     const tracked2 = gitListTracked(root);
     assert.ok(!tracked2.includes('tmpdir/new.txt'),
@@ -348,7 +348,7 @@ suite('interactive-review ignore/gitignore integration', function () {
       path.join(root, '.vscode-test', 'user-data', 'TransportSecurity'),
       'transport data\n'
     );
-    await sleep(500);
+    await settle({ canary: true });
 
     // Verify: none of these files should appear in interactive-review git
     const tracked = gitListTracked(root);

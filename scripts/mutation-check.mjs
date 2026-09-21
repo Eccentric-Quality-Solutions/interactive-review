@@ -363,6 +363,15 @@ const MUTATIONS = [
     ],
     test: "stateManagerGit.test.js",
   },
+  {
+    desc: "a file unreadable at Begin review is adopted as deletable once readable",
+    file: "src/stateManager.ts",
+    edits: [
+      ["        unreadable.push(filePath);\n",
+       ""],
+    ],
+    test: "stateManagerGit.test.js",
+  },
 ];
 
 // The file currently holding a mutation, so a signal or crash can put it back.

@@ -128,6 +128,29 @@ export async function waitForWatcher(fn: () => boolean, timeoutMs = 15000): Prom
   await waitForCondition(fn, timeoutMs);
 }
 
+let canaries = 0;
+
+/**
+ * Wait for the extension to finish what it has been given, before a negative assertion
+ * ("not queued", "not tracked"). A fixed sleep there passes whenever the event is late, so
+ * it can pass on broken code; see docs/test-strategy.md.
+ *
+ * `FileWatcher.whenIdle` only knows about events that have *arrived*. When the assertion is
+ * about a disk event, pass `canary: true`: it writes a file the watcher must queue and waits
+ * for that, so the events written before it have been delivered (the watcher reports them
+ * in order), then removes it again. Needs an active review session.
+ */
+export async function settle(opts: { canary?: boolean } = {}): Promise<void> {
+  if (opts.canary) {
+    const canary = path.join(getWorkspaceRoot(), `settle-canary-${++canaries}.txt`);
+    writeFileExternally(canary, 'canary\n');
+    await waitForWatcher(() => getStateManager()?.getFile(canary) !== undefined);
+    fs.unlinkSync(canary);
+    await waitForWatcher(() => getStateManager()?.getFile(canary) === undefined);
+  }
+  await getFileWatcher().whenIdle();
+}
+
 export async function enableReview(): Promise<void> {
   await vscode.commands.executeCommand('interactiveReview.beginReview');
   const root = getWorkspaceRoot();

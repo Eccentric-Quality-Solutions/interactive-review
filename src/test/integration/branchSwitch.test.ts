@@ -5,7 +5,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager,
+  writeFileExternally, cleanWorkspace, getStateManager, settle,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
 
     // Now clear hunks
     await vscode.commands.executeCommand('interactiveReview.clearHunks');
-    await sleep(500);
+    await settle();
 
     // doomed.txt should be removed from git tracking (file doesn't exist)
     const tracked = gitListTracked(root);

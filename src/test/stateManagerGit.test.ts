@@ -353,6 +353,48 @@ describe('StateManager.load keeps each null baseline\'s nullReason across a wind
   });
 });
 
+describe('StateManager: a file unreadable at Begin review', () => {
+  const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
+  // chmod does not stop root reading, so the setup cannot produce an unreadable file there.
+  const asRoot = process.getuid?.() === 0;
+
+  // Defect: the snapshot skipped the unreadable file silently, so nothing recorded that it
+  // predates the session. Once readable, a rescan saw text with no blob and adopted it as
+  // 'created': a Refresh or a window reload put the user's own file in the queue as one
+  // Discard deletes, while memory had no entry at all. Found by the reload property's
+  // Refresh step, reasoning about what the generator could not yet reach.
+  async function beginWithUnreadable(): Promise<string> {
+    const file = path.join(root, 'root-owned.txt');
+    writeFile(file, 'the user\'s content\n');
+    fs.chmodSync(file, 0);
+    try {
+      await sm.snapshotWorkspace(ignore);
+    } finally {
+      fs.chmodSync(file, 0o644);
+    }
+    await sm.flush();
+    return file;
+  }
+
+  it('is never adopted as deletable by a Refresh', { skip: asRoot }, async () => {
+    const file = await beginWithUnreadable();
+
+    await sm.rebuildState(ignore);
+
+    assert.notEqual(sm.getFile(file)?.nullReason, 'created',
+      'a file the user had before Begin review must not become one Discard deletes');
+  });
+
+  it('is never adopted as deletable by a window reload', { skip: asRoot }, async () => {
+    const file = await beginWithUnreadable();
+
+    const fresh = new StateManager();
+    await fresh.load(ignore);
+
+    assert.notEqual(fresh.getFile(file)?.nullReason, 'created');
+  });
+});
+
 describe('StateManager.renameFile onto a pending deletion', () => {
   const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
 

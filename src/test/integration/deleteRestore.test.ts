@@ -6,7 +6,8 @@ import {
   sleep, waitForCondition, waitForConditionNudged, waitForReviewing, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
-import { discardAllFiles, discardFileByPath } from '../../commands';
+import { discardAllFiles, discardFileByPath, discardHunk, rejectSelection } from '../../commands';
+import { computeHunks, hunkId } from '../../diffEngine';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
@@ -297,6 +298,87 @@ suite('interactive-review delete & restore integration', function () {
     await waitForCondition(() => gitGetBaseline(root, rel) === 'accepted content\n', 5000);
     assert.strictEqual(gitGetBaseline(root, rel), 'accepted content\n');
   });
+
+  // Defect: Discard left an unbaselined file on disk (correctly) but only dropped its entry,
+  // so nothing a rescan reads said it had been dealt with and the next Refresh queued it
+  // again. The unit property (`reloadEqualsMemory.test.ts`) found it through its mirror of
+  // this command; this drives the real one.
+  test('discarding an unbaselined file keeps it on disk and out of the queue after a Refresh', async () => {
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'unbaselined.txt');
+    await enableReview();
+    const sm = getStateManager();
+    const fw = getFileWatcher();
+
+    writeFileExternally(filePath, 'the user\'s content\n');
+    await waitForReviewing(filePath);
+    // However the watcher classified it, make it the population under test: a file with no
+    // baseline and no evidence it is new, such as a create the watcher missed.
+    sm.setFile(filePath, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+
+    await discardFileByPath(sm, fw, filePath, () => {});
+    assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), 'the user\'s content\n', 'Discard keeps an unbaselined file');
+    assert.strictEqual(sm.getFile(filePath), undefined, 'and takes it out of the queue');
+
+    await sm.rebuildState((fp: string, isDir?: boolean) => fw.shouldIgnore(fp, isDir));
+    assert.strictEqual(sm.getFile(filePath), undefined, 'a Refresh must not queue it again');
+  });
+
+  // Discarding an unbaselined file reads it to record a baseline. An unreadable one must not
+  // make Discard throw: CodeLens and keyboard callers do not await it, so the error went
+  // unhandled and the file stayed queued.
+  test('discarding an unreadable unbaselined file drops it without throwing', async function () {
+    if (process.getuid?.() === 0) this.skip();  // chmod does not stop root reading
+    const root = getWorkspaceRoot();
+    const filePath = path.join(root, 'unreadable-unbaselined.txt');
+    await enableReview();
+    const sm = getStateManager();
+    const fw = getFileWatcher();
+
+    writeFileExternally(filePath, 'the user\'s content\n');
+    await waitForReviewing(filePath);
+    sm.setFile(filePath, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    fs.chmodSync(filePath, 0);
+    try {
+      await discardFileByPath(sm, fw, filePath, () => {});
+    } finally {
+      fs.chmodSync(filePath, 0o644);
+    }
+
+    assert.strictEqual(sm.getFile(filePath), undefined, 'the entry is dropped');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), 'the user\'s content\n', 'and the file is untouched');
+  });
+
+  // Defect (todo.md item G): hunk-level Discard read the missing baseline as '', so
+  // discarding the one whole-file hunk of an unbaselined file saved it empty, and rejecting
+  // selected lines deleted them. That is the user's own content: the file predates the
+  // session. Both now resolve the file the way file-level Discard does.
+  for (const how of ['discarding the hunk', 'rejecting selected lines'] as const) {
+    test(`${how} of an unbaselined file keeps its content and keeps it out of the queue`, async () => {
+      const root = getWorkspaceRoot();
+      const filePath = path.join(root, 'unbaselined-hunk.txt');
+      const content = 'line one\nline two\nline three\n';
+      await enableReview();
+      const sm = getStateManager();
+      const fw = getFileWatcher();
+
+      writeFileExternally(filePath, content);
+      await waitForReviewing(filePath);
+      sm.setFile(filePath, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+
+      if (how === 'discarding the hunk') {
+        const hunks = computeHunks(null, content);
+        await discardHunk(sm, fw, filePath, hunkId(hunks[0]), () => {});
+      } else {
+        await rejectSelection(sm, fw, filePath, 1, 1, () => {});
+      }
+
+      assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), content, 'the user\'s content is untouched');
+      assert.strictEqual(sm.getFile(filePath), undefined, 'and the file has left the queue');
+      await sm.rebuildState((fp: string, isDir?: boolean) => fw.shouldIgnore(fp, isDir));
+      assert.strictEqual(sm.getFile(filePath), undefined, 'a Refresh must not queue it again');
+    });
+  }
 
   test('state and git baseline are consistent after operations', async () => {
     const root = getWorkspaceRoot();

@@ -4,7 +4,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, sleep,
   waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager, getReviewPanel,
+  writeFileExternally, cleanWorkspace, getStateManager, getReviewPanel, settle,
 } from './helpers';
 import { acceptFileByPath } from '../../commands';
 
@@ -143,7 +143,7 @@ suite('interactive-review cross-file advance', function () {
 
     // Must not throw on the nonexistent file, and must not stop there.
     await panel.advanceToNextFile(a);
-    await sleep(200);
+    await settle();
 
     assert.strictEqual(sm.getFile(ghost), undefined, 'the vanished entry is reconciled away');
     assert.strictEqual(

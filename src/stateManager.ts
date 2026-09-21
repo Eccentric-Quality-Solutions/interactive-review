@@ -220,6 +220,15 @@ export class StateManager {
    * neither must abort the batch, and neither has content that means anything as a
    * baseline.
    *
+   * An unreadable file is recorded as `'unbaselined'` on the way out. It predates the
+   * session, but once it becomes readable a rescan sees readable text with no blob, which
+   * `adoptedNullReason` otherwise reads as a new file that Discard deletes. Guarded by
+   * `stateManagerGit.test.ts` ("a file unreadable at Begin review"). A file deleted between
+   * the listing and the read is recorded too. It did predate the session, so that is the
+   * safe direction; the cost is that Discard keeps, rather than deletes, a file an agent
+   * recreates there unseen. Deliberately left: the window is milliseconds and it cannot be
+   * tested deterministically.
+   *
    * The binary case needs an explicit test rather than the failed read this comment used
    * to claim. `fs.readFile(path, 'utf-8')` does not throw on binary input — it returns
    * replacement characters — so the old form baselined binaries as mush that a later
@@ -227,6 +236,7 @@ export class StateManager {
    */
   private async readBatch(filePaths: string[]): Promise<{ filePath: string; content: string }[]> {
     const batch: { filePath: string; content: string }[] = [];
+    const unreadable: string[] = [];
     await Promise.all(filePaths.map(async filePath => {
       try {
         const content = await readTextFile(filePath);
@@ -237,8 +247,15 @@ export class StateManager {
         batch.push({ filePath, content });
       } catch {
         // Unreadable (permissions, transient race) — see method doc.
+        unreadable.push(filePath);
       }
     }));
+    const fresh = unreadable.filter(fp => !this.sessionUnbaselined.has(fp));
+    if (fresh.length > 0) {
+      log(`readBatch: ${fresh.length} unreadable file(s) recorded as unbaselined`);
+      for (const fp of fresh) this.sessionUnbaselined.add(fp);
+      this.saveUnbaselined();
+    }
     return batch;
   }
 

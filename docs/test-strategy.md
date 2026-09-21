@@ -99,16 +99,25 @@ any of them, check its mutation in `scripts/mutation-check.mjs`.
 | A branch switch forgets the saved record too | `stateManagerGit.test.ts` | a reload restoring what memory forgot |
 | A rewritten hunk at the same position gets a new id | `diffEngine.test.ts` | a stale click accepting text the user never saw |
 | Renaming onto a pending deletion or over a file: the source wins, and Discard keeps an unbaselined source | `reloadEqualsMemory.test.ts` + `stateManagerGit.test.ts` | memory and a reload disagreeing on the target |
+| A Refresh leaves a correct queue unchanged | `reloadEqualsMemory.test.ts` (every `refresh` step) | a Refresh overwriting a wrong memory, hiding it from the reload check |
+| A file unreadable at Begin review is never adopted as deletable | `stateManagerGit.test.ts` | the user's file becoming one Discard deletes after a Refresh or reload |
+| Discarding an unbaselined file keeps it out of the queue | `reloadEqualsMemory.test.ts` + `deleteRestore.test.ts` (integration) | the file coming back on the next Refresh or reload |
+| Discarding a hunk or rejecting lines of an unbaselined file keeps its content | `deleteRestore.test.ts` (integration) | the user's own file saved empty, or lines of it deleted |
+| Discarding an unreadable unbaselined file drops it without throwing | `deleteRestore.test.ts` (integration) | an unhandled rejection from a CodeLens Discard, file left queued |
 
-The four integration guards are not in the mutation script; they were verified by hand.
+The seven integration guards are not in the mutation script; they were verified by hand.
 
 **Limits of the reload property.** [`reloadEqualsMemory.test.ts`](../src/test/reloadEqualsMemory.test.ts)
 mirrors `FileWatcher` and `commands.ts` at the StateManager boundary, so a change to either
 needs its mirror updated. It cannot reach defects in which text the command layer passes
-(such as `todo.md` item D, dirty-buffer accept), because that layer is not modelled.
-Nor does its generator ever produce an `'unbaselined'` entry: a change event only reaches
-files that already have a baseline or a state entry. A green sweep says nothing about that
-population; `stateManagerGit.test.ts` covers it across a Refresh and a reload.
+(such as `todo.md` item D, dirty-buffer accept), because that layer is not modelled, and
+a defect in `commands.ts` that the mirror copies faithfully passes it. Such a fix needs an
+integration test as well, as the Discard fix below has.
+
+Its `'unbaselined'` entries come only from a `missed-create` step, a create delivered as a
+change alone. The other source, a file unreadable at Begin review, needs `chmod` in the
+setup and is covered in `stateManagerGit.test.ts` instead. Neither the step nor a `refresh`
+step existed until 2026-09-21; adding them found the Discard defect on the first sweep.
 
 The property generators live in [`src/test/generators.ts`](../src/test/generators.ts) and
 cover the shapes that have actually broken: independent line endings and final newlines per
@@ -151,20 +160,36 @@ new generators at least that adversarial.
   own classification has to survive in a set beside the state, in both directions:
   `sessionCreated` so agent output stays deletable, `sessionUnbaselined` so the user's
   files do not become deletable.
+- **A rescan can hide the bug it should reveal.** A Refresh rebuilds memory from git, so
+  a Refresh between a defect and the next reload check makes memory and git agree again.
+  The `refresh` step therefore asserts that a Refresh changes nothing, rather than relying
+  on the reload check after it.
+- **If nothing can be restored, Discard means Accept.** Discard on an unbaselined file keeps
+  the bytes, which is what Accept does, and it has to record that the same way, with a
+  blob. Dropping only the entry leaves nothing a rescan can read. The same holds for every
+  discard path: hunk-level Discard treated the missing baseline as `''` and saved the
+  user's file empty. A null baseline is "unknown", never "empty".
 - **A partial operation may increase the hunk count.** Accepting a line from the middle of
   a replace hunk legitimately splits it. Assert on pending work instead: additions drop by
   at least the number selected, removals never rise. Recorded so nobody re-proposes the
   false invariant.
 
-## Open test work
+## Waiting in integration tests
 
-- **A `whenIdle()` test hook** for the watcher, so integration tests wait for the extension
-  to settle rather than polling. The brand-new-external-file tests use `waitForWatcher`, a
-  plain wait, not `waitForConditionNudged`; keep it that way.
-- **Replace fixed sleeps before negative assertions** ("not queued") with waits on events.
-  A sleep before a positive assertion fails when the machine is slow; wait on the condition
-  instead. A sleep before a negative one passes when the event is late, so it can pass on
-  broken code; that needs `whenIdle()`.
+- **Before a positive assertion, wait on the condition.** A sleep there fails when the
+  machine is slow, and CI says so. About 80 remain; convert one when it flakes or when its
+  test is edited anyway, not in a sweep. The brand-new-external-file tests use
+  `waitForWatcher`, a plain wait, not `waitForConditionNudged`; keep it that way.
+- **Before a negative assertion ("not queued", "not tracked"), call `settle()`** from the
+  integration helpers. A sleep there passes when the event is late, so it can pass on
+  broken code. `settle()` waits on `FileWatcher.whenIdle()`: no handler queued or running,
+  no debounce pending, baseline writes drained.
+- **When the negative is about a disk event, use `settle({ canary: true })`.** `whenIdle()`
+  cannot see an event the OS has not delivered yet, and on an inotify-starved machine
+  "idle" often means exactly that. The canary is a file the watcher must queue, written
+  after the one under test. Once it is queued, the earlier events have arrived. This
+  assumes the watcher reports events in order, which is inotify's behaviour; the
+  assertion is "a later thing happened, and the earlier thing still did not".
 
 ## Open design questions
 
@@ -209,5 +234,5 @@ is a real bug. One that fails only here, and fails a different test on the next 
 starvation. Never call a failure environmental without that evidence.
 
 The first CI run did find one real test defect: a fixed 300 ms sleep before an assertion,
-which the runner took 1.8 s to satisfy. That is the fixed-sleep problem under "Open test
-work", failing loudly instead of silently.
+which the runner took 1.8 s to satisfy. That is the fixed-sleep problem under "Waiting in
+integration tests", failing loudly instead of silently.

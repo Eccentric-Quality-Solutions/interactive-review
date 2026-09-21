@@ -5,7 +5,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace,
+  writeFileExternally, cleanWorkspace, settle,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ suite('interactive-review lifecycle integration', function () {
     await enableReview();
 
     await waitForCondition(() => gitListTracked(root).includes('normal.txt'), 5000);
-    await sleep(300);
+    await settle();
 
     const tracked = gitListTracked(root);
     assert.ok(tracked.includes('normal.txt'), 'Normal file should be tracked');

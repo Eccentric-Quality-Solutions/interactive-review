@@ -420,9 +420,22 @@ export async function discardFileByPath(
   } finally {
     fileWatcher.clearSelfEdit(filePath);
   }
-  if (fileState.baseline === null) {
+  if (discardDeletesFile(fileState)) {
     // Discarding a new file means it was deleted — remove from tracking
     stateManager.removeFile(filePath);
+  } else if (fileState.baseline === null) {
+    // The file stays as it is, which is what accepting it does — including taking its
+    // content as the baseline. Only removing the entry left nothing a rescan could read, so
+    // a Refresh or a window reload put the file back in the queue. Guarded by
+    // `reloadEqualsMemory.test.ts` ("discarding an unbaselined file").
+    try {
+      acceptFileByPath(stateManager, filePath, () => {});
+    } catch (err) {
+      // Unreadable now (permissions, or deleted since the check). Drop the entry as before
+      // rather than throw: `discardAllFiles` would stop at this file and leave the rest.
+      log(`discardFileByPath(${path.basename(filePath)}): could not read to record a baseline (${err}), dropping the entry`);
+      stateManager.removeFile(filePath);
+    }
   } else {
     stateManager.exitReviewing(filePath);
   }
@@ -554,8 +567,7 @@ async function applyEditAndAdvance(
     if (remainingHunks.length === 0) {
       if (discardDeletesFile(fileState) && fs.existsSync(filePath)) {
         // New file (didn't exist before) fully discarded — remove from disk, recoverably.
-        // An unbaselined file takes the same path minus the delete: it leaves review, and
-        // its content — which predates the session — stays.
+        // An unbaselined file never gets here: see `keepsUnbaselinedFile`.
         log(`${label}(${basename}): new file fully discarded, deleting`);
         await deleteDiscardedFile(filePath, label);
       }
@@ -571,6 +583,31 @@ async function applyEditAndAdvance(
   }
 }
 
+/**
+ * Hunk-level Discard and reject on an unbaselined file: resolve the whole file the way
+ * `discardFileByPath` does, and return true so the caller stops.
+ *
+ * The file predates the session and there is no baseline to restore it to, so its one
+ * whole-file hunk has no "before" but `''`. Splicing towards that emptied the file, or
+ * deleted the selected lines, which is the user's own content; and exiting review without a
+ * baseline let the next Refresh queue it again. File-level Discard keeps the bytes and
+ * records them. Guarded by `deleteRestore.test.ts` ("discarding the hunk of an unbaselined
+ * file") and see `todo.md` item G.
+ */
+async function keepsUnbaselinedFile(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  filePath: string,
+  fileState: FileState,
+  onStateChanged: () => void,
+  label: string
+): Promise<boolean> {
+  if (fileState.baseline !== null || discardDeletesFile(fileState)) return false;
+  log(`${label}(${path.basename(filePath)}): unbaselined file, nothing to restore — keeping it as a file-level discard`);
+  await discardFileByPath(stateManager, fileWatcher, filePath, onStateChanged);
+  return true;
+}
+
 export async function discardHunk(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
@@ -584,6 +621,7 @@ export async function discardHunk(
 
   const fileState = stateManager.getFile(filePath);
   if (!fileState) { log(`discardHunk(${basename}): no fileState, skip`); return; }
+  if (await keepsUnbaselinedFile(stateManager, fileWatcher, filePath, fileState, onStateChanged, 'discardHunk')) return;
 
   const uri = vscode.Uri.file(filePath);
   const doc = await vscode.workspace.openTextDocument(uri);
@@ -695,6 +733,7 @@ export async function rejectSelection(
   if (!resolved) return;
   const { doc, hunk, fileState } = resolved;
   const uri = doc.uri;
+  if (await keepsUnbaselinedFile(stateManager, fileWatcher, filePath, fileState, onStateChanged, 'rejectSelection')) return;
 
   const split = splitHunkByRange(hunk, selStartLine, selEndLine);
   if (!split.hasAddedInRange) {
