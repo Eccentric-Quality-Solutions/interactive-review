@@ -102,6 +102,9 @@ The four integration guards are not in the mutation script; they were verified b
 mirrors `FileWatcher` and `commands.ts` at the StateManager boundary, so a change to either
 needs its mirror updated. It cannot reach defects in which text the command layer passes
 (such as `todo.md` item D, dirty-buffer accept), because that layer is not modelled.
+Nor does its generator ever produce an `'unbaselined'` entry: a change event only reaches
+files that already have a baseline or a state entry. A green sweep says nothing about
+`nullReason` across a reload; `stateManagerGit.test.ts` covers it across a Refresh.
 
 The property generators live in [`src/test/generators.ts`](../src/test/generators.ts) and
 cover the shapes that have actually broken: independent line endings and final newlines per

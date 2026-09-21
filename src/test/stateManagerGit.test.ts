@@ -235,6 +235,21 @@ describe('StateManager.rebuildState keeps each null baseline\'s nullReason', () 
     assert.equal(sm.getFile(file)?.nullReason, 'created');
   });
 
+  it('a later unbaselined classification wins over an earlier witnessed create', async () => {
+    // An agent creates the file and it is discarded; the user then restores their own copy,
+    // and the watcher misses that create, so it surfaces as a change with no baseline. The
+    // old witness must not make the user's file deletable after a Refresh.
+    const file = path.join(root, 'restored.txt');
+    writeFile(file, 'the user\'s content\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    sm.removeFile(file);
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(file)?.nullReason, 'unbaselined');
+  });
+
   it('the unbaselined classification follows a rename', async () => {
     const from = path.join(root, 'before.txt');
     const to = path.join(root, 'after.txt');

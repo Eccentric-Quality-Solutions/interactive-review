@@ -157,6 +157,23 @@ MUTATIONS = [
      "src/stateManager.ts",
      [("return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';", "return 'created';")],
      "stateManagerGit.test.js"),
+
+    ("an unbaselined classification is not recorded, so a Refresh forgets it",
+     "src/stateManager.ts",
+     [("      this.sessionUnbaselined.add(filePath);\n", "")],
+     "stateManagerGit.test.js"),
+
+    ("an old witnessed create outranks a later unbaselined classification",
+     "src/stateManager.ts",
+     [("    return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';",
+       "    if (this.sessionCreated.has(filePath)) return 'created';\n"
+       "    return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';")],
+     "stateManagerGit.test.js"),
+
+    ("a later witnessed create does not clear an earlier unbaselined classification",
+     "src/stateManager.ts",
+     [("      this.sessionUnbaselined.delete(filePath);\n", "")],
+     "stateManagerGit.test.js"),
 ]
 
 

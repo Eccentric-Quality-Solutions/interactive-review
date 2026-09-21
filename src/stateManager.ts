@@ -48,6 +48,8 @@ export class StateManager {
    * a session starts or ends, never by `dropState` — `clearState` fires `dropState` for
    * every path, so shrinking it there would wipe the set on the very rebuild it exists to
    * survive. A path that leaves review and is later recreated is simply re-witnessed.
+   * Because it only grows, it is not what decides a rescan's `nullReason`; see
+   * `adoptedNullReason`.
    */
   private sessionCreated = new Set<string>();
 
@@ -55,8 +57,9 @@ export class StateManager {
    * Paths this session classified `nullReason: 'unbaselined'` — the counterpart of
    * `sessionCreated`, and for the same reason: Refresh throws the classification away, and
    * `adoptUntrackedFiles` would otherwise re-adopt these as `'created'`, making a file the
-   * session had decided to keep deletable. A witnessed create outranks it (see
-   * `adoptedNullReason`). Same lifetime as `sessionCreated`.
+   * session had decided to keep deletable. It holds only paths whose *most recent*
+   * classification is `'unbaselined'`: a later witnessed create removes the path. Same
+   * lifetime as `sessionCreated`.
    *
    * Guarded by `stateManagerGit.test.ts` ("keeps each null baseline's nullReason").
    */
@@ -362,10 +365,11 @@ export class StateManager {
   /**
    * The `nullReason` for a file adopted by a rescan.
    *
-   * A witnessed create is `'created'`, and a file this session already classified
-   * `'unbaselined'` stays so: a Refresh must never turn a file Discard would keep into one
-   * it deletes. With no record either way, `'created'` is the answer despite being the
-   * deleting one, because of what `collectUntrackedFiles` has filtered out: unreadable
+   * The session's most recent classification of the path stands: a witnessed create is
+   * `'created'`, and a file last classified `'unbaselined'` stays so, because a Refresh must
+   * never turn a file Discard would keep into one it deletes. With no record either way,
+   * `'created'` is the answer despite being the deleting one, because of what
+   * `collectUntrackedFiles` has filtered out: unreadable
    * files and unwitnessed binaries, which *are* the pre-existing-but-unbaselined
    * population. What is left — readable text with no blob — is overwhelmingly a real new
    * file, including every new file from a prior session after a window reload, where both
@@ -373,7 +377,7 @@ export class StateManager {
    * un-actionable.
    */
   private adoptedNullReason(filePath: string): 'created' | 'unbaselined' {
-    if (this.sessionCreated.has(filePath)) return 'created';
+    // Not `sessionCreated`: it keeps a witness after a later 'unbaselined' classification.
     return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';
   }
 
@@ -582,9 +586,17 @@ export class StateManager {
   private writeState(filePath: string, state: FileState): void {
     const prior = this.state.get(filePath);
     this.state.set(filePath, state);
-    if (state.baseline === null && state.nullReason === 'created') this.sessionCreated.add(filePath);
-    // Absent reads as 'unbaselined' (see FileState.nullReason), so record it the same way.
-    if (state.baseline === null && state.nullReason !== 'created') this.sessionUnbaselined.add(filePath);
+    // `sessionUnbaselined` holds the paths whose most recent classification is
+    // 'unbaselined', which is what `adoptedNullReason` reads. A path discarded as 'created'
+    // and later restored by the user surfaces as an 'unbaselined' change, and must not stay
+    // deletable because of the old witness.
+    if (state.baseline === null && state.nullReason === 'created') {
+      this.sessionCreated.add(filePath);
+      this.sessionUnbaselined.delete(filePath);
+    } else if (state.baseline === null) {
+      // Absent reads as 'unbaselined' (see FileState.nullReason), so record it the same way.
+      this.sessionUnbaselined.add(filePath);
+    }
     // A status-only change (reviewing → reviewing with the same baseline) leaves the
     // virtual document correct, so it is not worth a re-fetch. `!prior` counts as a
     // move because an absent entry renders as `''`.
