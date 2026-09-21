@@ -77,22 +77,22 @@ suite('interactive-review lifecycle integration', function () {
     assert.strictEqual(baseline, 'cycle content\n', 'Baseline should match file content after re-enable');
   });
 
-  test('.gitignore is auto-created/updated with interactive-review entry on enable', async () => {
+  test('state dir gitignores itself on enable, leaving the project .gitignore untouched', async () => {
     const root = getWorkspaceRoot();
-    const gitignorePath = path.join(root, '.gitignore');
+    const rootGitignore = path.join(root, '.gitignore');
+    const stateGitignore = path.join(root, '.vscode', 'interactive-review', '.gitignore');
 
     // No .gitignore initially
-    assert.ok(!fs.existsSync(gitignorePath), '.gitignore should not exist initially');
+    assert.ok(!fs.existsSync(rootGitignore), '.gitignore should not exist initially');
 
     await enableReview();
 
-    // upsertGitignore should have created .gitignore with interactive-review entry
-    if (fs.existsSync(gitignorePath)) {
-      const content = fs.readFileSync(gitignorePath, 'utf-8');
-      assert.ok(content.includes('.vscode/interactive-review'), '.gitignore should contain interactive-review entry');
-    }
-    // Note: if .gitignore wasn't created, that's also acceptable
-    // (upsertGitignore is non-fatal)
+    // The self-contained rule lives inside the state dir and ignores everything.
+    assert.ok(fs.existsSync(stateGitignore), 'state dir should contain its own .gitignore');
+    assert.match(fs.readFileSync(stateGitignore, 'utf-8'), /^\*$/m);
+
+    // The user's tracked root .gitignore must not be created or mutated.
+    assert.ok(!fs.existsSync(rootGitignore), 'project root .gitignore should stay untouched');
   });
 
   test('setIgnorePatterns persists to settings.json', async () => {

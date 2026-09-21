@@ -1,11 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as path from 'path';
 import assert from 'assert';
 import {
-  getWorkspaceRoot, gitGetBaseline, sleep, waitForCondition,
-  waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager,
+  sleep, waitForCondition, disableReview, cleanWorkspace, getStateManager,
+  setupReviewingFile, openWithSelection,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -28,33 +26,9 @@ suite('interactive-review partial reject', function () {
     cleanWorkspace();
   });
 
-  /** Open the file and set a (possibly multi-line) 0-based selection. */
-  async function openWithSelection(filePath: string, startLine0: number, endLine0: number): Promise<vscode.TextEditor> {
-    const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
-    const doc = editor.document;
-    const endCol = doc.lineAt(Math.min(endLine0, doc.lineCount - 1)).text.length;
-    editor.selection = new vscode.Selection(
-      new vscode.Position(startLine0, 0),
-      new vscode.Position(endLine0, endCol),
-    );
-    return editor;
-  }
-
-  /** Enable review on a file, then modify it so it enters reviewing. */
-  async function reviewing(name: string, baseline: string, modified: string): Promise<string> {
-    const root = getWorkspaceRoot();
-    const f = path.join(root, name);
-    writeFileExternally(f, baseline);
-    await enableReview();
-    await waitForCondition(() => gitGetBaseline(root, name) !== undefined);
-    writeFileExternally(f, modified);
-    await waitForReviewing(f);
-    return f;
-  }
-
   test('partial reject of a mixed hunk deletes only the selected added lines; rest stays pending', async () => {
     // Insert A,B,C between l1 and l2 → one hunk, added doc lines 1,2,3.
-    const f = await reviewing('mixed.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
+    const f = await setupReviewingFile('mixed.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
 
     await openWithSelection(f, 1, 2); // select A and B
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
@@ -67,7 +41,7 @@ suite('interactive-review partial reject', function () {
   });
 
   test('selection spanning a hunk boundary only reverts the intersecting added lines', async () => {
-    const f = await reviewing('boundary.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
+    const f = await setupReviewingFile('boundary.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
 
     await openWithSelection(f, 0, 1); // context line l1 (0) through added line A (1)
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
@@ -80,7 +54,7 @@ suite('interactive-review partial reject', function () {
 
   test('pure-removal hunk falls back to whole-hunk reject', async () => {
     // Remove l2 → a pure-removal hunk (no added lines) at the l3 position.
-    const f = await reviewing('removal.txt', 'l1\nl2\nl3\n', 'l1\nl3\n');
+    const f = await setupReviewingFile('removal.txt', 'l1\nl2\nl3\n', 'l1\nl3\n');
 
     await openWithSelection(f, 1, 1); // cursor on l3, where the removal hunk sits
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
@@ -94,7 +68,7 @@ suite('interactive-review partial reject', function () {
 
   test('multi-hunk selection resolves the hunk at the selection start only', async () => {
     // Two separate insertions: A after l1, B after l3.
-    const f = await reviewing('multi.txt', 'l1\nl2\nl3\n', 'l1\nA\nl2\nl3\nB\n');
+    const f = await setupReviewingFile('multi.txt', 'l1\nl2\nl3\n', 'l1\nA\nl2\nl3\nB\n');
 
     await openWithSelection(f, 1, 4); // spans A (hunk 1) through B (hunk 2)
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
@@ -107,7 +81,7 @@ suite('interactive-review partial reject', function () {
   });
 
   test('partial reject resolving the file’s last change completes the file', async () => {
-    const f = await reviewing('last.txt', 'l1\nl2\n', 'l1\nA\nl2\n');
+    const f = await setupReviewingFile('last.txt', 'l1\nl2\n', 'l1\nA\nl2\n');
 
     await openWithSelection(f, 1, 1); // the only added line
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
@@ -119,16 +93,31 @@ suite('interactive-review partial reject', function () {
   });
 
   test('a partial reject is a single undo', async () => {
-    const f = await reviewing('undo.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
+    const f = await setupReviewingFile('undo.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
 
     const editor = await openWithSelection(f, 1, 2); // A and B
     await vscode.commands.executeCommand('interactiveReview.rejectSelection');
-    await sleep(300);
+    // Poll rather than sleep: under full-suite load the workspace edit and the undo
+    // can both land later than a fixed delay allows. Polling for the exact expected
+    // text keeps the assertion strict — a two-step undo stack would settle on
+    // 'l1\nB\nC\nl2\n' and time out here rather than pass.
+    // On timeout fall through to the assert so the failure shows the actual text.
+    await waitForCondition(() => editor.document.getText() === 'l1\nC\nl2\n').catch(() => {});
     assert.strictEqual(editor.document.getText(), 'l1\nC\nl2\n', 'lines deleted');
 
+    // The text matches as soon as the workspace edit applies — which is *before* the
+    // command's tail: the save, and the cross-file walk that can move focus. An undo
+    // issued into that window does not take effect (the document is left exactly as the
+    // edit left it), and the test was reading that as a two-step undo stack. Waiting for
+    // the save to land orders the undo after the whole command.
+    //
+    // Whether a user can hit the same window with a fast Ctrl+Z is a separate question
+    // about the command's tail, not about the size of the undo step this test pins.
+    await waitForCondition(() => !editor.document.isDirty).catch(() => {});
     await vscode.window.showTextDocument(editor.document);
-    await vscode.commands.executeCommand('undo');
     await sleep(200);
+    await vscode.commands.executeCommand('undo');
+    await waitForCondition(() => editor.document.getText() === 'l1\nA\nB\nC\nl2\n').catch(() => {});
     assert.strictEqual(editor.document.getText(), 'l1\nA\nB\nC\nl2\n',
       'a single undo restores both deleted lines at once');
   });

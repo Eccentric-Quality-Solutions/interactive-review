@@ -4,10 +4,61 @@ import * as path from 'path';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
-import { computeHunks, hunkId, ParsedHunk, splitHunkByRange } from './diffEngine';
+import { computeHunks, hunkAtLine, hunkId, ParsedHunk, splitHunkByRange } from './diffEngine';
+import {
+  acceptHunkBaseline, acceptLinesBaseline, discardHunkText, minimalSplice, rejectLinesText,
+} from './hunkApply';
+import { restoreDiffSettings } from './diffSettings';
 import { FileState } from './types';
-import { upsertGitignore } from './gitignoreManager';
+import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
+import { bomFromFile, readTextFileSync, stripBom, withBomFrom } from './textFile';
 import { log } from './log';
+
+/**
+ * Delete a file the user is discarding, to the OS trash rather than permanently.
+ *
+ * Discarding the last hunk of an agent-created *new* file removes it from disk. That is
+ * the only operation in the extension whose effect an undo cannot reach: accept and
+ * reject both go through a `WorkspaceEdit` and live on the editor's undo stack, but an
+ * unlinked file has no buffer left to undo into. One keystroke on a mis-aimed lens
+ * therefore destroyed content the agent had just written, silently and for good.
+ *
+ * `useTrash` moves the decision from irreversible to recoverable at the cost of nothing:
+ * the file still leaves the workspace and still leaves review. Where a trash is
+ * unavailable (some remote/container filesystems) VS Code rejects the request, so the
+ * caller falls back to a permanent delete rather than leaving the file stranded in the
+ * queue — the outcome is then no worse than before this existed.
+ */
+async function deleteDiscardedFile(filePath: string, label: string): Promise<void> {
+  const uri = vscode.Uri.file(filePath);
+  try {
+    await vscode.workspace.fs.delete(uri, { useTrash: true });
+    log(`${label}(${path.basename(filePath)}): discarded new file moved to trash`);
+  } catch (err) {
+    log(`${label}(${path.basename(filePath)}): trash delete failed (${err}), falling back to unlink`);
+    try {
+      await vscode.workspace.fs.delete(uri, { useTrash: false });
+    } catch (err2) {
+      log(`${label}(${path.basename(filePath)}): delete failed: ${err2}`);
+    }
+  }
+}
+
+/**
+ * Does discarding this file mean deleting it from disk?
+ *
+ * Only for a file this session watched being created. A null baseline alone is not
+ * enough — it is also what a pre-existing binary, a file unreadable at enable, and a
+ * file created inside the enable snapshot's sliver all carry, and deleting one of those
+ * destroys content the user had before review began. `nullReason` is the discriminator
+ * and absent reads as "do not delete"; see `FileState.nullReason`.
+ *
+ * For the non-deleting null case there is simply nothing to restore — no baseline
+ * exists — so discard drops the file from the queue and leaves the bytes alone.
+ */
+function discardDeletesFile(fileState: FileState): boolean {
+  return fileState.baseline === null && fileState.nullReason === 'created';
+}
 
 // ── Cursor-based resolution for keyboard-driven review ─────────────────────────
 // Keybindings carry no arguments, so accept/reject/navigate commands resolve their
@@ -29,9 +80,9 @@ export function hunkAtCursor(editor: vscode.TextEditor, fileState: FileState): P
   const hunks = computeHunks(fileState.baseline, editor.document.getText());
   if (hunks.length === 0) return undefined;
   const line = editor.selection.active.line + 1; // computeHunks newStart is 1-based
-  return hunks.find(h => line >= h.newStart && line < h.newStart + Math.max(1, h.newLines))
-    ?? hunks.find(h => h.newStart >= line)
-    ?? hunks[0];
+  // Cursor navigation always lands on a hunk, so wrap to the first when the cursor sits
+  // past every hunk — the `?? hunks[0]` that selection commands deliberately omit.
+  return hunkAtLine(hunks, line) ?? hunks[0];
 }
 
 /** Neighbouring pending hunk for keyboard navigation (dir 1 = next, -1 = previous). */
@@ -46,9 +97,7 @@ export function neighbourHunk(editor: vscode.TextEditor, fileState: FileState, d
 
 /** Move the cursor to a hunk and center it in view. */
 export function revealHunk(editor: vscode.TextEditor, hunk: ParsedHunk): void {
-  const pos = new vscode.Position(Math.max(0, hunk.newStart - 1), 0);
-  editor.selection = new vscode.Selection(pos, pos);
-  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+  revealHunkPosition(editor, hunk.newStart);
 }
 
 export function registerCommands(
@@ -59,11 +108,11 @@ export function registerCommands(
   onStateChanged: () => void
 ): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('interactiveReview.enable', () =>
+    vscode.commands.registerCommand('interactiveReview.beginReview', () =>
       enableReview(stateManager, fileWatcher, reviewPanel, onStateChanged)
     ),
-    vscode.commands.registerCommand('interactiveReview.disable', () =>
-      disableReview(stateManager, onStateChanged)
+    vscode.commands.registerCommand('interactiveReview.endReview', () =>
+      disableReview(stateManager, context.globalState, onStateChanged)
     ),
     vscode.commands.registerCommand('interactiveReview.setIgnorePatterns', async (patterns: string[]) => {
       stateManager.setIgnorePatterns(patterns);
@@ -89,6 +138,31 @@ export function registerCommands(
   );
 }
 
+/**
+ * The Begin review currently running, if any. Module-scoped because the command is
+ * registered once and can be invoked concurrently from the palette, the panel button and an
+ * agent. See the first guard in `enableReview`.
+ */
+let beginInFlight: Promise<void> | undefined;
+
+/**
+ * Begin a review session: snapshot the working tree as the baseline and start tracking.
+ * Backs the `interactiveReview.beginReview` command ("Begin review" in the palette).
+ *
+ * The ID was renamed from `interactiveReview.enable` — a deliberate breaking change, so
+ * that the command id, the palette title, and the panel button all say the same thing.
+ * Anything pinning the old id (user keybindings, external/agent callers) must be updated.
+ *
+ * This is the **agent-callable begin-review hook**, and that imposes a contract worth
+ * keeping: it must stay non-interactive. No dialogs, no quick-picks, no dependence on the
+ * panel being visible (`setLoading` no-ops when the view is unresolved), and the returned
+ * promise must not resolve until the snapshot is complete — an agent that awaits
+ * `executeCommand('interactiveReview.beginReview')` and then starts editing relies on the
+ * baseline already being on disk. Adding a prompt here silently breaks agent-driven review.
+ *
+ * The 750ms leg of the `Promise.all` is a *floor* on the splash duration, not a timeout:
+ * both legs are awaited, so a slower snapshot still completes before this resolves.
+ */
 async function enableReview(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
@@ -96,32 +170,151 @@ async function enableReview(
   onStateChanged: () => void
 ): Promise<void> {
   log('enable');
+  // A Begin review that is still running is joined, not refused.
+  //
+  // This check must come FIRST, because `setEnabled` flips `enabled` synchronously before
+  // its first await — so from the moment the first Begin starts, the guard below already
+  // sees an open session. Without this, a second Begin arriving mid-snapshot returned
+  // immediately, while no baseline was on disk yet. That breaks the contract this command
+  // exists to keep: an agent awaits Begin review and starts editing, and those edits land
+  // on files that were never baselined. Two agents, or an agent and the panel button, are
+  // enough to hit it.
+  //
+  // Awaiting the in-flight promise gives the second caller the same guarantee as the first,
+  // including the same failure.
+  if (beginInFlight) {
+    log('enable: a Begin review is already in progress, awaiting it');
+    return beginInFlight;
+  }
+  // Refuse to re-enter an *established* session. `snapshotWorkspace` re-snapshots every file
+  // regardless of whether it already has a baseline, so a second Begin review silently
+  // replaces every stored baseline with current disk content — git then holds the edits as
+  // the baseline while memory still holds the originals, and the next Refresh empties the
+  // queue of work the user never dispositioned. The command is always enabled in the
+  // palette, so this was one mis-click away.
+  //
+  // Returning early rather than restarting keeps the agent contract intact: a caller that
+  // awaits this still gets "a session is open and baselines are on disk" when it resolves.
+  if (stateManager.enabled) {
+    log('enable: a review session is already open, ignoring');
+    void vscode.window.showInformationMessage(
+      'Interactive Review: a review session is already running. End it first to start a new one.'
+    );
+    return;
+  }
+  // Assigned synchronously, before the first await, so a Begin arriving on any later tick
+  // sees it. Cleared in `finally` so a failed Begin can be retried.
+  beginInFlight = runBeginReview(stateManager, fileWatcher, reviewPanel, onStateChanged);
+  try {
+    await beginInFlight;
+  } finally {
+    beginInFlight = undefined;
+  }
+}
+
+/**
+ * The body of `enableReview`, split out so the in-flight promise above is created by a
+ * single synchronous call.
+ *
+ * Reports its own failure. Every path in here ends with no usable baseline, and the caller
+ * that matters most is an agent which is about to start editing — so this both tells the
+ * user and rejects, rather than resolving as if the session were ready.
+ */
+async function runBeginReview(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  reviewPanel: ReviewPanel,
+  onStateChanged: () => void
+): Promise<void> {
   reviewPanel.setLoading(true);
   try {
     await Promise.all([
       new Promise(resolve => setTimeout(resolve, 750)),
       (async () => {
-        await stateManager.setEnabled(true);
-        try { upsertGitignore(); } catch (err) { log(`upsertGitignore failed: ${err}`); }
-        // Re-read .gitignore synchronously so a gitignore file that existed before
-        // enabling is honored by the snapshot below, rather than depending on the
-        // async file watcher having already fired (unreliable on Linux).
-        fileWatcher.reloadGitignore();
-        await stateManager.snapshotWorkspace((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
+        // Raised before `setEnabled` rather than just around `snapshotWorkspace`: the
+        // watcher starts delivering events the moment `enabled` flips, and a create that
+        // lands in the gap before the snapshot begins is every bit as pre-existing as one
+        // that lands during it.
+        fileWatcher.beginSnapshot();
+        try {
+          await stateManager.setEnabled(true);
+          // The state dir gitignores itself (BaselineGit.ensureGitignore writes a
+          // `*` rule inside .vscode/interactive-review/ on first write), so review
+          // state stays out of the project's git without touching the user's files.
+          // Re-read .gitignore synchronously so a gitignore file that existed before
+          // enabling is honored by the snapshot below, rather than depending on the
+          // async file watcher having already fired (unreliable on Linux).
+          fileWatcher.reloadGitignore();
+          await stateManager.snapshotWorkspace((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
+          // A create adopted by the watcher during the window enqueues its git write
+          // behind the snapshot's, so the snapshot returning does not mean every baseline
+          // is on disk. Drain before resolving, or the contract above ("the baseline is
+          // already on disk when this resolves") is false for exactly the files this
+          // window exists to protect — and the agent's first edit to one of them lands on
+          // an undefined baseline and gets silently absorbed.
+          //
+          // Draining `gitQueue` alone does not achieve that: an adopter reaches the queue
+          // only after a disk read and a git read, so `flush` can capture a tail that does
+          // not yet include it. Settle the handlers first, then flush — and repeat, because
+          // awaiting either one gives newly arrived creates time to start. A pass that
+          // waited on no handler proves none could have enqueued since, which makes the
+          // flush that follows it authoritative and ends the loop.
+          //
+          // Bounded rather than `while (true)`: under a process that creates files
+          // continuously (an `npm install` racing Begin review) there may be no quiet
+          // moment, and blocking enable indefinitely is worse than the residual sliver
+          // already documented in `handleDiskCreate`.
+          const MAX_DRAIN_PASSES = 5;
+          for (let pass = 0; pass < MAX_DRAIN_PASSES; pass++) {
+            const settled = await fileWatcher.settleSnapshotCreates();
+            await stateManager.flush();
+            if (settled === 0) break;
+            if (pass === MAX_DRAIN_PASSES - 1) {
+              log(`enable: creates still arriving after ${MAX_DRAIN_PASSES} drain passes; proceeding`);
+            }
+          }
+        } finally {
+          fileWatcher.endSnapshot();
+        }
       })(),
     ]);
+  } catch (err) {
+    log(`enable: failed — ${err}`);
+    void vscode.window.showErrorMessage(
+      // Says what the user will actually see. With no baselines on disk, every edit enters
+      // review as a whole-file "unbaselined" change rather than the hunks that were made —
+      // see `handleDiskChange` — so the panel fills up rather than staying empty.
+      'Interactive Review: Begin review failed, so no baseline was recorded. Edited files ' +
+      'will show as entirely new rather than as the changes actually made. Run ' +
+      `"Interactive Review: End review", then "Begin review" to retry. (${err})`
+    );
+    throw err;
   } finally {
+    // Both in `finally`: the panel must leave its loading state and the UI must reflect
+    // whatever state the failed attempt left behind, not stay frozen mid-enable.
     reviewPanel.setLoading(false);
+    onStateChanged();
   }
-  onStateChanged();
 }
 
+/**
+ * End the review session: clear tracked state and tear down the baseline snapshot. Backs
+ * `interactiveReview.endReview` ("End review"), renamed from `interactiveReview.disable`.
+ * Non-interactive for the same reason as `enableReview` — an agent closes the session it
+ * opened.
+ */
 async function disableReview(
   stateManager: StateManager,
+  globalState: vscode.Memento,
   onStateChanged: () => void
 ): Promise<void> {
   log('disable');
-  stateManager.setEnabled(false);
+  // Awaited: the disable branch drains queued baseline writes before deleting the repo,
+  // and callers await this command expecting teardown to be finished when it resolves.
+  await stateManager.setEnabled(false);
+  // Hand the user's global diffEditor settings back now that no review surface needs
+  // them forced (ADR-0003). Session-scoped, so this is the natural restore point.
+  await restoreDiffSettings(globalState);
   onStateChanged();
 }
 
@@ -160,12 +353,39 @@ export function acceptFileByPath(
     log(`acceptFileByPath(${basename}): file not on disk, removeFile`);
     stateManager.removeFile(filePath);
   } else {
-    // File exists (possibly empty) — accept current content as new baseline
-    const content = fs.readFileSync(filePath, 'utf-8');
-    log(`acceptFileByPath(${basename}): file exists, exitReviewing with content.len=${content.length}`);
-    stateManager.exitReviewing(filePath, content);
+    // File exists (possibly empty) — accept current content as new baseline.
+    const content = readTextFileSync(filePath);
+    if (content === null) {
+      // Binary. `fs.readFile(…, 'utf-8')` would happily hand back a replacement-character
+      // decoding of it, and storing that as a baseline arms a later discard to write the
+      // mush over the real bytes. Accept it out of the queue with no baseline instead:
+      // the file is accepted either way, and nothing exists afterwards to restore from.
+      log(`acceptFileByPath(${basename}): binary, accepting with no baseline`);
+      stateManager.removeFile(filePath);
+    } else {
+      log(`acceptFileByPath(${basename}): file exists, exitReviewing with content.len=${content.length}`);
+      stateManager.exitReviewing(filePath, content);
+    }
   }
   onStateChanged();
+}
+
+/**
+ * Replace the entire contents of an on-disk document with `content` and save.
+ * Uses a full-range WorkspaceEdit (rather than fs.writeFileSync) so that an open
+ * editor for the file reflects the change immediately instead of prompting to
+ * reload from disk.
+ */
+async function replaceEntireDocument(uri: vscode.Uri, content: string): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const edit = new vscode.WorkspaceEdit();
+  const fullRange = new vscode.Range(
+    new vscode.Position(0, 0),
+    new vscode.Position(doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length)
+  );
+  edit.replace(uri, fullRange, content);
+  await vscode.workspace.applyEdit(edit);
+  await doc.save();
 }
 
 export async function discardFileByPath(
@@ -179,39 +399,23 @@ export async function discardFileByPath(
 
   fileWatcher.markSelfEdit(filePath);
   try {
-    if (fileState.baseline === null) {
-      // New file (didn't exist before) — delete it
+    if (discardDeletesFile(fileState)) {
+      // New file (didn't exist before) — delete it, recoverably.
       if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+        await deleteDiscardedFile(filePath, 'discardFileByPath');
       }
-    } else if (fileState.baseline === '' && fs.existsSync(filePath)) {
-      // Existed as empty file — restore to empty
-      const uri = vscode.Uri.file(filePath);
-      const doc = await vscode.workspace.openTextDocument(uri);
-      const edit = new vscode.WorkspaceEdit();
-      const fullRange = new vscode.Range(
-        new vscode.Position(0, 0),
-        new vscode.Position(doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length)
-      );
-      edit.replace(uri, fullRange, '');
-      await vscode.workspace.applyEdit(edit);
-      await doc.save();
+    } else if (fileState.baseline === null) {
+      // Null baseline but the file predates the session — nothing to restore to and
+      // nothing we may delete. Leave the bytes untouched; the drop below clears the queue.
+      log(`discardFileByPath(${path.basename(filePath)}): unbaselined file, leaving on disk`);
     } else if (!fs.existsSync(filePath)) {
       // File was deleted — restore from baseline
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, fileState.baseline ?? '', 'utf-8');
+      fs.writeFileSync(filePath, fileState.baseline, 'utf-8');
       await vscode.window.showTextDocument(vscode.Uri.file(filePath));
     } else {
-      const uri = vscode.Uri.file(filePath);
-      const doc = await vscode.workspace.openTextDocument(uri);
-      const edit = new vscode.WorkspaceEdit();
-      const fullRange = new vscode.Range(
-        new vscode.Position(0, 0),
-        new vscode.Position(doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length)
-      );
-      edit.replace(uri, fullRange, fileState.baseline ?? '');
-      await vscode.workspace.applyEdit(edit);
-      await doc.save();
+      // File exists (possibly empty) — restore its contents to the baseline.
+      await replaceEntireDocument(vscode.Uri.file(filePath), stripBom(fileState.baseline));
     }
   } finally {
     fileWatcher.clearSelfEdit(filePath);
@@ -239,9 +443,12 @@ export function acceptHunk(
   const fileState = stateManager.getFile(filePath);
   if (!fileState) { log(`acceptHunk(${basename}): no fileState, skip`); return; }
 
-  const doc = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && d.uri.fsPath === filePath);
+  const doc = findFileDocument(filePath);
   if (!doc) { log(`acceptHunk(${basename}): no doc found, skip`); return; }
-  const baselineStr = fileState.baseline ?? '';
+  // `?? bomFromFile` rather than `?? ''`: a null baseline has no marker to carry, so for a
+  // new BOM'd file the disk is the only witness. Seeding it here means every baseline built
+  // below — the partial one and the final one alike — inherits it through `withBomFrom`.
+  const baselineStr = fileState.baseline ?? bomFromFile(filePath);
   log(`acceptHunk(${basename}): doc.scheme=${doc.uri.scheme}, doc.len=${doc.getText().length}, baseline.len=${baselineStr.length}`);
 
   const hunks = computeHunks(fileState.baseline, doc.getText());
@@ -251,44 +458,65 @@ export function acceptHunk(
 
   const originalNewStart = hunk.newStart;
 
-  const currentLines = doc.getText().split('\n');
-  const baselineLines = baselineStr.split('\n');
-  const newBaseline = [
-    ...baselineLines.slice(0, hunk.oldStart - 1),
-    ...currentLines.slice(hunk.newStart - 1, hunk.newStart - 1 + hunk.newLines),
-    ...baselineLines.slice(hunk.oldStart - 1 + hunk.oldLines),
-  ].join('\n');
+  // Stripped on the way in, so line 1 lines up with the buffer's line 1 (and with
+  // `computeHunks`, which strips both sides); `withBomFrom` puts the marker back on the
+  // baseline we store. The splice itself lives in `hunkApply`, which tracks the trailing
+  // newline as a flag rather than as an array element — see that module for the bug this
+  // arrangement fixed on both sides of the diff.
+  const newBaseline = withBomFrom(
+    baselineStr,
+    acceptHunkBaseline(stripBom(baselineStr), doc.getText(), hunk),
+  );
 
-  const remainingHunks = computeHunks(newBaseline, doc.getText());
-  log(`acceptHunk(${basename}): remainingHunks=${remainingHunks.length}`);
-  if (remainingHunks.length === 0) {
-    log(`acceptHunk(${basename}): last hunk, exitReviewing`);
-    stateManager.exitReviewing(filePath, doc.getText());
-  } else {
-    stateManager.setFile(filePath, { status: 'reviewing', baseline: newBaseline });
-    revealNextHunk(filePath, remainingHunks, originalNewStart);
-  }
-  onStateChanged();
-  log(`acceptHunk(${basename}): done`);
+  finishBaselineAdvance(stateManager, filePath, newBaseline, doc, originalNewStart, onStateChanged, 'acceptHunk');
 }
 
 /** Reveal the next hunk in the editor after an accept/discard operation. */
 function revealNextHunk(filePath: string, remainingHunks: ReturnType<typeof computeHunks>, originalNewStart: number): void {
-  // Filter by scheme: a review diff's baseline side is a visible editor sharing this
-  // fsPath; without the guard we could reveal the next hunk in the read-only baseline
-  // pane instead of the editable file.
-  const editor = vscode.window.visibleTextEditors.find(
-    e => e.document.uri.scheme === 'file' && e.document.uri.fsPath === filePath
-  );
+  const editor = findFileEditor(filePath);
   if (!editor) return;
 
   // Find the first remaining hunk at or after the original position
   const next = remainingHunks.find(h => h.newStart >= originalNewStart) ?? remainingHunks[0];
   if (!next) return;
 
-  const pos = new vscode.Position(Math.max(0, next.newStart - 1), 0);
-  editor.selection = new vscode.Selection(pos, pos);
-  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+  revealHunkPosition(editor, next.newStart);
+}
+
+/**
+ * Shared tail of `acceptHunk`/`acceptSelection`: after the caller has folded the accepted
+ * change into `newBaseline`, re-diff against the live document and advance the walk. When
+ * nothing remains, exit reviewing; otherwise persist the new baseline and reveal the next
+ * hunk at/after `originalNewStart`. A pure sink — the caller owns baseline computation.
+ * `label` names the caller for logging.
+ */
+function finishBaselineAdvance(
+  stateManager: StateManager,
+  filePath: string,
+  newBaseline: string,
+  doc: vscode.TextDocument,
+  originalNewStart: number,
+  onStateChanged: () => void,
+  label: string,
+): void {
+  const basename = path.basename(filePath);
+  const remainingHunks = computeHunks(newBaseline, doc.getText());
+  log(`${label}(${basename}): remainingHunks=${remainingHunks.length}`);
+  if (remainingHunks.length === 0) {
+    log(`${label}(${basename}): last change, exitReviewing`);
+    // The buffer is the right *content* for the new baseline (it carries the user's EOLs
+    // and every accepted line) and the wrong *encoding* for it: VS Code strips the BOM on
+    // the way into a document and re-adds it on save, so `doc.getText()` never has one
+    // while `newBaseline` does. Storing the buffer verbatim would drop the marker on the
+    // single-hunk accept — the common path — and a later restore from that baseline would
+    // write the file back without it. See ADR-0013: normalize at comparison, not storage.
+    stateManager.exitReviewing(filePath, withBomFrom(newBaseline, doc.getText()));
+  } else {
+    stateManager.setFile(filePath, { status: 'reviewing', baseline: newBaseline });
+    revealNextHunk(filePath, remainingHunks, originalNewStart);
+  }
+  onStateChanged();
+  log(`${label}(${basename}): done`);
 }
 
 /**
@@ -318,16 +546,18 @@ async function applyEditAndAdvance(
       log(`${label}(${basename}): applyEdit failed, aborting`);
       return;
     }
-    const saved = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && d.uri.fsPath === filePath);
+    const saved = findFileDocument(filePath);
     if (saved) await saved.save();
     const currentText = saved?.getText() ?? doc.getText();
     const remainingHunks = computeHunks(fileState.baseline, currentText);
     log(`${label}(${basename}): remainingHunks=${remainingHunks.length}`);
     if (remainingHunks.length === 0) {
-      if (fileState.baseline === null && fs.existsSync(filePath)) {
-        // New file (didn't exist before) fully discarded — remove from disk
+      if (discardDeletesFile(fileState) && fs.existsSync(filePath)) {
+        // New file (didn't exist before) fully discarded — remove from disk, recoverably.
+        // An unbaselined file takes the same path minus the delete: it leaves review, and
+        // its content — which predates the session — stays.
         log(`${label}(${basename}): new file fully discarded, deleting`);
-        try { fs.unlinkSync(filePath); } catch (err) { log(`${label}(${basename}): unlink failed: ${err}`); }
+        await deleteDiscardedFile(filePath, label);
       }
       log(`${label}(${basename}): no hunks left, exitReviewing`);
       stateManager.exitReviewing(filePath);
@@ -366,26 +596,75 @@ export async function discardHunk(
   const originalNewStart = hunk.newStart;
 
   const baselineStr = fileState.baseline ?? '';
-  const baselineLines = baselineStr.split('\n');
-  const originalLines = baselineLines.slice(hunk.oldStart - 1, hunk.oldStart - 1 + hunk.oldLines);
-
-  const startPos = new vscode.Position(hunk.newStart - 1, 0);
-  let endPos: vscode.Position;
-  if (hunk.newLines === 0) {
-    endPos = startPos;
-  } else {
-    const lastNewLine = hunk.newStart - 1 + hunk.newLines - 1;
-    endPos = lastNewLine < doc.lineCount - 1
-      ? new vscode.Position(lastNewLine + 1, 0)
-      : new vscode.Position(lastNewLine, doc.lineAt(lastNewLine).text.length);
+  // Stripped because this text goes into the *document*: VS Code re-adds the file's own
+  // BOM on save, so a carried one would land on disk as a second BOM.
+  //
+  // The edit is derived from the whole desired text rather than built out of hunk
+  // coordinates. Constructing the range by hand is what produced the defect this replaces:
+  // the replacement always ended in a newline and the range stopped short of the document's
+  // last line, so discarding a hunk at EOF in a file with no final newline *added* one —
+  // leaving a hunk that could never be resolved, no matter how many times it was discarded.
+  const currentText = doc.getText();
+  const desiredText = discardHunkText(stripBom(baselineStr), currentText, hunk);
+  const splice = minimalSplice(currentText, desiredText);
+  if (splice.startOffset === splice.endOffset && splice.replacement === '') {
+    // Cannot happen for a hunk that genuinely exists — `hunkApply`'s property test asserts
+    // every discard changes the text — so treat it as a stale hunk id rather than applying
+    // a no-op edit and reporting success.
+    log(`discardHunk(${basename}): discard would be a no-op, skip`);
+    return;
   }
-
-  const replacement = originalLines.length > 0 ? originalLines.join('\n') + '\n' : '';
-  log(`discardHunk(${basename}): replacing lines ${startPos.line}-${endPos.line} with ${originalLines.length} original lines`);
+  const range = new vscode.Range(doc.positionAt(splice.startOffset), doc.positionAt(splice.endOffset));
+  log(`discardHunk(${basename}): replacing lines ${range.start.line}-${range.end.line}`);
 
   const edit = new vscode.WorkspaceEdit();
-  edit.replace(uri, new vscode.Range(startPos, endPos), replacement);
+  edit.replace(uri, range, splice.replacement);
   await applyEditAndAdvance(stateManager, fileWatcher, filePath, fileState, doc, edit, originalNewStart, onStateChanged, 'discardHunk');
+}
+
+/**
+ * Shared head of `acceptSelection`/`rejectSelection`: guard fileState, open the file, diff
+ * it, resolve the hunk at the selection start, and log a multi-hunk overreach. Returns the
+ * resolved `{ doc, hunk, allHunks }`, or undefined when there is nothing to act on (no
+ * fileState, or the selection sits past every hunk) — in which case the caller returns.
+ *
+ * Only the head is shared: the paths diverge sharply afterwards (accept folds lines into the
+ * baseline without touching the buffer; reject deletes lines from the buffer), so the split
+ * and its fallbacks stay in each caller. `label` names the caller for logging.
+ */
+async function resolveSelectionHunk(
+  stateManager: StateManager,
+  filePath: string,
+  selStartLine: number,
+  selEndLine: number,
+  label: string,
+): Promise<{ doc: vscode.TextDocument; hunk: ParsedHunk; fileState: FileState } | undefined> {
+  const basename = path.basename(filePath);
+
+  const fileState = stateManager.getFile(filePath);
+  if (!fileState) { log(`${label}(${basename}): no fileState, skip`); return undefined; }
+
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  const allHunks = computeHunks(fileState.baseline, doc.getText());
+  log(`${label}(${basename}): total hunks=${allHunks.length}`);
+
+  // Resolve the hunk at the selection start (1-based) via the shared primitive.
+  const startLine1 = selStartLine + 1;
+  const hunk = hunkAtLine(allHunks, startLine1);
+  if (!hunk) { log(`${label}(${basename}): no hunk at selection, skip`); return undefined; }
+
+  // Never a silent partial success: log when the selection reaches into other hunks.
+  const endLine1 = selEndLine + 1;
+  const intersected = allHunks.filter(h => {
+    const hStart = h.newStart;
+    const hEnd = h.newStart + Math.max(1, h.newLines) - 1;
+    return endLine1 >= hStart && startLine1 <= hEnd;
+  });
+  if (intersected.length > 1) {
+    log(`${label}(${basename}): selection spans ${intersected.length} hunks; resolving the hunk at selection start only, ignoring ${intersected.length - 1} other(s)`);
+  }
+
+  return { doc, hunk, fileState };
 }
 
 /**
@@ -412,30 +691,10 @@ export async function rejectSelection(
   const basename = path.basename(filePath);
   log(`rejectSelection(${basename}): sel=${selStartLine}-${selEndLine}, source=${source}`);
 
-  const fileState = stateManager.getFile(filePath);
-  if (!fileState) { log(`rejectSelection(${basename}): no fileState, skip`); return; }
-
-  const uri = vscode.Uri.file(filePath);
-  const doc = await vscode.workspace.openTextDocument(uri);
-  const allHunks = computeHunks(fileState.baseline, doc.getText());
-  log(`rejectSelection(${basename}): total hunks=${allHunks.length}`);
-
-  // Resolve the hunk at the selection start (1-based), mirroring hunkAtCursor.
-  const startLine1 = selStartLine + 1;
-  const hunk = allHunks.find(h => startLine1 >= h.newStart && startLine1 < h.newStart + Math.max(1, h.newLines))
-    ?? allHunks.find(h => h.newStart >= startLine1);
-  if (!hunk) { log(`rejectSelection(${basename}): no hunk at selection, skip`); return; }
-
-  // Never a silent partial success: log when the selection reaches into other hunks.
-  const endLine1 = selEndLine + 1;
-  const intersected = allHunks.filter(h => {
-    const hStart = h.newStart;
-    const hEnd = h.newStart + Math.max(1, h.newLines) - 1;
-    return endLine1 >= hStart && startLine1 <= hEnd;
-  });
-  if (intersected.length > 1) {
-    log(`rejectSelection(${basename}): selection spans ${intersected.length} hunks; resolving the hunk at selection start only, ignoring ${intersected.length - 1} other(s)`);
-  }
+  const resolved = await resolveSelectionHunk(stateManager, filePath, selStartLine, selEndLine, 'rejectSelection');
+  if (!resolved) return;
+  const { doc, hunk, fileState } = resolved;
+  const uri = doc.uri;
 
   const split = splitHunkByRange(hunk, selStartLine, selEndLine);
   if (!split.hasAddedInRange) {
@@ -452,25 +711,16 @@ export async function rejectSelection(
   const delStart = hunk.newStart - 1 + split.addedStartIdx; // 0-based, inclusive
   const lastDel = hunk.newStart - 1 + split.addedEndIdx - 1; // 0-based, inclusive
 
-  // Delete whole lines including their newline. When the slice runs to the final line of
-  // the document there is no following newline to consume, so back the start up to the end
-  // of the preceding line instead (mirrors discardHunk's end-of-file handling).
-  let startPos: vscode.Position;
-  let endPos: vscode.Position;
-  if (lastDel < doc.lineCount - 1) {
-    startPos = new vscode.Position(delStart, 0);
-    endPos = new vscode.Position(lastDel + 1, 0);
-  } else if (delStart > 0) {
-    startPos = new vscode.Position(delStart - 1, doc.lineAt(delStart - 1).text.length);
-    endPos = new vscode.Position(lastDel, doc.lineAt(lastDel).text.length);
-  } else {
-    startPos = new vscode.Position(0, 0);
-    endPos = new vscode.Position(lastDel, doc.lineAt(lastDel).text.length);
-  }
+  // Same whole-text derivation as `discardHunk`, and for the same reason: the end-of-file
+  // cases (no trailing newline, deleting through the last line) are handled once in
+  // `hunkApply` under test, rather than as a ladder of position arithmetic here.
+  const currentText = doc.getText();
+  const desiredText = rejectLinesText(stripBom(fileState.baseline ?? ''), currentText, hunk, delStart, lastDel);
+  const splice = minimalSplice(currentText, desiredText);
   log(`rejectSelection(${basename}): deleting added lines ${delStart}-${lastDel}`);
 
   const edit = new vscode.WorkspaceEdit();
-  edit.delete(uri, new vscode.Range(startPos, endPos));
+  edit.replace(uri, new vscode.Range(doc.positionAt(splice.startOffset), doc.positionAt(splice.endOffset)), splice.replacement);
   await applyEditAndAdvance(stateManager, fileWatcher, filePath, fileState, doc, edit, originalNewStart, onStateChanged, 'rejectSelection');
 }
 
@@ -502,30 +752,9 @@ export async function acceptSelection(
   const basename = path.basename(filePath);
   log(`acceptSelection(${basename}): sel=${selStartLine}-${selEndLine}, source=${source}`);
 
-  const fileState = stateManager.getFile(filePath);
-  if (!fileState) { log(`acceptSelection(${basename}): no fileState, skip`); return; }
-
-  const uri = vscode.Uri.file(filePath);
-  const doc = await vscode.workspace.openTextDocument(uri);
-  const allHunks = computeHunks(fileState.baseline, doc.getText());
-  log(`acceptSelection(${basename}): total hunks=${allHunks.length}`);
-
-  // Resolve the hunk at the selection start (1-based), mirroring rejectSelection.
-  const startLine1 = selStartLine + 1;
-  const hunk = allHunks.find(h => startLine1 >= h.newStart && startLine1 < h.newStart + Math.max(1, h.newLines))
-    ?? allHunks.find(h => h.newStart >= startLine1);
-  if (!hunk) { log(`acceptSelection(${basename}): no hunk at selection, skip`); return; }
-
-  // Never a silent partial success: log when the selection reaches into other hunks.
-  const endLine1 = selEndLine + 1;
-  const intersected = allHunks.filter(h => {
-    const hStart = h.newStart;
-    const hEnd = h.newStart + Math.max(1, h.newLines) - 1;
-    return endLine1 >= hStart && startLine1 <= hEnd;
-  });
-  if (intersected.length > 1) {
-    log(`acceptSelection(${basename}): selection spans ${intersected.length} hunks; resolving the hunk at selection start only, ignoring ${intersected.length - 1} other(s)`);
-  }
+  const resolved = await resolveSelectionHunk(stateManager, filePath, selStartLine, selEndLine, 'acceptSelection');
+  if (!resolved) return;
+  const { doc, hunk, fileState } = resolved;
 
   const split = splitHunkByRange(hunk, selStartLine, selEndLine);
   if (!split.hasAddedInRange) {
@@ -539,35 +768,21 @@ export async function acceptSelection(
   }
 
   const originalNewStart = hunk.newStart;
-  const baselineLines = (fileState.baseline ?? '').split('\n');
-  const currentLines = doc.getText().split('\n');
+  // See `acceptHunk`: a null baseline carries no BOM, so seed it from disk.
+  const baselineStr = fileState.baseline ?? bomFromFile(filePath);
 
   // Fold the selected added lines into the baseline at the hunk anchor — just after the
   // hunk's removed block (for a pure addition, oldLines === 0, so that is the insertion
   // point itself). The re-diff realigns the accepted lines as context while any surrounding
   // added lines and the still-present removed lines remain pending.
-  const acceptedLines = currentLines.slice(
-    hunk.newStart - 1 + split.addedStartIdx,
-    hunk.newStart - 1 + split.addedEndIdx,
+  const acceptStartLine = hunk.newStart - 1 + split.addedStartIdx;
+  const acceptEndLine = hunk.newStart - 1 + split.addedEndIdx - 1;
+  const newBaseline = withBomFrom(
+    baselineStr,
+    acceptLinesBaseline(stripBom(baselineStr), doc.getText(), hunk, acceptStartLine, acceptEndLine),
   );
-  const insertAt = hunk.oldStart - 1 + hunk.oldLines; // 0-based baseline line index
-  const newBaseline = [
-    ...baselineLines.slice(0, insertAt),
-    ...acceptedLines,
-    ...baselineLines.slice(insertAt),
-  ].join('\n');
-  log(`acceptSelection(${basename}): folding ${acceptedLines.length} added line(s) into baseline at ${insertAt}`);
+  log(`acceptSelection(${basename}): folding ${acceptEndLine - acceptStartLine + 1} added line(s) into baseline`);
 
-  const remainingHunks = computeHunks(newBaseline, doc.getText());
-  log(`acceptSelection(${basename}): remainingHunks=${remainingHunks.length}`);
-  if (remainingHunks.length === 0) {
-    log(`acceptSelection(${basename}): last change, exitReviewing`);
-    stateManager.exitReviewing(filePath, doc.getText());
-  } else {
-    stateManager.setFile(filePath, { status: 'reviewing', baseline: newBaseline });
-    revealNextHunk(filePath, remainingHunks, originalNewStart);
-  }
-  onStateChanged();
-  log(`acceptSelection(${basename}): done`);
+  finishBaselineAdvance(stateManager, filePath, newBaseline, doc, originalNewStart, onStateChanged, 'acceptSelection');
 }
 

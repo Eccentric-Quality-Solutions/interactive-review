@@ -1,0 +1,132 @@
+# Known, unfixed
+
+Issues found and deliberately not fixed, with enough context to pick up cold. Ordered by
+severity. Everything here is *known* — none of it is a surprise waiting to be rediscovered.
+
+Opened 2026-08-09, from the Phase 4 close-out.
+
+---
+
+# Prioritized: review-UI backlog
+
+Triaged 2026-08-10 against `fc52d93`, after the investigation written up in
+[docs/review-ui-legibility.md](docs/review-ui-legibility.md). Every status below was
+re-verified against the current tree, not carried over from the investigation.
+
+Ordered by value, and the order is the recommendation — do them top-down, stop wherever the
+returns stop being worth it.
+
+## C. Multi-hunk selection accept/reject
+
+**Do first.** ~30-40 lines, command layer only, no differ change.
+
+[commands.ts:497-504](src/commands.ts#L497-L504) already computes the set of hunks a
+selection spans, then deliberately acts on one and logs the overreach. Iterate the set
+instead. This delivers "one gesture per logical edit" — the goal that motivated the
+coalescing idea below — without touching hunk arithmetic.
+
+## D. `acceptHunk` folds the buffer; `acceptFileByPath` folds disk
+
+**Do second.** 3-line guard now, proper fix later.
+
+`acceptHunk` folds `doc.getText()` into the baseline while `acceptFileByPath` folds
+`fs.readFileSync`. Accept with a dirty buffer and the baseline holds text never written to
+disk. Worse than an undo problem: `scanTrackedIntoState` rebuilds from **disk**
+([stateManager.ts:218](src/stateManager.ts#L218)), so any reload resurrects the file with an
+inverted hunk demanding you re-remove text that was never there.
+
+The extension actively invites the dirty-buffer case, since the modified side of the review
+diff *is* the real editor.
+
+**Fix now:** refuse on `doc.isDirty` with a warning. **Fix properly later:** `await doc.save()`
+before folding, which makes `acceptHunk` async and ripples to four call sites.
+
+## F. `git pull` mid-review floods the queue
+
+**Do last, and only the detection half.**
+
+The branch watcher compares the *text* of `.git/HEAD` ([extension.ts:444](src/extension.ts#L444)),
+which does not change on pull, merge, stash pop, `reset --hard`, or same-branch rebase. So
+every file such a command rewrites enters the queue at whole-file scale for changes the user
+never made.
+
+Two cautions, both load-bearing:
+
+1. `extension.ts:442` returns early unless `clearOnBranchSwitch`, which **defaults false** —
+   so the entire branch-switch subsystem is inert for anyone who has not toggled it.
+2. Do **not** fix this by auto-clearing. `clearHunksOnBranchSwitch` re-baselines *all* files,
+   which would silently discard genuine in-progress review entries the pull never touched.
+   That is almost certainly why the default is false.
+
+**Scope:** resolve `.git/HEAD` through `refs/heads/*` and `packed-refs` (or shell out to
+`rev-parse`), detect the change, and *notify* — "working tree changed outside your edits —
+Refresh?". Do not flip the default.
+
+## Dropped: gated hunk coalescing
+
+Merging hunks separated by <= 3 blank/rule lines was recommended and is now **withdrawn**.
+
+It would fix one prose edit fragmenting into six Accept buttons. But whole-file Accept from
+the panel row already collapses that to one click, so the item buys a cosmetic improvement
+over a shipped workaround — at the cost of a `computeHunks` rewrite, a *mandatory* companion
+fix to `splitHunkByRange`/`acceptSelection`/`rejectSelection` (which index by document line
+and would corrupt the baseline or delete unchanged interior lines under a merged hunk), and
+an unresolved design question about whether the gate should apply to code, where roughly half
+of one-line gaps are blank lines.
+
+Item C above is the cheap route to the same goal. Reopen this only if C ships and the
+fragmentation still bites.
+
+---
+
+## 1. Three independent answers to "is this file new"
+
+**Severity:** low — no known wrong behavior today; a drift hazard.
+
+Fixing the enable-window race (see below) left the codebase with three separate places that
+decide whether an on-disk file with no baseline is a *new* file or a *pre-existing* one:
+
+- [`handleDiskCreate`](src/fileWatcher.ts#L390) — new, unless the enable snapshot is running.
+- [`handleDiskChange`](src/fileWatcher.ts#L566) — never new; silently adopts as baseline.
+- [`adoptUntrackedFiles`](src/stateManager.ts#L234) — unconditionally new, no exceptions.
+
+The third is reached from `rebuildState`, i.e. the `interactiveReview.refresh` command. It
+has no guard and no comment tying it to the other two. It isn't wrong today only because
+refresh doesn't run concurrently with enable in practice — a fact nothing enforces.
+
+**Found by:** a test that used `waitForConditionNudged` (which issues a refresh) to observe
+the watcher's classification. The refresh's adopt beat the watcher and won.
+
+**If you touch this:** the useful move is probably not a fourth guard but making the
+decision one function that all three call.
+
+---
+
+## 4. Test scaffolding compensates for a retracted premise
+
+**Severity:** low.
+
+[helpers.ts](src/test/integration/helpers.ts) carries `WAIT_FLOOR_MS = 15000`, built on the
+belief that VS Code's `createFileSystemWatcher` drops external raw-fs create/delete events on
+headless Linux. **That premise was retracted 2026-08-10** — see
+[docs/design.md §4c.1](docs/design.md), which carries the measurements. The July failures were
+inotify starvation on a saturated workstation, not a platform limit.
+
+The nudge was dropped from the five watcher-delivery tests on 2026-09-21 (they now use
+`waitForWatcher`). What remains:
+
+1. Reproduce the one unexplained flake seen in two VM suite runs — loop it ~5× and *save full
+   logs*, don't grep them away.
+2. Reconsider the 15s floor.
+3. Delete [watcherProbe.test.ts](src/test/integration/watcherProbe.test.ts) (self-skips unless
+   `WATCHER_PROBE=1`). With the regular tests honest it is redundant, and the starvation check
+   is a shell one-liner (`cat /proc/sys/fs/inotify/max_user_instances` vs. actual fd usage). If
+   it *stays*, give it assertions — it currently only checks that it ran.
+
+---
+
+we need to confirm accept/discard big buttons that do all files at once
+it seem,s like sometimes it is grabbing bigger chunks of code
+Accept/Discard showing up seems to be occurring much more slowly (possibly because the repo I'm workign in is on a VM?)
+if edits overlap each other, we should have an option that allows one to show a single edit at a time
+interactive review doesn't show the number of fiules in (x) like say problems or ports do

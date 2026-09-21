@@ -1,0 +1,85 @@
+# See docs/test-strategy.md, "The rules" (the CI paragraph under the test commands).
+#
+# Unit + mutation on every push: both run in about a minute and between them prove the
+# regression tests exist *and* can fail. The integration suite (real VS Code, ~4 min) runs on
+# pull requests, on a runner whose inotify limits are raised first — starvation of those
+# limits is what makes the watcher tests flake on the owner's workstation, so a clean runner
+# is also how "flake or real bug" gets settled.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit, property and mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The build stamp reads the commit; a shallow clone is enough for that.
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Unit, property and real-git contract tests
+        run: npm test
+      - name: Mutation check (each regression test must catch its bug)
+        run: npm run test:mutation
+      - name: Deep reload-equals-memory sweep
+        # `npm test` runs 12 seeds to stay fast; the three defects this property has found so
+        # far needed more reach than that. Seeds are fixed, so a failure here reproduces
+        # locally with the same two variables.
+        env:
+          RELOAD_SEEDS: '200'
+          RELOAD_STEPS: '25'
+        run: node --test out-test/test/reloadEqualsMemory.test.js
+      - name: Compile the extension
+        run: npm run compile
+
+  integration:
+    name: Integration (real VS Code)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Raise inotify limits
+        # Stock limits are enough on an idle runner, but the suite's failure mode when they
+        # are not is silent (dropped events look like watcher bugs), so remove the variable.
+        run: |
+          sudo sysctl -w fs.inotify.max_user_instances=1024
+          sudo sysctl -w fs.inotify.max_user_watches=524288
+          sudo sysctl -w fs.inotify.max_queued_events=65536
+      - name: Git identity for tests that commit in the fixture workspace
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+      - name: Cache the VS Code test build
+        uses: actions/cache@v4
+        with:
+          path: .vscode-test
+          key: vscode-test-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Integration suite
+        env:
+          INTERACTIVE_REVIEW_LOG_FILE: ${{ runner.temp }}/interactive-review.log
+        run: xvfb-run -a npm run test:integration
+      - name: Upload extension log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interactive-review-log
+          path: ${{ runner.temp }}/interactive-review.log
+          if-no-files-found: ignore

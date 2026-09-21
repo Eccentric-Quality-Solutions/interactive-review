@@ -17,10 +17,13 @@ the two remaining open design decisions (trigger UX naming; the in-file surface)
 - **Partial-hunk actions.** Allow accepting or rejecting a *selected line range* inside
   a hunk, so a messy hunk mixing wanted and unwanted edits can be split rather than
   forced whole.
-- **Optional in-file decorations surface.** Add a decorations-only review surface
+- ~~**Optional in-file decorations surface.** Add a decorations-only review surface
   (added-line highlighting via `TextEditorDecorationType`, removed lines via peek) as
   an alternative to the native diff editor — resolving open decision §5 #3. Selectable
-  via the existing `useDiffEditor` / `showInlineDecorations` settings.
+  via the existing `useDiffEditor` / `showInlineDecorations` settings.~~
+  **DESCOPED 2026-07-12** — built (`3548dd4`), then removed (`bb7034c`). Decorations
+  cannot render removed lines on stable APIs. §5 #3 still resolved, but the *other* way:
+  the native diff editor is the sole surface. See `docs/design.md` §4e and §5 #3.
 - **Trigger UX.** Surface snapshot-on-command explicitly as **"Begin review"** /
   **"End review"** commands (today it is the ambiguously-named "Enable for this
   project"), plus an optional agent-callable command to open a review at a turn
@@ -37,9 +40,11 @@ disposition model, no `Changeset`/`FileEntry` types, no reactive-watcher hardeni
   and reject as symmetric one-gesture, one-undo actions.
 - `partial-hunk-actions`: accept or reject a selected line range within a hunk, for
   hunks that mix wanted and unwanted changes.
-- `inline-decorations-surface`: an optional in-editor review surface using text
+- ~~`inline-decorations-surface`: an optional in-editor review surface using text
   decorations for added lines (removed lines shown via peek), as an alternative to the
-  native diff editor; resolves the primary-surface decision (§5 #3).
+  native diff editor; resolves the primary-surface decision (§5 #3).~~
+  **DESCOPED 2026-07-12 — not delivered.** Delta spec deleted rather than synced: the
+  capability never reached `openspec/specs/`, so it leaves no trace in the baseline.
 - `review-trigger-ux`: snapshot-on-command trigger surfaced as explicit "Begin review"
   / "End review" commands plus an optional agent-callable hook, completing §5 #2.
 
@@ -53,8 +58,10 @@ disposition model, no `Changeset`/`FileEntry` types, no reactive-watcher hardeni
 - **`src/commands.ts`** — register palette commands wrapping existing accept/reject
   functions; add next/prev-hunk navigation and partial-range accept/reject.
 - **`src/diffEngine.ts`** — line-range-scoped hunk resolution for partial actions.
-- **`src/diffCodeLens.ts`** / new inline decorations module — the optional in-file
-  surface; wire to `useDiffEditor` / `showInlineDecorations`.
+- ~~**`src/diffCodeLens.ts`** / new inline decorations module — the optional in-file
+  surface; wire to `useDiffEditor` / `showInlineDecorations`.~~ **DESCOPED** — no
+  decorations module ships; both settings were removed. `src/diffCodeLens.ts` is still
+  touched, but only for the diff-editor hunk lenses.
 - **`src/extension.ts`** / **`src/reviewPanel.ts`** — command wiring, Begin/End review
   naming, keybinding-driven advance reusing the existing walk/advance path.
 - No changes to the baseline/git storage layer or the changeset state model.

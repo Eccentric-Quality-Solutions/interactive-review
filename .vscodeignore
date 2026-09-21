@@ -1,4 +1,5 @@
 .vscode/**
+.github/**
 .claude/**
 src/**
 out-test/**
@@ -7,6 +8,14 @@ out-integration/**
 .vscode-test.mjs
 docs/**
 openspec/**
+scripts/**
+# Python tooling caches (the editor creates these once a .py file exists in the repo)
+.mypy_cache/**
+**/__pycache__/**
+# Internal working notes — shipping a list of known-unfixed issues to users is not the
+# intent, and `.gitignore` in an installed extension is just noise.
+todo.md
+.gitignore
 skills/**
 design.md
 hunkwise-evaluation.md

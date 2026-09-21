@@ -4,8 +4,8 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, waitForConditionNudged, waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager,
+  sleep, waitForCondition, waitForConditionNudged, waitForWatcher, enableReview, disableReview,
+  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -72,16 +72,66 @@ suite('interactive-review file watcher integration', function () {
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
 
-    // Wait for the new file to enter reviewing (rescan-nudged; headless watcher is flaky)
-    await waitForReviewing(filePath);
+    // Watcher only: a Refresh would adopt the file too, and then this test could not fail.
+    await waitForWatcher(() => sm.getFile(filePath)?.status === 'reviewing');
 
     // For external new files, baseline should be null (file didn't exist before)
     // null-baseline files are NOT stored in git
     const fileState = sm.getFile(filePath);
     assert.strictEqual(fileState?.baseline, null, 'External new file should have null baseline');
+    // 'created' is what only the create handler can say — the same write also fires a
+    // change event, and `handleDiskChange` queues it as 'unbaselined'. Without this line
+    // the test passed with create delivery switched off entirely. It is also the value that
+    // licenses Discard to delete the file, so it is the one that matters to the user.
+    assert.strictEqual(fileState?.nullReason, 'created', 'the create event, not a change event, should classify it');
     const rel = path.relative(root, filePath);
     const gitBaseline = gitGetBaseline(root, rel);
     assert.strictEqual(gitBaseline, undefined, 'Null-baseline files should not be in git');
+  });
+
+  /**
+   * The same external create, but classified while the enable-time snapshot is notionally
+   * still running: it must be adopted as a baseline instead of queued as a new file.
+   *
+   * The flag is held open by hand rather than by racing a real `beginReview`. Reproducing
+   * the original race would mean writing a timing-dependent test to prove a timing bug is
+   * fixed — it would pass or fail on how fast the box is, in the opposite direction from
+   * the bug. Driving the classification input directly is deterministic, and
+   * `keyboardWalk.test.ts` (which now enables with no settle) carries the end-to-end
+   * evidence that the real window is covered.
+   */
+  test('external file creation during the enable snapshot is baselined, not queued', async () => {
+    const root = getWorkspaceRoot();
+    await enableReview();
+
+    const sm = getStateManager();
+    const fw = getFileWatcher();
+    assert.ok(sm && fw, 'StateManager and FileWatcher should be available');
+
+    const filePath = path.join(root, 'during-snapshot.txt');
+    const content = 'written while the snapshot was running\n';
+    const rel = path.relative(root, filePath);
+
+    fw.beginSnapshot();
+    try {
+      writeFileExternally(filePath, content);
+      // Plain wait, not `waitForConditionNudged`: the nudge issues an
+      // `interactiveReview.refresh`, and `rebuildState`'s `adoptUntrackedFiles` is a
+      // separate classifier that turns any untracked on-disk file into a null-baseline
+      // new file. It would race this assertion and win.
+      await waitForCondition(() => gitGetBaseline(root, rel) === content);
+    } finally {
+      fw.endSnapshot();
+    }
+
+    assert.strictEqual(
+      sm.getFile(filePath)?.status, undefined,
+      'File created during the enable snapshot should not be in the review queue'
+    );
+    assert.strictEqual(
+      gitGetBaseline(root, rel), content,
+      'File created during the enable snapshot should be adopted as a baseline'
+    );
   });
 
   test('external file modification preserves original baseline', async () => {
@@ -118,13 +168,14 @@ suite('interactive-review file watcher integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForReviewing(filePath);
+    await waitForWatcher(() => sm.getFile(filePath)?.status === 'reviewing');
 
     // Delete the file externally
     fs.unlinkSync(filePath);
 
-    // State should be cleaned up (null baseline file deleted → remove from tracking)
-    await waitForConditionNudged(() => !sm.getFile(filePath));
+    // State should be cleaned up (null baseline file deleted → remove from tracking). Watcher
+    // only: a Refresh rebuilds from disk, where the file is gone, and would pass this alone.
+    await waitForWatcher(() => !sm.getFile(filePath));
     assert.ok(!fs.existsSync(filePath), 'File should not exist on disk after deletion');
     assert.ok(!sm.getFile(filePath), 'File should be removed from state');
   });
@@ -167,8 +218,10 @@ suite('interactive-review file watcher integration', function () {
     }
 
     // New files have null baseline → tracked in memory, not in git.
-    // Rescan-nudged: the headless Linux watcher drops burst onDidCreate events.
-    await waitForConditionNudged(() => files.every(f => {
+    // Watcher only. This was rescan-nudged on the belief that the headless watcher drops
+    // burst creates; that premise was retracted (docs/design.md §4c.1), and a burst is
+    // precisely what this test exists to prove the watcher delivers.
+    await waitForWatcher(() => files.every(f => {
       return sm.getFile(path.join(root, f))?.status === 'reviewing';
     }));
 
@@ -190,11 +243,14 @@ suite('interactive-review file watcher integration', function () {
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
 
-    // Wait for FileWatcher to detect and enter reviewing with null baseline
-    await waitForCondition(() => {
+    // Rescan-nudged: reaching reviewing is this test's *precondition*; what it asserts is
+    // that a refresh does not lose the file afterwards. A plain wait makes it fail whenever
+    // the host's create event is merely late, which is a different test's subject (`external
+    // file creation is tracked with null baseline`, just above, still takes the plain wait).
+    await waitForConditionNudged(() => {
       const f = sm.getFile(filePath);
       return f?.status === 'reviewing' && f?.baseline === null;
-    }, 8000);
+    });
 
     // Execute the refresh command (same as clicking the refresh button in the panel)
     await vscode.commands.executeCommand('interactiveReview.refresh');
@@ -218,8 +274,9 @@ suite('interactive-review file watcher integration', function () {
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
 
-    // Wait for FileWatcher to detect and enter reviewing with null baseline
-    await waitForConditionNudged(() => {
+    // Wait for FileWatcher to detect and enter reviewing with null baseline. Watcher only:
+    // the premise of this test is that the watcher, not a rescan, put it there.
+    await waitForWatcher(() => {
       const f = sm.getFile(binaryFile);
       return f?.status === 'reviewing' && f?.baseline === null;
     });
@@ -244,8 +301,8 @@ suite('interactive-review file watcher integration', function () {
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
 
-    // Empty files created externally should now be tracked as new files
-    await waitForReviewing(emptyFile);
+    // Empty files created externally should now be tracked as new files (watcher only)
+    await waitForWatcher(() => sm.getFile(emptyFile)?.status === 'reviewing');
 
     const fileState = sm.getFile(emptyFile);
     assert.strictEqual(fileState?.baseline, null, 'Empty new file should have null baseline');

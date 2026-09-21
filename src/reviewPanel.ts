@@ -4,7 +4,10 @@ import * as fs from 'fs';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { computeHunks, hunkId } from './diffEngine';
+import { applyInlineDiffSettings } from './diffSettings';
+import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
 import { log } from './log';
+import { formatBuild, readBuildInfo } from './buildInfo';
 
 import {
   acceptAllFiles,
@@ -21,13 +24,13 @@ interface PanelState {
   respectGitignore: boolean;
   clearOnBranchSwitch: boolean;
   quoteRotationInterval: number;
-  useDiffEditor: boolean;
-  showInlineDecorations: boolean;
   totalFiles: number;
   totalAdded: number;
   totalRemoved: number;
   reviewComplete: boolean;
   files: PanelFile[];
+  /** Which build is running — see scripts/build-stamp.js. */
+  build: string;
 }
 
 interface PanelFile {
@@ -53,6 +56,8 @@ interface PanelHunk {
 export class ReviewPanel implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private _loading: boolean = false;
+  /** Read once: the stamp cannot change under a running extension host. */
+  private readonly build = formatBuild(readBuildInfo());
 
   get loading(): boolean { return this._loading; }
 
@@ -61,7 +66,13 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     private stateManager: StateManager,
     private fileWatcher: FileWatcher,
     private onStateChanged: () => void,
-    private onBaselineChanged?: (filePath: string) => void,
+    /**
+     * Invalidate VS Code's cached baseline document for a path. Called immediately
+     * before every `vscode.diff` — `StateManager.onDidChangeBaseline` already keeps
+     * the cache honest, so this is a cheap second guarantee at the one place where
+     * being wrong is visible to the user (see extension.ts's `fireBaselineChange`).
+     */
+    private refreshBaselineDoc?: (filePath: string) => void,
     private onAfterHunkAction?: () => Promise<void>
   ) {}
 
@@ -84,7 +95,12 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         }
         return;
       }
-      this.handleMessage(msg);
+      // Fire-and-forget: the webview listener is sync, so a rejected accept/discard
+      // would otherwise vanish and leave a panel button looking like it did nothing.
+      void this.handleMessage(msg).catch(err => {
+        log(`panel command '${msg.command}' failed: ${err}`);
+        void vscode.window.showErrorMessage(`Interactive Review: ${msg.command} failed — ${err}`);
+      });
     });
   }
 
@@ -92,6 +108,21 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     if (!this.view || this._loading) return;
     const state = this.buildPanelState();
     this.view.webview.postMessage({ type: 'update', state });
+  }
+
+  /**
+   * Announce that reconciliation removed entries. Dropping a vanished new file changes
+   * `reviewingCount` and `reviewComplete`, which the status bar and the `inReview`
+   * keybinding context read — so a silent removal leaves them stale, and a ghost that was
+   * the last pending file would never flip the bar to "Review complete".
+   *
+   * Deferred rather than fired inline because reconciliation runs *inside* the render
+   * (`onStateChanged` → `refresh` → `buildPanelState`), so a synchronous call would
+   * re-enter it. This settles after one extra pass: the follow-up finds nothing left to
+   * reconcile and announces nothing.
+   */
+  private announceReconcile(): void {
+    queueMicrotask(() => this.onStateChanged());
   }
 
   setLoading(loading: boolean): void {
@@ -120,22 +151,29 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     const files: PanelFile[] = [];
     let totalAdded = 0;
     let totalRemoved = 0;
+    // Entries reconciled away mid-build; removed after the loop rather than during it,
+    // so the map is not mutated while it is being iterated.
+    const vanished: string[] = [];
 
     for (const [filePath, fileState] of this.stateManager.getAllFiles()) {
       if (fileState.status !== 'reviewing') continue;
 
       const fileExists = fs.existsSync(filePath);
+      // Same predicate as StateManager.reconcileVanishedNewFile, reusing the stat just
+      // taken (as isDeleted does below). A new file that is gone from disk has nothing
+      // to review and cannot render a diff — list it and the row is actionless and its
+      // click opens a nonexistent file.
+      if (!fileExists && fileState.baseline === null) {
+        vanished.push(filePath);
+        continue;
+      }
       let currentContent: string;
       if (!fileExists) {
         currentContent = '';
       } else {
-        // Must filter by scheme: when a review diff is open, the baseline side is a
-        // document with the SAME fsPath but scheme 'interactive-review-baseline'. An
-        // unfiltered find can grab that baseline doc, making computeHunks see zero
-        // changes and silently drop the file from the panel.
-        const doc = vscode.workspace.textDocuments.find(
-          d => d.uri.scheme === 'file' && d.uri.fsPath === filePath
-        );
+        // findFileDocument's scheme filter is essential here: without it we could
+        // read the read-only baseline doc and see zero changes. See editorUtils.
+        const doc = findFileDocument(filePath);
         currentContent = doc ? doc.getText() : '';
         if (!doc) {
           try { currentContent = fs.readFileSync(filePath, 'utf-8'); } catch { currentContent = ''; }
@@ -144,6 +182,9 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
 
       const pendingHunks = computeHunks(fileState.baseline, currentContent);
       const isNew = fileState.baseline === null;
+      // Same predicate as StateManager.isDeleted, but reusing the `fileExists` stat
+      // taken above rather than re-stat'ing: one filesystem read per file per refresh,
+      // so `currentContent` and `isDeleted` can't describe two different moments.
       const isDeleted = !fileExists && fileState.baseline !== null;
       // Show 0-hunk entries for new files (null baseline, e.g. new empty file)
       // and deleted files (file missing from disk) so accept/discard remain available.
@@ -179,6 +220,12 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       });
     }
 
+    let reconciled = false;
+    for (const filePath of vanished) {
+      reconciled = this.stateManager.reconcileVanishedNewFile(filePath) || reconciled;
+    }
+    if (reconciled) this.announceReconcile();
+
     files.sort((a, b) => a.filePath.localeCompare(b.filePath));
 
     return {
@@ -187,13 +234,12 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       respectGitignore: this.stateManager.respectGitignore,
       clearOnBranchSwitch: this.stateManager.clearOnBranchSwitch,
       quoteRotationInterval: this.stateManager.quoteRotationInterval,
-      useDiffEditor: this.stateManager.useDiffEditor,
-      showInlineDecorations: this.stateManager.showInlineDecorations,
       totalFiles: files.length,
       totalAdded,
       totalRemoved,
       reviewComplete: this.stateManager.reviewComplete,
       files,
+      build: this.build,
     };
   }
 
@@ -205,11 +251,15 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     value?: boolean;
   }): Promise<void> {
     switch (msg.command) {
-      case 'enable':
-        await vscode.commands.executeCommand('interactiveReview.enable');
+      case 'beginReview':
+        // `enableReview` reports its own failure with a specific message, so a rejection
+        // here is already on screen; letting it reach this method's generic catch would
+        // show the user two notifications for one failure.
+        await vscode.commands.executeCommand('interactiveReview.beginReview')
+          .then(undefined, err => log(`beginReview failed (already reported): ${err}`));
         break;
-      case 'disable':
-        await vscode.commands.executeCommand('interactiveReview.disable');
+      case 'endReview':
+        await vscode.commands.executeCommand('interactiveReview.endReview');
         break;
       case 'setIgnorePatterns':
         if (msg.folders !== undefined) {
@@ -260,7 +310,6 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         if (msg.filePath && msg.hunkId) {
           acceptHunk(this.stateManager, msg.filePath, msg.hunkId, () => {
             this.onStateChanged();
-            this.onBaselineChanged?.(msg.filePath!);
             void this.onAfterHunkAction?.().catch(err => log(`onAfterHunkAction: ${err}`));
           }, 'panel');
         }
@@ -273,114 +322,95 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
           }, 'panel');
         }
         break;
-      case 'setUseDiffEditor':
-        if (msg.value !== undefined) {
-          this.stateManager.setUseDiffEditor(msg.value as boolean);
-        }
-        break;
-      case 'setShowInlineDecorations':
-        if (msg.value !== undefined) {
-          this.stateManager.setShowInlineDecorations(msg.value as boolean);
-          this.onStateChanged();
-        }
-        break;
       case 'openFile':
         if (msg.filePath) {
-          log(`openFile(${path.basename(msg.filePath)}): opening in ${this.stateManager.useDiffEditor ? 'diffEditor' : 'normalEditor'}`);
-          if (this.stateManager.useDiffEditor) {
-            await this.openDiffEditor(msg.filePath);
-          } else {
-            const fileState = this.stateManager.getFile(msg.filePath);
-            const doc = await vscode.window.showTextDocument(vscode.Uri.file(msg.filePath));
-            if (fileState) {
-              const hunks = computeHunks(fileState.baseline, doc.document.getText());
-              if (hunks.length > 0) {
-                const pos = new vscode.Position(Math.max(0, hunks[0].newStart - 1), 0);
-                doc.selection = new vscode.Selection(pos, pos);
-                doc.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-              }
-            }
-          }
+          log(`openFile(${path.basename(msg.filePath)}): opening in diffEditor`);
+          await this.openDiffEditor(msg.filePath);
         }
         break;
       case 'openDeletedDiff':
         if (msg.filePath) {
-          const fileName = path.basename(msg.filePath);
-          const baselineUri = vscode.Uri.file(msg.filePath).with({ scheme: 'interactive-review-baseline' });
-          const emptyUri = vscode.Uri.from({ scheme: 'untitled', path: msg.filePath + '.deleted' });
-          await this.ensureInlineDiff();
-          await vscode.commands.executeCommand('vscode.diff', baselineUri, emptyUri, `${fileName} (deleted)`);
+          // Route through openDiffEditor rather than straight to the empty-diff
+          // view: the panel's `isDeleted` state can be stale by the time the
+          // click lands (file recreated since the last refresh), and
+          // openDiffEditor re-checks live state and falls back to the normal
+          // baseline ⟷ file diff.
+          log(`openDeletedDiff(${path.basename(msg.filePath)}): opening in diffEditor`);
+          await this.openDiffEditor(msg.filePath);
         }
         break;
       case 'jumpToHunk':
         if (msg.filePath && msg.hunkId) {
-          log(`jumpToHunk(${path.basename(msg.filePath)}): hunkId=${msg.hunkId}, opening in ${this.stateManager.useDiffEditor ? 'diffEditor' : 'normalEditor'}`);
-          if (this.stateManager.useDiffEditor) {
-            await this.openDiffEditor(msg.filePath, msg.hunkId);
-          } else {
-            const fileState = this.stateManager.getFile(msg.filePath);
-            if (fileState) {
-              const doc = await vscode.window.showTextDocument(vscode.Uri.file(msg.filePath));
-              const hunk = computeHunks(fileState.baseline, doc.document.getText())
-                .find(h => hunkId(h) === msg.hunkId);
-              if (hunk) {
-                const pos = new vscode.Position(Math.max(0, hunk.newStart - 1), 0);
-                doc.selection = new vscode.Selection(pos, pos);
-                doc.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-              }
-            }
-          }
+          log(`jumpToHunk(${path.basename(msg.filePath)}): hunkId=${msg.hunkId}, opening in diffEditor`);
+          await this.openDiffEditor(msg.filePath, msg.hunkId);
         }
         break;
     }
   }
 
   /**
-   * Force the review diff to render as a single-column inline (unified) view —
-   * removed baseline lines in red directly above the added lines in green — rather
-   * than the default side-by-side panes. `vscode.diff` exposes no per-call override,
-   * so the only levers are global `diffEditor.*` settings; we nudge them (idempotent
-   * — only writes when they differ) whenever we open a review diff:
-   *   - `renderSideBySide` → false: single-column unified view.
-   *   - `codeLens` → true: the diff editor hides CodeLenses by default, which would
-   *     swallow our per-hunk Accept/Discard actions; opt back in.
-   * These are deliberately global: they also affect git and other diffs while the
-   * extension is in use.
+   * Force this diff to render single-column inline with CodeLenses visible — removed
+   * baseline lines in red above the added lines in green, per-hunk Accept/Discard on
+   * each. The only levers are global `diffEditor.*` settings, borrowed for the session
+   * and given back when it ends; `diffSettings.ts` owns the how and the why.
    */
   private async ensureInlineDiff(): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('diffEditor');
-    if (cfg.get<boolean>('renderSideBySide') !== false) {
-      await cfg.update('renderSideBySide', false, vscode.ConfigurationTarget.Global);
-    }
-    if (cfg.get<boolean>('codeLens') !== true) {
-      await cfg.update('codeLens', true, vscode.ConfigurationTarget.Global);
-    }
+    await applyInlineDiffSettings(this.context.globalState);
+  }
+
+  /**
+   * Open a deleted file's diff as baseline ⟷ empty modified doc. This is what the
+   * bottom panel already does on click; routing queue navigation through it too
+   * means auto-advancing onto a deleted file no longer opens VS Code's
+   * "file not found" error on the missing modified side.
+   */
+  private async openDeletedDiffEditor(filePath: string): Promise<void> {
+    const fileName = path.basename(filePath);
+    const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
+    // Empty modified side keyed to the real fsPath (see the content provider in
+    // extension.ts) so the file-level Accept/Restore lenses render on this side.
+    const emptyUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-deleted' });
+    this.refreshBaselineDoc?.(filePath);
+    await this.ensureInlineDiff();
+    await vscode.commands.executeCommand('vscode.diff', baselineUri, emptyUri, `${fileName} (deleted)`);
   }
 
   private async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
+    // A new file that has since vanished has no side to show at all — reconcile it out
+    // of the queue rather than opening `vscode.diff` against a file that isn't there.
+    // Reached when panel state is stale relative to disk, or from the queue advance,
+    // which reads live state and never passes through buildPanelState.
+    if (this.stateManager.reconcileVanishedNewFile(filePath)) {
+      this.announceReconcile();
+      return;
+    }
+
+    // Deleted files have no live modified side — route them to the empty-diff view
+    // so navigation (and cross-file queue advance) never errors on a missing file.
+    if (this.stateManager.isDeleted(filePath)) {
+      await this.openDeletedDiffEditor(filePath);
+      return;
+    }
+
     const fileName = path.basename(filePath);
     const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' });
     const currentUri = vscode.Uri.file(filePath);
 
+    this.refreshBaselineDoc?.(filePath);
     await this.ensureInlineDiff();
     await vscode.commands.executeCommand('vscode.diff', baselineUri, currentUri, `${fileName} (interactive-review)`);
 
     // Jump to the target hunk position in the diff editor's modified side.
-    // Prefer the embedded editor (viewColumn undefined) over a normal editor for the same file.
+    // findFileEditor prefers the embedded modified pane over a normal editor.
     const fileState = this.stateManager.getFile(filePath);
-    const candidates = vscode.window.visibleTextEditors.filter(
-      e => e.document.uri.scheme === 'file' && e.document.uri.fsPath === filePath
-    );
-    const editor = candidates.find(e => e.viewColumn === undefined) ?? candidates[0];
+    const editor = findFileEditor(filePath);
     if (fileState && editor) {
       const hunks = computeHunks(fileState.baseline, editor.document.getText());
       const target = targetHunkId
         ? hunks.find(h => hunkId(h) === targetHunkId)
         : hunks[0];
       if (target) {
-        const pos = new vscode.Position(Math.max(0, target.newStart - 1), 0);
-        editor.selection = new vscode.Selection(pos, pos);
-        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+        revealHunkPosition(editor, target.newStart);
       }
     }
   }
@@ -411,29 +441,22 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     const others = Array.from(this.stateManager.getAllFiles().entries())
       .filter(([fp, s]) => s.status === 'reviewing' && fp !== fromPath)
       .map(([fp]) => fp)
+      // Step over — and clean up — new files that have vanished from disk. They cannot be
+      // opened, so leaving them in the queue would stall the walk on a file that never
+      // appears. Safe to mutate here: Array.from already materialised the entries.
+      .filter(fp => {
+        if (!this.stateManager.reconcileVanishedNewFile(fp)) return true;
+        // The walk can end here (returning false below with no other candidate), so the
+        // removal must be announced or it lands after this turn's last refresh.
+        this.announceReconcile();
+        return false;
+      })
       .sort((a, b) => a.localeCompare(b));
     if (others.length === 0) return false;
     const next = others.find(fp => fp.localeCompare(fromPath) > 0) ?? others[0];
-    await this.openReviewingFile(next);
+    // No hunk id → openDiffEditor lands on the file's first hunk.
+    await this.openDiffEditor(next);
     return true;
-  }
-
-  /** Open a reviewing file in the configured surface (diff or normal editor) at its first hunk. */
-  private async openReviewingFile(filePath: string): Promise<void> {
-    if (this.stateManager.useDiffEditor) {
-      await this.openDiffEditor(filePath);
-      return;
-    }
-    const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
-    const fileState = this.stateManager.getFile(filePath);
-    if (fileState) {
-      const first = computeHunks(fileState.baseline, editor.document.getText())[0];
-      if (first) {
-        const pos = new vscode.Position(Math.max(0, first.newStart - 1), 0);
-        editor.selection = new vscode.Selection(pos, pos);
-        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-      }
-    }
   }
 
   private getHtml(webview: vscode.Webview): string {

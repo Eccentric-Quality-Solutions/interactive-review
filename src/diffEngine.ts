@@ -1,4 +1,18 @@
 import * as Diff from 'diff';
+import { stripBom } from './textFile';
+
+/**
+ * `stripTrailingCr` is implemented by the pinned runtime (`diff@5.2.2`, see
+ * `lib/diff/line.js`) but missing from `@types/diff@5.2.3`'s `LinesOptions`. Augmenting is
+ * preferred over casting the options object: a cast would silence a genuine typo just as
+ * happily, whereas this keeps the call site type-checked and documents exactly which
+ * upstream gap is being papered over. Delete this block when the typings gain the field.
+ */
+declare module 'diff' {
+  interface LinesOptions {
+    stripTrailingCr?: boolean | undefined;
+  }
+}
 
 export interface ParsedHunk {
   oldStart: number;
@@ -13,6 +27,39 @@ export interface ParsedHunk {
 // within a single review session (no random component needed).
 export function hunkId(hunk: ParsedHunk): string {
   return `${hunk.newStart}:${hunk.newLines}:${hunk.oldStart}:${hunk.oldLines}`;
+}
+
+/**
+ * Resolve the pending hunk a 1-based document line falls into, else the first hunk starting
+ * at/after that line, else undefined (the line sits past every hunk). `newLines` is floored
+ * to 1 so a pure-removal hunk (newLines === 0) still occupies its anchor line.
+ *
+ * The single source of truth for "which hunk does this line resolve to", shared by the
+ * cursor-driven (`hunkAtCursor`) and selection-driven (`acceptSelection`/`rejectSelection`)
+ * commands. Callers that must always land on a hunk fall back to `hunks[0]` themselves —
+ * that fallback is intentionally *not* baked in here, since selection commands treat
+ * "past every hunk" as a skip rather than wrapping to the first hunk.
+ */
+export function hunkAtLine(hunks: ParsedHunk[], line1Based: number): ParsedHunk | undefined {
+  return hunks.find(h => line1Based >= h.newStart && line1Based < h.newStart + Math.max(1, h.newLines))
+    ?? hunks.find(h => h.newStart >= line1Based);
+}
+
+/**
+ * The 0-based document line a hunk's Accept/Discard CodeLens is anchored to.
+ *
+ * A CodeLens renders immediately *above* its anchor line, so the anchor decides which block
+ * the buttons appear to belong to. It is the hunk's first line, which puts the buttons
+ * directly above the block they act on.
+ *
+ * Pure and here rather than in `diffCodeLens.ts` so the property that matters can be tested
+ * without an editor: **the anchor must resolve, via `hunkAtLine`, back to its own hunk.**
+ * The previous anchor — the line *after* the hunk — failed that property for any hunk with
+ * a neighbour, which is how a user clicking Accept on a 13-line deletion resolved a
+ * different, one-line hunk instead.
+ */
+export function lensLineForHunk(hunk: ParsedHunk, lineCount: number): number {
+  return Math.min(Math.max(0, hunk.newStart - 1), Math.max(0, lineCount - 1));
 }
 
 export interface HunkRangeSplit {
@@ -55,8 +102,68 @@ export function splitHunkByRange(
   };
 }
 
+/**
+ * Does this content differ from its baseline in a way `computeHunks` will report?
+ *
+ * The authority on "has this file changed", and it exists so that question has exactly one
+ * answer. `computeHunks` is EOL-insensitive (see below), so a caller that gates on a raw
+ * `current !== baseline` disagrees with it for EOL-only writes: the file enters `reviewing`
+ * and then renders zero hunks. The panel skips such an entry while `reviewingCount` still
+ * counts it, so the status bar reads "N files to review" over an empty panel and
+ * `reviewComplete` can never fire — permanently, since nothing rewrites the old-EOL baseline.
+ *
+ * Kept as a string compare rather than `computeHunks(...).length > 0`: this runs once per
+ * tracked file on every load and rebuild (thousands of files in a large workspace), and
+ * running Myers over each one to answer a yes/no question is work the fast path can't afford.
+ * The normalization below is the same equivalence `stripTrailingCr` applies token-wise.
+ */
+export function hasReportableDiff(baseline: string | null, current: string): boolean {
+  if (baseline === null) return true; // new file — no baseline to match
+  // Both normalizations must match `computeHunks` exactly. A gate that is stricter than
+  // the differ is the failure described above — reviewing with zero hunks, forever.
+  const normalize = (s: string) => stripBom(s).replace(/\r\n/g, '\n');
+  return normalize(baseline) !== normalize(current);
+}
+
+/**
+ * `stripTrailingCr` makes the comparison EOL-insensitive, and it is load-bearing rather
+ * than cosmetic. jsdiff splits on `\n` and compares whole tokens with `===`, so the `\r`
+ * of a CRLF file is part of every token: converting a file's line endings leaves no token
+ * in the old sequence equal to any token in the new one, Myers finds a zero-length common
+ * subsequence, and the loop below folds the resulting delete-all/insert-all into a SINGLE
+ * hunk spanning the entire file. Measured on this repo: 696 of 697 lines of fileWatcher.ts
+ * in one hunk, for a change no human would call a change — and it buries any real edit made
+ * in the same write, which is the case that actually costs the user something.
+ *
+ * VSCode's diff editor cannot show an EOL difference at all: its text model stores lines
+ * plus one EOL setting, so mixed endings are not representable. Without this option the
+ * extension reports a whole-file hunk against a diff editor painting nothing.
+ *
+ * Safe for every consumer. Normalization cannot change line counts, so `newStart`/`newLines`
+ * and the line-indexed splices in `acceptHunk`/`discardHunk` are unaffected — those build
+ * their arrays from the raw baseline and document text and never read `addedContent`.
+ * The only visible effect is that `addedContent`/`removedContent` come back without `\r`;
+ * nothing in production reads them.
+ *
+ * Deliberately NOT paired with `ignoreWhitespace`. A whitespace-only change is sometimes
+ * exactly what a reviewer needs to see, so reindents and trailing-whitespace strips keep
+ * costing what they cost.
+ *
+ * `stripBom` is the same kind of normalization applied to the same kind of mismatch: the
+ * baseline carries a BOM (git blob bytes) while the buffer does not (VS Code strips it on
+ * open), so without this every BOM'd file shows an unresolvable phantom hunk on line 1.
+ * It is safe for the same reason `stripTrailingCr` is — removing a leading BOM cannot
+ * change a line count, so `newStart`/`newLines` and the line-indexed splices in
+ * `acceptHunk`/`discardHunk` are unaffected. Note those splices deliberately still slice
+ * the *raw* baseline, which keeps the BOM where it belongs: in the stored baseline and in
+ * the file `discardFileByPath` writes back from it.
+ */
 export function computeHunks(baseline: string | null, current: string): ParsedHunk[] {
-  const changes = Diff.diffLines(baseline ?? '', current);
+  const changes = Diff.diffLines(
+    baseline === null ? '' : stripBom(baseline),
+    stripBom(current),
+    { stripTrailingCr: true },
+  );
 
   const hunks: ParsedHunk[] = [];
   let oldLine = 1;

@@ -6,17 +6,32 @@ explicit "review complete" state. Built for the workflow where an AI agent (or a
 has just changed a batch of files and you want to go through them deliberately, the way
 Cursor's classic review flow feels.
 
-It works with **any** source of changes — an AI assistant, a script, or your own edits —
+It works with **any** tool that writes your files — an AI assistant, a script, a formatter —
 because it diffs against a private baseline snapshot rather than hooking into a specific
-tool. Runs on **stable VS Code APIs only** (no proposed APIs), so it installs on stable VS
-Code without Insiders or `argv.json` flags.
+tool. (Edits you make and save by hand in VS Code are folded into the baseline silently, not
+queued for review — only out-of-band writes are surfaced.) Runs on **stable VS Code APIs
+only** (no proposed APIs).
+
+NOTE: **Interactive Review is a fork of [hunkwise](https://github.com/molon/hunkwise) by
+[molon](https://github.com/molon)** (MIT-licensed). The coolest stuff are molon's work, the bugs I claim as my own.
 
 ## Status
 
 Early development. The single-file review loop (baseline → per-hunk `Accept`/`Discard`
 CodeLens in a native diff editor → baseline update) works today, along with the
-bounded-changeset flow (cross-file auto-advance and an explicit review-complete state). See
-[`design.md`](design.md) for the architecture and phased plan.
+bounded-changeset flow (cross-file auto-advance and an explicit review-complete state).
+
+**Documentation map:**
+
+| Doc | What it answers |
+| --- | --- |
+| [`docs/adr/`](docs/adr/README.md) | **Settled decisions** — one record per verdict, with the fact that forced it |
+| [`docs/design.md`](docs/design.md) | Architecture, phased plan, and the dated narrative of how the build went |
+| [`todo.md`](todo.md) | **The prioritized backlog** — known, unfixed issues, in recommended order |
+| [`docs/review-ui-legibility.md`](docs/review-ui-legibility.md) | Why one edit can become six Accept buttons, and why a file sometimes paints whole |
+| [`docs/terminal-edits-not-captured.md`](docs/terminal-edits-not-captured.md) | How a user's save is told apart from an agent's write |
+| [`docs/interactive-review-model.md`](docs/interactive-review-model.md) | The review-flow *concept* this reproduces |
+| [`docs/prior-art-and-alternatives.md`](docs/prior-art-and-alternatives.md) · [`docs/hunkwise-evaluation.md`](docs/hunkwise-evaluation.md) | What else exists, and why this is a fork of hunkwise |
 
 ## Install
 
@@ -34,12 +49,39 @@ don't hot-reload, so re-run the package + install + reload steps after pulling c
 
 ## Using it
 
-1. **Enable** — Command Palette → *Interactive Review: Enable*. This snapshots a private
-   baseline of your working tree; every later change is diffed against it, no matter what
-   made the change.
-2. **Make edits** — let an AI agent, a script, or you change files.
+1. **Begin review** — Command Palette → *Interactive Review: Begin review*. This snapshots a
+   private baseline of your working tree; every later change is diffed against it, no matter
+   what made the change.
+2. **Make edits** — let an AI agent, a script, or a formatter change files. (Edits you type
+   and save by hand are adopted into the baseline silently, so they won't appear in the
+   queue.)
 3. **Walk the queue** — the **Interactive Review** panel (bottom panel, alongside Terminal
    and Problems) lists every changed file. Click a file or hunk to open it.
+4. **End review** — Command Palette → *Interactive Review: End review*, or the button in the
+   panel's settings screen. This closes the session and discards the baseline; your files are
+   left exactly as they are on disk.
+
+A review is a **bounded session you walk to completion**, not a mode you leave switched on.
+
+### Starting a review from an agent
+
+`interactiveReview.beginReview` is the begin-review hook, and it is safe to invoke
+programmatically: it takes no arguments, shows no dialogs, needs no visible panel, and its
+promise resolves only once the baseline snapshot is complete. An agent can call it at a turn
+boundary to open a review over the edits it is about to make:
+
+```ts
+await vscode.commands.executeCommand('interactiveReview.beginReview');
+// ...agent makes its edits; each one lands in the review queue...
+await vscode.commands.executeCommand('interactiveReview.endReview'); // end the session
+```
+
+Beginning a review is tool-agnostic: the extension diffs the working tree against its own
+baseline, so it never needs to know which agent made a change.
+
+> **Breaking change:** these commands were previously `interactiveReview.enable` and
+> `interactiveReview.disable`. The old IDs are gone — no aliases. Update any custom
+> keybindings, tasks, or agent integrations that reference them.
 
 ### Review surface
 
@@ -60,20 +102,30 @@ selection actions work on messy hunks where you want only *some* of the added li
 folds the selected added lines into the baseline (the rest stay pending), reject deletes
 them. When the last hunk across all files is resolved, the panel shows **review complete**.
 
-> **Heads-up:** while enabled on the diff-editor surface, the extension sets the *global* VS
+> **Heads-up:** while a review session is open, the extension borrows the *global* VS
 > Code settings `diffEditor.renderSideBySide = false` and `diffEditor.codeLens = true` so
 > review diffs render inline with visible Accept/Discard buttons. VS Code has no per-diff
-> override for these, so the change also affects your **other** (git, manual) diffs. Flip
-> them back in Settings if you prefer side-by-side.
+> override for these, so the change also affects your **other** (git, manual) diffs while
+> the session lasts. **Ending the review** puts your previous values back — including
+> removing the keys entirely if you never set them. Closing VS Code (or uninstalling)
+> with a review still open leaves them forced, since the session is what holds them;
+> run **End review** first.
+
+### File types and encodings
+
+Review is a **text** operation, and the scope is deliberate:
+
+- **UTF-8 is assumed**, with or without a BOM — a BOM is normalized away for comparison
+  and left untouched in the file itself. Other encodings (UTF-16, legacy code pages) are
+  read as UTF-8 and will diff as nonsense; they are not supported.
+- **Binary files are never baselined.** A binary file created during a session still
+  appears in the queue so you can accept or discard it, but its contents are never stored
+  as a baseline and never written back over the file.
 
 ### Settings
 
-Open the panel's **gear** icon. Notable option:
-
-- **Open diff editor from panel** (default *on*) — the inline-diff surface above. Turn it
-  *off* to review with in-editor decorations instead: added lines are highlighted in place,
-  and removed lines are reachable via a *"Show N removed lines"* peek (stable VS Code APIs
-  can't render deleted lines inline in a normal editor).
+Open the panel's **gear** icon for exclude patterns, gitignore handling, branch-switch
+behavior, and the quote-rotation interval.
 
 Settings persist in `.vscode/interactive-review/` **per workspace**, not in your VS Code
 `settings.json`. One consequence: changing a default in code only affects workspaces
@@ -113,8 +165,9 @@ What this fork changes:
   and renamed the command / view / URI-scheme / state-directory ids — and the internal
   identifiers — accordingly (e.g. hunkwise's `HunkwiseGit` baseline-git module is now
   `BaselineGit`).
-- **In progress:** a bounded *changeset* state machine (turn boundary + auto-advance +
-  review-complete) — the piece hunkwise's continuous, unbounded monitor does not have.
+- **Added a bounded *changeset* state machine** (turn boundary + cross-file auto-advance +
+  an explicit review-complete state) — the piece hunkwise's continuous, unbounded monitor
+  does not have.
 
 Both the original work and these modifications are under the MIT License — see
 [`LICENSE`](LICENSE), which retains molon's copyright notice as required.

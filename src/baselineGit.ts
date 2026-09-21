@@ -6,13 +6,64 @@ import { normalizePath } from './pathNormalize';
 
 const execFileAsync = promisify(execFile);
 
-interface Settings {
+export interface Settings {
   ignorePatterns: string[];
   respectGitignore: boolean;
   clearOnBranchSwitch: boolean;
   quoteRotationInterval: number;
-  useDiffEditor: boolean;
-  showInlineDecorations: boolean;
+}
+
+/**
+ * The baseline repo exists and claims to have a HEAD commit, but its object
+ * database can't be read — the classic shape is zero-length object files left
+ * behind when the machine died mid-write (ext4 delayed allocation), e.g. a VM
+ * suspended while a snapshot was being committed.
+ *
+ * This is deliberately distinct from "the repo has no commits yet", which is a
+ * legitimately empty baseline. Conflating the two is actively dangerous: callers
+ * treat every file absent from the tracked list as *externally created*, so an
+ * empty list turns the whole workspace into null-baseline "new" files — and
+ * discarding a new file deletes it from disk.
+ */
+export class BaselineUnreadableError extends Error {
+  constructor(operation: string, public readonly cause: unknown) {
+    super(`baseline repo unreadable during ${operation}: ${cause}`);
+    this.name = 'BaselineUnreadableError';
+  }
+}
+
+/**
+ * How many `git hash-object` processes may run at once during a batch snapshot.
+ *
+ * Each one is a process plus a pipe, so the ceiling that matters is the file-descriptor
+ * limit, not the CPU count. 32 keeps a large workspace comfortably inside a 1024-fd
+ * default while still being far faster than serial hashing — the work is dominated by
+ * process startup, so concurrency past this buys very little.
+ */
+const HASH_CONCURRENCY = 32;
+
+/**
+ * `Promise.all` with a ceiling on how many run concurrently. Results keep input order.
+ *
+ * A worker-pool rather than chunked batches: chunking makes every batch wait for its
+ * slowest member, which matters here because file sizes vary by orders of magnitude.
+ */
+async function mapWithLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -20,11 +71,6 @@ const DEFAULT_SETTINGS: Settings = {
   respectGitignore: true,
   clearOnBranchSwitch: false,
   quoteRotationInterval: 30,
-  // The diff editor (forced to inline/unified rendering) is the default review
-  // surface: it shows removed baseline lines in red above the added lines in
-  // green, which the stable-API inline-decorations surface cannot do.
-  useDiffEditor: true,
-  showInlineDecorations: false,
 };
 
 /**
@@ -51,6 +97,7 @@ export class BaselineGit {
   private destroyed = false;
   private initPromise: Promise<void> | undefined;
   private log: (message: string) => void;
+  private _baselineLost = false;
 
   constructor(stateDir: string, workspaceRoot: string, logger?: (message: string) => void) {
     this.stateDir = stateDir;
@@ -58,6 +105,14 @@ export class BaselineGit {
     this.workTree = workspaceRoot;
     this.log = logger ?? ((msg: string) => console.warn(`[interactive-review] ${msg}`));
   }
+
+  /**
+   * True when `initGit` had to throw away an existing repo and start over, so the
+   * empty tracked list it now returns reflects *destroyed* baselines rather than a
+   * session that never had any. Callers must not read that emptiness as "every file
+   * on disk is new" — see `BaselineUnreadableError`. Cleared by `resetRepo`.
+   */
+  get baselineLost(): boolean { return this._baselineLost; }
 
   // ── env / low-level git ───────────────────────────────────────────────────
 
@@ -67,11 +122,27 @@ export class BaselineGit {
       GIT_DIR: this.gitDir,
       GIT_WORK_TREE: this.workTree,
       GIT_TERMINAL_PROMPT: '0',
+      // Every path this class hands to git is a literal filename, never a pattern. Without
+      // this git reads `[...]`, `*` and `?` in a pathspec as glob syntax, so a file named
+      // `x[1].txt` matched `x1.txt` as well — confirmed against a scratch repo, where
+      // renaming one file rewrote the other's baseline entry. Set on the environment rather
+      // than per-call so `ls-files`, `update-index --force-remove` and any future pathspec
+      // site are covered by construction.
+      GIT_LITERAL_PATHSPECS: '1',
     };
   }
 
   private async git(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', ...args], {
+    const { stdout } = await execFileAsync('git', [
+      '-c', 'core.quotepath=false',
+      // The baseline repo runs against the user's work tree and therefore inherits their
+      // global git config. Two settings there break it outright: `commit.gpgsign=true`
+      // makes every snapshot block on pinentry or fail, and `core.hooksPath` points our
+      // private commits at the project's own hooks. Neither is ours to run.
+      '-c', 'commit.gpgsign=false',
+      '-c', 'core.hooksPath=',
+      ...args,
+    ], {
       cwd: this.workTree,
       env: this.env,
       maxBuffer: 10 * 1024 * 1024, // 10 MB — default 1 MB is too small for large files
@@ -96,12 +167,6 @@ export class BaselineGit {
         quoteRotationInterval: (typeof parsed.quoteRotationInterval === 'number' && Number.isFinite(parsed.quoteRotationInterval) && parsed.quoteRotationInterval >= 0)
           ? parsed.quoteRotationInterval
           : DEFAULT_SETTINGS.quoteRotationInterval,
-        useDiffEditor: typeof parsed.useDiffEditor === 'boolean'
-          ? parsed.useDiffEditor
-          : DEFAULT_SETTINGS.useDiffEditor,
-        showInlineDecorations: typeof parsed.showInlineDecorations === 'boolean'
-          ? parsed.showInlineDecorations
-          : DEFAULT_SETTINGS.showInlineDecorations,
       };
     } catch {
       return { ...DEFAULT_SETTINGS, ignorePatterns: [...DEFAULT_SETTINGS.ignorePatterns] };
@@ -111,6 +176,10 @@ export class BaselineGit {
   saveSettings(settings: Settings): void {
     try {
       fs.mkdirSync(this.stateDir, { recursive: true });
+      // Land the ignore rule in the same breath the folder is first created, so
+      // settings written before review is enabled can't leak into the project's
+      // git (settings.json can be persisted from the panel while still disabled).
+      this.ensureGitignore();
       fs.writeFileSync(this.settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
     } catch (err) {
       this.log(`saveSettings failed: ${err}`);
@@ -143,7 +212,29 @@ export class BaselineGit {
     }
   }
 
+  /**
+   * Write a self-contained `.gitignore` into the state dir so the *project's*
+   * git ignores everything under `.vscode/interactive-review/` (the nested git
+   * repo, settings, baselines). A single `*` rule matches all contents — git
+   * reads .gitignore files even inside untracked directories, so this needs no
+   * changes to the user's root .gitignore. Written idempotently; skipped if the
+   * file already exists so we never clobber a user edit.
+   */
+  private ensureGitignore(): void {
+    const gitignorePath = path.join(this.stateDir, '.gitignore');
+    try {
+      if (fs.existsSync(gitignorePath)) return;
+      fs.mkdirSync(this.stateDir, { recursive: true });
+      // Ignore all contents of this directory from the enclosing project repo.
+      fs.writeFileSync(gitignorePath, '# Managed by the Interactive Review extension.\n# Keeps review state out of your project\'s git.\n*\n', 'utf-8');
+    } catch (err) {
+      this.log(`ensureGitignore failed: ${err}`);
+    }
+  }
+
   private async doInitGit(): Promise<void> {
+    // Keep review state out of the enclosing project's git (idempotent).
+    this.ensureGitignore();
     // Check for a valid git repo: HEAD file must exist. If the directory
     // exists but HEAD is missing, the repo is corrupted (e.g. interrupted
     // init). Re-initialize from scratch in that case.
@@ -151,6 +242,10 @@ export class BaselineGit {
     if (!fs.existsSync(this.gitDir) || !fs.existsSync(headPath)) {
       if (fs.existsSync(this.gitDir)) {
         this.log('initGit: corrupted git dir detected (HEAD missing), re-initializing');
+        // Whatever baselines this repo held are gone. Flag it so `load()` reports a
+        // lost session instead of reading the fresh repo's empty tracked list as
+        // proof that every file in the workspace is newly created.
+        this._baselineLost = true;
         try {
           fs.rmSync(this.gitDir, { recursive: true, force: true });
         } catch (err) {
@@ -197,6 +292,10 @@ export class BaselineGit {
           { env: this.env },
           (err, stdout) => (err ? reject(err) : resolve(stdout.trim()))
         );
+        // Writing to git's stdin can emit EPIPE if git exits early. Without this
+        // listener Node rethrows it as an uncaught exception and crashes the host
+        // (the try/catch below can't see an unhandled stream 'error' event).
+        child.stdin!.on('error', reject);
         child.stdin!.end(content, 'utf-8');
       });
       await this.git(['update-index', '--add', '--cacheinfo', `100644,${hash},${rel}`]);
@@ -278,20 +377,29 @@ export class BaselineGit {
     if (files.length === 0) return;
     await this.initGit();
     try {
-      // Hash all blobs in parallel, then stage all at once and commit once
-      const entries = await Promise.all(
-        files.map(({ filePath, content }) =>
-          new Promise<{ rel: string; hash: string }>((resolve, reject) => {
-            const rel = normalizePath(path.relative(this.workTree, filePath));
-            const child = execFile(
-              'git',
-              ['hash-object', '-w', '--stdin'],
-              { env: this.env },
-              (err, stdout) => (err ? reject(err) : resolve({ rel, hash: stdout.trim() }))
-            );
-            child.stdin!.end(content, 'utf-8');
-          })
-        )
+      // Hash blobs concurrently but BOUNDED. This was a bare `Promise.all` over every
+      // file, which spawns one `git hash-object` process per workspace file — a few
+      // thousand at once in a real repo, which fails as a group on EMFILE/EAGAIN.
+      //
+      // The failure mode was what made it serious rather than slow: the catch below
+      // swallowed it, so `Begin review` came up enabled with an *empty* baseline repo,
+      // which looks exactly like "nothing to review". Every subsequent edit then surfaced
+      // as a whole-file unbaselined hunk. `snapshotWorkspace` now reports the throw to the
+      // user; this cap is what stops it happening in the first place.
+      const entries = await mapWithLimit(files, HASH_CONCURRENCY, ({ filePath, content }) =>
+        new Promise<{ rel: string; hash: string }>((resolve, reject) => {
+          const rel = normalizePath(path.relative(this.workTree, filePath));
+          const child = execFile(
+            'git',
+            ['hash-object', '-w', '--stdin'],
+            { env: this.env },
+            (err, stdout) => (err ? reject(err) : resolve({ rel, hash: stdout.trim() }))
+          );
+          // Guard against an uncaught EPIPE crashing the host if git exits early;
+          // routes the stream error into the promise so the try/catch handles it.
+          child.stdin!.on('error', reject);
+          child.stdin!.end(content, 'utf-8');
+        })
       );
       // Stage all entries, chunked to avoid OS argument length limits
       const CHUNK = 100;
@@ -301,7 +409,11 @@ export class BaselineGit {
       }
       await this.commit();
     } catch (err) {
+      // Logged *and* rethrown. Callers that route through `gitQueue` still swallow it into
+      // the log exactly as before; `snapshotWorkspace` awaits it directly so it can tell
+      // the user that this session has no baselines rather than showing an empty queue.
       this.log(`snapshotBatch failed (${files.length} files): ${err}`);
+      throw err;
     }
   }
 
@@ -325,11 +437,16 @@ export class BaselineGit {
     }
   }
 
+  /**
+   * `--no-verify` is redundant with the empty `core.hooksPath` in `git()` and kept anyway:
+   * it states the intent at the call site, and it does not depend on the empty-path
+   * override behaving identically across git versions.
+   */
   private async commit(): Promise<void> {
     if (await this.hasHead()) {
-      await this.git(['commit', '--amend', '--no-edit', '--allow-empty']);
+      await this.git(['commit', '--amend', '--no-edit', '--allow-empty', '--no-verify']);
     } else {
-      await this.git(['commit', '-m', 'interactive-review baselines']);
+      await this.git(['commit', '-m', 'interactive-review baselines', '--no-verify']);
     }
   }
 
@@ -341,7 +458,31 @@ export class BaselineGit {
     await this.initGit();
     const rel = normalizePath(path.relative(this.workTree, filePath));
     try {
-      return await this.git(['show', `:${rel}`]);
+      // `cat-file blob`, NOT `show`. This method's whole contract is "undefined means not
+      // tracked", and it relies on git FAILING for a path with no index entry. `git show`
+      // does not reliably fail: when `:<path>` does not resolve as an object, show falls
+      // back to reading the argument as a *pathspec*, and git accepts any argument
+      // containing glob characters as a pathspec without it having to match anything.
+      //
+      // So for an untracked `x[1].txt`, `git show :x[1].txt` exited 0. Before
+      // GIT_LITERAL_PATHSPECS it printed the HEAD commit — a commit header and diff
+      // returned as if it were the file's baseline. With literal pathspecs it printed
+      // nothing, which callers read as "tracked, and the file was empty". Both routed an
+      // untracked file down the tracked-file path. Plain names were never affected, which
+      // is why nothing caught it; the pathspec regression test exposed it.
+      //
+      // `cat-file` is plumbing that takes an object name and never falls back to a
+      // pathspec, and `blob` asserts the type. It returns the raw bytes with no porcelain
+      // processing in between.
+      //
+      // The explicit stage number is load-bearing. `:<path>` is itself ambiguous: git reads
+      // `:<n>:<rest>` as "stage n of <rest>", so a root file named `1:notes.txt` was looked
+      // up as stage 1 of `notes.txt` and reported untracked. `:0:<path>` pins stage 0 — the
+      // only stage this repo ever writes — so the path is never reparsed. (An earlier
+      // version of this comment claimed `cat-file` could never reinterpret its argument;
+      // that was true of pathspecs and false of this. Pinned by
+      // baselineGitHardening.test.ts.)
+      return await this.git(['cat-file', 'blob', `:0:${rel}`]);
     } catch {
       return undefined;
     }
@@ -349,9 +490,21 @@ export class BaselineGit {
 
   /**
    * Return absolute paths of all files currently tracked in HEAD.
+   *
+   * Throws `BaselineUnreadableError` if the repo has a HEAD commit that cannot be
+   * walked. It must never answer "[]" for a repo it failed to read: callers treat
+   * an untracked file as externally created, so a failure reported as emptiness
+   * silently reclassifies the entire workspace as new files. Only a repo with no
+   * commits at all — a genuinely empty baseline — returns [].
+   *
+   * `hasHead` is what separates the two, and it has to be checked *before* the walk
+   * rather than inferred from the walk's failure: `rev-parse HEAD` resolves the ref
+   * out of the ref store without touching the object database, so it still succeeds
+   * when the objects behind it are damaged, while a repo with no commits fails it.
    */
   async listTrackedFiles(): Promise<string[]> {
     await this.initGit();
+    if (!(await this.hasHead())) return [];
     try {
       const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r']);
       return out
@@ -359,9 +512,27 @@ export class BaselineGit {
         .map(l => l.trim())
         .filter(Boolean)
         .map(rel => normalizePath(path.join(this.workTree, rel)));
-    } catch {
-      return [];
+    } catch (err) {
+      this.log(`listTrackedFiles failed — baseline repo has a HEAD but is unreadable: ${err}`);
+      throw new BaselineUnreadableError('listTrackedFiles', err);
     }
+  }
+
+  /**
+   * Throw away the current repo and start a fresh, empty one, clearing the
+   * `baselineLost` flag. The recovery path for an unreadable baseline: unlike
+   * `destroyGit` this leaves the instance usable, so the caller can immediately
+   * re-snapshot the workspace into a clean baseline.
+   */
+  async resetRepo(): Promise<void> {
+    if (fs.existsSync(this.gitDir)) {
+      fs.rmSync(this.gitDir, { recursive: true, force: true });
+    }
+    this.gitInitialized = false;
+    await this.initGit();
+    // Set after initGit: the re-init above sees no gitDir and so never raises the
+    // flag itself, but an earlier raise must not survive a completed recovery.
+    this._baselineLost = false;
   }
 
   // ── destroy ───────────────────────────────────────────────────────────────

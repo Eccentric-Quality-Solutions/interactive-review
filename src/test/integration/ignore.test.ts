@@ -4,9 +4,9 @@ import * as path from 'path';
 import assert from 'assert';
 import { execSync } from 'child_process';
 import {
-  getWorkspaceRoot, baselineGitEnv, gitListTracked,
+  getWorkspaceRoot, baselineGitEnv, gitListTracked, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
-  writeFileExternally, writeFileViaVSCode, cleanWorkspace,
+  writeFileExternally, writeFileViaVSCode, cleanWorkspace, getStateManager,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -465,5 +465,42 @@ suite('interactive-review ignore/gitignore integration', function () {
     const tracked = gitListTracked(root);
     assert.ok(tracked.includes('src/app.ts'), 'src/app.ts should still be tracked');
     assert.ok(!tracked.includes('src/debug.tmp'), 'src/debug.tmp should be removed after nested .gitignore added');
+  });
+
+  test('a pending deletion survives a .gitignore change', async () => {
+    // Regression: syncIgnoreState derived "no longer allowed" from collectWorkspaceFiles,
+    // which only walks files that exist on disk. A file deleted and awaiting review is
+    // absent from that walk for reasons unrelated to ignore rules, so any .gitignore
+    // change git-rm'd its baseline — the pending deletion vanished from the panel with
+    // no way left to restore the file. Ignore rules must never touch deleted-file state.
+    const root = getWorkspaceRoot();
+    const doomed = path.join(root, 'doomed.txt');
+    const canary = path.join(root, 'canary.log');
+    writeFileExternally(doomed, 'delete me\n');
+    writeFileExternally(canary, 'log content\n');
+
+    await enableReview();
+    await waitForCondition(() => {
+      const tracked = gitListTracked(root);
+      return tracked.includes('doomed.txt') && tracked.includes('canary.log');
+    }, 8000);
+
+    // Delete the file externally and let it enter reviewing as a deletion.
+    const sm = getStateManager();
+    fs.unlinkSync(doomed);
+    await waitForCondition(() => sm.getFile(doomed)?.status === 'reviewing', 15000, 200);
+
+    // Change .gitignore with a rule that has nothing to do with the deleted file.
+    // canary.log is the barrier: once it is un-tracked, syncIgnoreState has run to
+    // completion, so the assertions below are ordered rather than merely racing it.
+    await writeFileViaVSCode(path.join(root, '.gitignore'), '*.log\n');
+    await waitForCondition(() => !gitListTracked(root).includes('canary.log'), 15000, 200);
+
+    assert.ok(gitListTracked(root).includes('doomed.txt'),
+      'the deleted file keeps its git baseline — without it the file can never be restored');
+    assert.strictEqual(gitGetBaseline(root, 'doomed.txt'), 'delete me\n',
+      'baseline content is intact');
+    assert.strictEqual(sm.getFile(doomed)?.status, 'reviewing',
+      'the deletion is still pending review');
   });
 });

@@ -4,11 +4,14 @@
 walking a queue of AI-proposed edits to completion — not a diff viewer, and not a
 session-level "Review" button.*
 
-> **Companion documents** (this file stays focused on the *concept*):
+> **Companion documents** (this file stays focused on the *concept* — it describes the target,
+> not the implementation, and is unchanged by how the build went):
 > - [prior-art-and-alternatives.md](prior-art-and-alternatives.md) — what already exists, a
 >   capability comparison, and the build-vs-buy recommendation.
 > - [hunkwise-evaluation.md](hunkwise-evaluation.md) — deep evaluation of the closest existing
 >   tool: maturity, the proposed-API question, the architectural fit, and fork debt.
+> - [design.md](design.md) — how this model was actually built, and the dated record of every
+>   decision made along the way.
 
 ---
 
@@ -109,6 +112,14 @@ machine**: tracking every file/hunk's disposition (pending / accepted / rejected
 **auto-advance**, and computing the **review-complete** terminal state that gives the flow
 closure. Everyone who has built adjacent tools ships the diffs and skips this; it's the
 wedge.
+
+> **How this landed (2026-07-05).** Built, but *smaller than described here*. Disposition is
+> **not** retained per hunk — resolution is destructive (accept folds the baseline forward,
+> reject reverts the buffer), so "pending" is simply "still differs from baseline" and
+> completion is a boolean rather than an aggregate. Auto-advance and the review-complete
+> terminal state both ship. The reasoning for dropping the typed
+> `Changeset`/`FileEntry`/`Hunk` model is in [design.md §4d](design.md); revisit it only if a
+> feature that genuinely needs retained disposition (summary stats, un-accept) is committed to.
 
 For the concrete VS Code API surface, the stable-vs-proposed-API question, and how existing
 tools implement the rendering, see

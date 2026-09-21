@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 
 export function getWorkspaceRoot(): string {
   const folders = vscode.workspace.workspaceFolders;
@@ -31,12 +31,21 @@ export function gitListTracked(root: string): string[] {
   }
 }
 
+/**
+ * `cat-file blob`, matching `BaselineGit.getBaseline` and for the same reason: `git show
+ * :<path>` exits 0 for an untracked path whose name contains glob characters, so a test
+ * asserting "not tracked" through this helper could pass while the file was in fact
+ * mishandled. `execFileSync` with an argument array also removes the shell-quoting that
+ * the old interpolated command depended on. The explicit `:0:` stage stops a name like
+ * `1:notes.txt` being read as stage 1 of `notes.txt`.
+ */
 export function gitGetBaseline(root: string, relPath: string): string | undefined {
   try {
-    return execSync(`git show ":${relPath}"`, {
+    return execFileSync('git', ['cat-file', 'blob', `:0:${relPath}`], {
       cwd: root,
       env: baselineGitEnv(root),
       encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch {
     return undefined;
@@ -70,8 +79,17 @@ export async function waitForCondition(fn: () => boolean, timeoutMs = 10000, int
  * Wait until `filePath` is in reviewing state, nudging a synchronous rescan each poll.
  *
  * Detection of a brand-new externally-created file relies on VS Code's
- * createFileSystemWatcher firing onDidCreate — which is unreliable in the headless
- * Linux test host (events for external raw-fs writes are dropped or badly delayed).
+ * createFileSystemWatcher firing onDidCreate — which was believed unreliable in the
+ * headless Linux test host (events for external raw-fs writes dropped or badly delayed).
+ *
+ * CAUTION (2026-08-10): that premise was RETRACTED — see design.md §4c.1. A direct probe
+ * on a headless Linux host at stock inotify limits delivered 30/30 onDidCreate events at
+ * ~130ms. The original failures were inotify *starvation* on a saturated workstation, not
+ * a platform limit. This nudge therefore compensates for a cause that no longer
+ * reproduces, and it has a real cost: because it drives interactiveReview.refresh, every
+ * test using it asserts the synchronous rescan path works — such a test CANNOT FAIL if
+ * the watcher breaks. Kept for now as margin; if you are adding a test that is genuinely
+ * about watcher delivery, use a plain waitForCondition instead.
  * The synchronous rebuildState path (interactiveReview.refresh) detects the same file
  * deterministically via collectUntrackedFiles, so we drive it as a fallback. This tests
  * the end-state (file enters reviewing with the right baseline) without depending on the
@@ -96,8 +114,22 @@ export async function waitForReviewing(filePath: string, timeoutMs = 15000): Pro
   await waitForConditionNudged(() => getStateManager()?.getFile(filePath)?.status === 'reviewing', timeoutMs);
 }
 
+/**
+ * Wait for a condition that only the file watcher can make true — no Refresh, no rescan.
+ *
+ * For tests whose subject is watcher *delivery*. `waitForConditionNudged` cannot serve them:
+ * it drives `interactiveReview.refresh` every poll, and the rescan reaches the same end
+ * state without the watcher, so such a test stays green with the watcher disconnected.
+ * A plain wait is the whole difference; the separate name is so a later reader does not
+ * "fix" a flake by swapping the nudge back in. If one of these flakes, check inotify
+ * starvation first (docs/test-strategy.md), then treat it as a watcher bug.
+ */
+export async function waitForWatcher(fn: () => boolean, timeoutMs = 15000): Promise<void> {
+  await waitForCondition(fn, timeoutMs);
+}
+
 export async function enableReview(): Promise<void> {
-  await vscode.commands.executeCommand('interactiveReview.enable');
+  await vscode.commands.executeCommand('interactiveReview.beginReview');
   const root = getWorkspaceRoot();
   const gitDir = path.join(root, '.vscode', 'interactive-review', 'git');
   await waitForCondition(() => fs.existsSync(gitDir));
@@ -105,8 +137,64 @@ export async function enableReview(): Promise<void> {
 }
 
 export async function disableReview(): Promise<void> {
-  await vscode.commands.executeCommand('interactiveReview.disable');
+  await vscode.commands.executeCommand('interactiveReview.endReview');
   await sleep(100);
+}
+
+/**
+ * Create `name` at `baseline`, begin review, wait until that exact content is
+ * recorded as the git baseline, then write `modified` so the file enters reviewing.
+ *
+ * Waiting for `=== baseline` rather than merely "a baseline exists" is load-bearing:
+ * if the snapshot has not landed before the edit, the file is adopted as brand-new
+ * (null baseline) and every assertion downstream measures the wrong thing.
+ */
+export async function setupReviewingFile(name: string, baseline: string, modified: string): Promise<string> {
+  const root = getWorkspaceRoot();
+  const filePath = path.join(root, name);
+  writeFileExternally(filePath, baseline);
+  await enableReview();
+  await waitForCondition(() => gitGetBaseline(root, path.relative(root, filePath)) === baseline);
+  writeFileExternally(filePath, modified);
+  await waitForReviewing(filePath);
+  return filePath;
+}
+
+/**
+ * Open a file and set a 0-based line selection, returning the editor. Omitting `endLine0`
+ * selects that one line in full — NOT a collapsed cursor. The hunk commands only read
+ * `selection.active.line`, so this serves cursor-based tests too; but a test of
+ * `acceptSelection`/`rejectSelection` written this way exercises the partial-selection
+ * path, not the whole-hunk fallback a bare cursor would take.
+ */
+export async function openWithSelection(
+  filePath: string,
+  startLine0: number,
+  endLine0: number = startLine0,
+): Promise<vscode.TextEditor> {
+  const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+  const doc = editor.document;
+  const endCol = doc.lineAt(Math.min(endLine0, doc.lineCount - 1)).text.length;
+  editor.selection = new vscode.Selection(
+    new vscode.Position(startLine0, 0),
+    new vscode.Position(endLine0, endCol),
+  );
+  return editor;
+}
+
+/** Open a file in a real editor tab and return the editor (buffer is clean). */
+export async function openDocInEditor(filePath: string): Promise<vscode.TextEditor> {
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  await sleep(100);
+  return editor;
+}
+
+/** The open file-scheme TextDocument for a path, if any. */
+export function findOpenDoc(filePath: string): vscode.TextDocument | undefined {
+  return vscode.workspace.textDocuments.find(
+    d => d.uri.scheme === 'file' && d.uri.fsPath === filePath
+  );
 }
 
 export function writeFileExternally(filePath: string, content: string): void {
@@ -146,42 +234,25 @@ export function cleanWorkspace(): void {
   }
 }
 
-export function getReviewPanel(): any {
+/**
+ * Call an accessor on the activated extension's exported test API, or return
+ * undefined if the extension is absent, not yet active, or predates the accessor.
+ */
+function fromExtensionApi(accessor: 'getReviewPanel' | 'getStateManager' | 'getFileWatcher'): any {
   const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
   if (!ext || !ext.isActive) return undefined;
   const api = ext.exports;
-  if (api && typeof api.getReviewPanel === 'function') {
-    return api.getReviewPanel();
-  }
-  return undefined;
+  return typeof api?.[accessor] === 'function' ? api[accessor]() : undefined;
+}
+
+export function getReviewPanel(): any {
+  return fromExtensionApi('getReviewPanel');
 }
 
 export function getStateManager(): any {
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  if (!ext || !ext.isActive) return undefined;
-  const api = ext.exports;
-  if (api && typeof api.getStateManager === 'function') {
-    return api.getStateManager();
-  }
-  return undefined;
+  return fromExtensionApi('getStateManager');
 }
 
 export function getFileWatcher(): any {
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  if (!ext || !ext.isActive) return undefined;
-  const api = ext.exports;
-  if (api && typeof api.getFileWatcher === 'function') {
-    return api.getFileWatcher();
-  }
-  return undefined;
-}
-
-export function getInlineDecorations(): any {
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  if (!ext || !ext.isActive) return undefined;
-  const api = ext.exports;
-  if (api && typeof api.getInlineDecorations === 'function') {
-    return api.getInlineDecorations();
-  }
-  return undefined;
+  return fromExtensionApi('getFileWatcher');
 }

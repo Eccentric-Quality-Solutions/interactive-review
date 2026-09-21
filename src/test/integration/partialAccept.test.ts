@@ -1,11 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as path from 'path';
 import assert from 'assert';
 import {
-  getWorkspaceRoot, gitGetBaseline, sleep, waitForCondition,
-  waitForReviewing, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager,
+  sleep, disableReview, cleanWorkspace, getStateManager,
+  setupReviewingFile, openWithSelection,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -29,33 +27,9 @@ suite('interactive-review partial accept', function () {
     cleanWorkspace();
   });
 
-  /** Open the file and set a (possibly multi-line) 0-based selection. */
-  async function openWithSelection(filePath: string, startLine0: number, endLine0: number): Promise<vscode.TextEditor> {
-    const editor = await vscode.window.showTextDocument(vscode.Uri.file(filePath));
-    const doc = editor.document;
-    const endCol = doc.lineAt(Math.min(endLine0, doc.lineCount - 1)).text.length;
-    editor.selection = new vscode.Selection(
-      new vscode.Position(startLine0, 0),
-      new vscode.Position(endLine0, endCol),
-    );
-    return editor;
-  }
-
-  /** Enable review on a file, then modify it so it enters reviewing. */
-  async function reviewing(name: string, baseline: string, modified: string): Promise<string> {
-    const root = getWorkspaceRoot();
-    const f = path.join(root, name);
-    writeFileExternally(f, baseline);
-    await enableReview();
-    await waitForCondition(() => gitGetBaseline(root, name) !== undefined);
-    writeFileExternally(f, modified);
-    await waitForReviewing(f);
-    return f;
-  }
-
   test('partial accept of a mixed hunk folds only the selected added lines into baseline; rest stays pending', async () => {
     // Insert A,B,C between l1 and l2 → one hunk, added doc lines 1,2,3.
-    const f = await reviewing('mixed.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
+    const f = await setupReviewingFile('mixed.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
 
     await openWithSelection(f, 1, 2); // select A and B
     await vscode.commands.executeCommand('interactiveReview.acceptSelection');
@@ -71,7 +45,7 @@ suite('interactive-review partial accept', function () {
   });
 
   test('selection spanning a hunk boundary only accepts the intersecting added lines', async () => {
-    const f = await reviewing('boundary.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
+    const f = await setupReviewingFile('boundary.txt', 'l1\nl2\n', 'l1\nA\nB\nC\nl2\n');
 
     await openWithSelection(f, 0, 1); // context line l1 (0) through added line A (1)
     await vscode.commands.executeCommand('interactiveReview.acceptSelection');
@@ -85,7 +59,7 @@ suite('interactive-review partial accept', function () {
 
   test('pure-removal hunk falls back to whole-hunk accept', async () => {
     // Remove l2 → a pure-removal hunk (no added lines) at the l3 position.
-    const f = await reviewing('removal.txt', 'l1\nl2\nl3\n', 'l1\nl3\n');
+    const f = await setupReviewingFile('removal.txt', 'l1\nl2\nl3\n', 'l1\nl3\n');
 
     await openWithSelection(f, 1, 1); // cursor on l3, where the removal hunk sits
     await vscode.commands.executeCommand('interactiveReview.acceptSelection');
@@ -98,7 +72,7 @@ suite('interactive-review partial accept', function () {
   });
 
   test('selection covering only context is a no-op', async () => {
-    const f = await reviewing('contextonly.txt', 'l1\nl2\n', 'l1\nA\nl2\n');
+    const f = await setupReviewingFile('contextonly.txt', 'l1\nl2\n', 'l1\nA\nl2\n');
 
     await openWithSelection(f, 0, 0); // context line l1 only
     await vscode.commands.executeCommand('interactiveReview.acceptSelection');
@@ -111,7 +85,7 @@ suite('interactive-review partial accept', function () {
 
   test('multi-hunk selection accepts the hunk at the selection start only', async () => {
     // Two separate insertions: A after l1, B after l3.
-    const f = await reviewing('multi.txt', 'l1\nl2\nl3\n', 'l1\nA\nl2\nl3\nB\n');
+    const f = await setupReviewingFile('multi.txt', 'l1\nl2\nl3\n', 'l1\nA\nl2\nl3\nB\n');
 
     await openWithSelection(f, 1, 4); // spans A (hunk 1) through B (hunk 2)
     await vscode.commands.executeCommand('interactiveReview.acceptSelection');
@@ -124,7 +98,7 @@ suite('interactive-review partial accept', function () {
   });
 
   test('partial accept resolving the file’s last change completes the file', async () => {
-    const f = await reviewing('last.txt', 'l1\nl2\n', 'l1\nA\nl2\n');
+    const f = await setupReviewingFile('last.txt', 'l1\nl2\n', 'l1\nA\nl2\n');
 
     await openWithSelection(f, 1, 1); // the only added line
     await vscode.commands.executeCommand('interactiveReview.acceptSelection');

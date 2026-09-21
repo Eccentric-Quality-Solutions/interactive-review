@@ -2,9 +2,11 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FileState } from './types';
-import { BaselineGit } from './baselineGit';
+import { BaselineGit, BaselineUnreadableError, Settings } from './baselineGit';
+import { hasReportableDiff } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
+import { isBinaryFile, readTextFile } from './textFile';
 
 const DEFAULT_IGNORE_PATTERNS = process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'];
 
@@ -26,20 +28,71 @@ export class StateManager {
   private _respectGitignore: boolean = true;
   private _clearOnBranchSwitch: boolean = false;
   private _quoteRotationInterval: number = 30;
-  private _useDiffEditor: boolean = false;
-  private _showInlineDecorations: boolean = true;
   // Latched true once the current review session has seen ≥1 reviewing file; reset
   // when a session opens/closes. Drives reviewComplete (see noteReviewActivity).
   private _sawReviewingFiles: boolean = false;
   private _git: BaselineGit | undefined;
 
+  /**
+   * Paths this session *witnessed being created* — the evidence behind
+   * `nullReason: 'created'`, and therefore behind Discard's licence to delete a file.
+   *
+   * It exists because `rebuildState` (Refresh) throws the in-memory classification away
+   * and re-derives it from the end state, which cannot distinguish "an agent created this
+   * file" from "we never managed to baseline it". Without a memory of the witnessed
+   * creates, a single Refresh would silently downgrade every genuinely-new file to
+   * unbaselined and Discard would stop deleting agent output — the functionality this
+   * whole mechanism is meant to protect, lost from the other direction.
+   *
+   * Session-scoped and monotonic: entries are added by `writeState` and cleared only when
+   * a session starts or ends, never by `dropState` — `clearState` fires `dropState` for
+   * every path, so shrinking it there would wipe the set on the very rebuild it exists to
+   * survive. A path that leaves review and is later recreated is simply re-witnessed.
+   */
+  private sessionCreated = new Set<string>();
+
   // Serial queue: git ops run one at a time; flush() awaits the tail
   private gitQueue: Promise<void> = Promise.resolve();
+  /**
+   * The teardown of the last End review: drain the queue, clear state, delete the repo.
+   * Begin review waits on it before touching git — see `setEnabled`.
+   */
+  private teardown: Promise<void> = Promise.resolve();
+  /** Bumped whenever a session opens or closes — see `session`. */
+  private _session: number = 0;
+  /** Overlapping-safe depth counter behind `ignoreSyncActive`. */
+  private ignoreSyncDepth: number = 0;
 
   // Optional callback invoked when a git failure causes an in-memory rollback
   // (e.g. exitReviewing snapshot fails and reviewing state is restored).
   // Set by the extension to trigger UI refresh after unexpected state restoration.
   onRollback: (() => void) | undefined;
+
+  /**
+   * Fires the path whose baseline changed — including the path *acquiring* one
+   * (enter reviewing) and *losing* one (exit / remove / clear).
+   *
+   * The diff editor's original side is a virtual document served from this map by
+   * `extension.ts`'s content provider, and VS Code caches that document until told
+   * otherwise. So the baseline has two representations — this map and VS Code's
+   * cache — and only this event keeps them equal.
+   *
+   * It exists because the notification used to hang off the *accept* commands
+   * instead, which got the ordering exactly backwards on the path that matters:
+   * a final accept runs `exitReviewing` (entry deleted) and only *then* notified,
+   * so the provider re-ran against an absent entry and cached `''`. Re-entering
+   * reviewing after the next edit wrote a fresh baseline into the map and notified
+   * nobody, so the next `vscode.diff` was served the empty cache and painted the
+   * whole file as changed — while `computeHunks`, reading this map directly,
+   * reported the one real hunk. Rejecting to completion did the same thing and
+   * never notified at all.
+   *
+   * Hence: fired from the mutation, not from the caller. `writeState`/`dropState`/
+   * `clearState` below are the only writers to `this.state` for that reason — a
+   * bare `this.state.set` anywhere else silently reintroduces the bug.
+   */
+  private readonly baselineChanged = new vscode.EventEmitter<string>();
+  readonly onDidChangeBaseline = this.baselineChanged.event;
 
   constructor() {
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -52,6 +105,31 @@ export class StateManager {
   // ── accessors ─────────────────────────────────────────────────────────────
 
   get enabled(): boolean { return this._enabled; }
+
+  /**
+   * Identifies the current review session. Changes on every Begin and End review.
+   *
+   * For async work that decides on one session's state and writes after an await: sample
+   * it before, compare after, and drop the write on a mismatch. A disk-event handler that
+   * reads a baseline across an End review would otherwise put a file into the review
+   * queue *after* teardown cleared it, and since Begin review does not clear state, the
+   * next session would open with that phantom entry. Comparing `enabled` alone misses an
+   * End immediately followed by a Begin.
+   */
+  get session(): number { return this._session; }
+
+  /**
+   * Is a `syncIgnoreState` pass in flight?
+   *
+   * Read by `FileWatcher.handleDiskChange` to tell its two no-baseline cases apart: while
+   * a sync runs, a newly un-ignored file legitimately has no baseline yet and must be
+   * absorbed; outside one, a missing baseline means an edit we would otherwise drop
+   * (ADR-0012). A counter rather than a boolean because the sync is fired from several
+   * independent triggers (`enableReview`, the settings watcher, the `.gitignore` watcher)
+   * and two passes can overlap — a boolean would let the first to finish reopen the gap
+   * while the second is still adding baselines.
+   */
+  get ignoreSyncActive(): boolean { return this.ignoreSyncDepth > 0; }
 
   /** Number of files currently in reviewing state. */
   get reviewingCount(): number {
@@ -84,10 +162,70 @@ export class StateManager {
   get respectGitignore(): boolean { return this._respectGitignore; }
   get clearOnBranchSwitch(): boolean { return this._clearOnBranchSwitch; }
   get quoteRotationInterval(): number { return this._quoteRotationInterval; }
-  get useDiffEditor(): boolean { return this._useDiffEditor; }
-  get showInlineDecorations(): boolean { return this._showInlineDecorations; }
   get dir(): string | undefined { return this.stateDir; }
   get git(): BaselineGit | undefined { return this._git; }
+
+  /**
+   * Recursively collect absolute (normalized) paths of every non-ignored file
+   * under the workspace root. Directories/files for which `shouldIgnore` returns
+   * true are pruned. Unreadable directories are skipped silently. This is the
+   * single shared workspace walk used by snapshot / sync / branch-switch logic.
+   */
+  private async collectWorkspaceFiles(
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<string[]> {
+    if (!this.workspaceRoot) return [];
+    const walk = async (dir: string): Promise<string[]> => {
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+      const out: string[] = [];
+      for (const entry of entries) {
+        const full = normalizePath(path.join(dir, entry.name));
+        const isDir = entry.isDirectory();
+        if (shouldIgnore?.(full, isDir)) continue;
+        if (isDir) {
+          // Element-wise, not `out.push(...await walk(full))`: spreading a large
+          // subtree's file list as call arguments throws RangeError at scale.
+          for (const f of await walk(full)) out.push(f);
+        } else if (entry.isFile()) {
+          out.push(full);
+        }
+      }
+      return out;
+    };
+    return walk(this.workspaceRoot);
+  }
+
+  /**
+   * Read a set of files into a snapshot batch. Binary and unreadable files are dropped:
+   * neither must abort the batch, and neither has content that means anything as a
+   * baseline.
+   *
+   * The binary case needs an explicit test rather than the failed read this comment used
+   * to claim. `fs.readFile(path, 'utf-8')` does not throw on binary input — it returns
+   * replacement characters — so the old form baselined binaries as mush that a later
+   * discard would write back over the real file. See `textFile.ts`.
+   */
+  private async readBatch(filePaths: string[]): Promise<{ filePath: string; content: string }[]> {
+    const batch: { filePath: string; content: string }[] = [];
+    await Promise.all(filePaths.map(async filePath => {
+      try {
+        const content = await readTextFile(filePath);
+        if (content === null) {
+          log(`readBatch: skipping binary file ${path.basename(filePath)}`);
+          return;
+        }
+        batch.push({ filePath, content });
+      } catch {
+        // Unreadable (permissions, transient race) — see method doc.
+      }
+    }));
+    return batch;
+  }
 
   /**
    * Walk workspace and collect files that exist on disk but are not tracked in git.
@@ -97,37 +235,29 @@ export class StateManager {
     trackedSet: Set<string>,
     shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
   ): Promise<string[]> {
-    if (!this.workspaceRoot) return [];
-    const root = this.workspaceRoot;
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
+    const all = await this.collectWorkspaceFiles(shouldIgnore);
+    const untracked: string[] = [];
+    await Promise.all(all.map(async full => {
+      if (trackedSet.has(full)) return;
       try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        // Skip unreadable files (e.g. permission errors) to avoid downstream
+        // failures when reading content as UTF-8.
+        await fs.promises.access(full, fs.constants.R_OK);
       } catch {
-        return results;
+        return; // unreadable — omit
       }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore?.(full, isDir)) continue;
-        if (isDir) {
-          const nested = await collect(full);
-          if (nested.length) results.push(...nested);
-        } else if (entry.isFile() && !trackedSet.has(full)) {
-          try {
-            await fs.promises.access(full, fs.constants.R_OK);
-            results.push(full);
-          } catch {
-            // Skip unreadable files (e.g. permission errors) to avoid
-            // downstream failures when reading content as UTF-8
-            continue;
-          }
-        }
-      }
-      return results;
-    };
-    return collect(root);
+      // A binary nobody watched appear is a pre-existing asset, not a new file.
+      //
+      // "Untracked" here means only "the baseline repo has no blob for it", and
+      // `readBatch` deliberately declines to make one for a binary — so without this,
+      // every asset in the workspace reads as an externally created new file on the next
+      // load/rebuild, floods the queue, and (before `nullReason`) was deletable by
+      // Discard. A binary the watcher *did* see created is a genuinely new file and
+      // belongs in the queue, which is what the witness check preserves across a Refresh.
+      if (!this.sessionCreated.has(full) && await isBinaryFile(full)) return;
+      untracked.push(full);
+    }));
+    return untracked;
   }
 
   // ── init / load ───────────────────────────────────────────────────────────
@@ -141,30 +271,22 @@ export class StateManager {
   }
 
   /**
-   * Load persistent state from settings.json + git repo.
-   * Must be called once at activation. Async because reading baselines
-   * from git requires exec calls.
+   * Shared per-file scan of the git-tracked files, used by both `load()` and
+   * `rebuildState()`. For each tracked file: skip if ignored, skip if it has no
+   * baseline in the index, otherwise compare the baseline against current disk
+   * content and enter `reviewing` on a real diff or a deletion (ENOENT). Files
+   * with no diff, no baseline, or that are ignored are NOT added to `this.state`.
+   *
+   * Populates `this.state` and returns the classification buckets so each caller
+   * can layer its own logging / cleanup / diffing on top. Untracked-file
+   * detection and all surrounding orchestration stay with the callers, where the
+   * intentional load-vs-rebuild differences live.
    */
-  async load(shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
-    const g = this.ensureGit();
-    if (!g) return;
-
-    // enabled state is determined by whether the interactive-review git dir exists on disk
-    const gitDir = path.join(this.stateDir!, 'git');
-    if (!fs.existsSync(gitDir)) return;
-
-    this._enabled = true;
-    const settings = g.loadSettings();
-    this._ignorePatterns = settings.ignorePatterns;
-    this._respectGitignore = settings.respectGitignore;
-    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
-    this._quoteRotationInterval = settings.quoteRotationInterval;
-    this._useDiffEditor = settings.useDiffEditor;
-    this._showInlineDecorations = settings.showInlineDecorations;
-
-    // Initialize git (idempotent) then restore in-memory state from HEAD
-    await g.initGit();
-    const tracked = await g.listTrackedFiles();
+  private async scanTrackedIntoState(
+    g: BaselineGit,
+    tracked: string[],
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<{ reviewing: string[]; idle: string[]; skippedNoBaseline: string[]; ignored: string[] }> {
     const ignored: string[] = [];
     const skippedNoBaseline: string[] = [];
     const reviewing: string[] = [];
@@ -190,13 +312,138 @@ export class StateManager {
         if (err?.code === 'ENOENT') { fileDeleted = true; } // file doesn't exist
         // other errors (e.g. permissions) → diskContent stays undefined, treat as idle
       }
-      if (fileDeleted || (diskContent !== undefined && diskContent !== baseline)) {
-        this.state.set(filePath, { status: 'reviewing', baseline });
+      if (fileDeleted || (diskContent !== undefined && hasReportableDiff(baseline, diskContent))) {
+        this.writeState(filePath, { status: 'reviewing', baseline });
         reviewing.push(filePath);
       } else {
         idle.push(filePath);
       }
     }));
+    return { reviewing, idle, skippedNoBaseline, ignored };
+  }
+
+  /**
+   * Enter every on-disk file that git isn't tracking into `reviewing` with a null
+   * baseline. The untracked half of the shared load/rebuild scan (`scanTrackedIntoState`
+   * is the tracked half); kept here so the two entry points can't drift on what counts as
+   * an unbaselined file. Returns the adopted paths so `load()` can log them.
+   *
+   * Note what this does *not* claim: that the files are new. It cannot — a scan of the
+   * end state cannot distinguish a file an agent just created from one whose baseline we
+   * failed to take — so every entry here is `nullReason: 'unbaselined'` and is therefore
+   * safe from Discard's delete branch. See `FileState.nullReason`.
+   */
+  private async adoptUntrackedFiles(
+    tracked: string[],
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<string[]> {
+    const untracked = await this.collectUntrackedFiles(new Set(tracked), shouldIgnore);
+    for (const filePath of untracked) {
+      // A rescan sees only the *result* — on disk, no blob — which a genuinely new file
+      // and one we failed to baseline produce identically. The discrimination therefore
+      // happens in `collectUntrackedFiles` above, not here.
+      //
+      // 'created' is the right answer here despite being the deleting one, because of
+      // what has already been filtered out above: unreadable files are dropped by the
+      // `access` check and unwitnessed binaries by the sniff, and those two *are* the
+      // pre-existing-but-unbaselined population. What is left — readable text with no
+      // blob — is overwhelmingly a real new file, including every new file from a prior
+      // session after a window reload, where the witness set is necessarily empty. Those
+      // must stay deletable or the queue becomes un-actionable.
+      this.writeState(filePath, { status: 'reviewing', baseline: null, nullReason: 'created' });
+    }
+    return untracked;
+  }
+
+  /**
+   * Recover from a baseline repo whose contents are gone or unreadable, without ever
+   * routing through `adoptUntrackedFiles`.
+   *
+   * The baselines are unrecoverable, so the prior session's pending review cannot be
+   * resumed — but the files on disk are untouched and correct. The safe reading of
+   * "no trustworthy baseline" is therefore "nothing to review yet": reset the repo and
+   * re-snapshot the workspace exactly as `Begin review` would, which leaves current
+   * disk content as the new baseline and the review queue empty.
+   *
+   * The alternative — letting the caller fall through to adopting every untracked file
+   * — is what turned one crashed VM into a 3807-file queue of null-baseline entries,
+   * each of which `Discard` deletes from disk. A lost review session is a nuisance; a
+   * "Discard all" that unlinks the whole workspace is not.
+   *
+   * Surfaced to the user rather than logged only: the session silently emptying looks
+   * identical to having finished reviewing everything.
+   */
+  private async recoverLostBaseline(
+    g: BaselineGit,
+    reason: string,
+    shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean
+  ): Promise<void> {
+    log(`load: ${reason} — prior baselines are unrecoverable, resetting to a fresh snapshot`);
+    this.clearState();
+    let rebuilt = false;
+    try {
+      await g.resetRepo();
+      await this.snapshotWorkspace((fp, isDir) => shouldIgnore?.(fp, isDir) ?? false);
+      rebuilt = true;
+      log('load: baseline rebuilt from current workspace contents; review queue is empty');
+    } catch (err) {
+      log(`load: baseline rebuild failed: ${err}`);
+    }
+    // Report what actually happened. A failed rebuild leaves review enabled over a repo
+    // that cannot store baselines, so every subsequent edit goes uncaptured — the one
+    // state where an empty panel does not mean "nothing to review". Claiming success
+    // here would make that indistinguishable from a clean recovery.
+    if (rebuilt) {
+      void vscode.window.showWarningMessage(
+        'Interactive Review: the saved baselines for this workspace were unreadable ' +
+        '(most often an unclean shutdown) and could not be recovered. Your files are ' +
+        'untouched, but the pending review was lost. A fresh baseline has been taken ' +
+        'from the current contents.'
+      );
+    } else {
+      void vscode.window.showErrorMessage(
+        'Interactive Review: the saved baselines for this workspace were unreadable and ' +
+        'a replacement could not be written. Your files are untouched, but changes are ' +
+        'not being tracked. Run "Interactive Review: End review", then "Begin review".'
+      );
+    }
+  }
+
+  /**
+   * Load persistent state from settings.json + git repo.
+   * Must be called once at activation. Async because reading baselines
+   * from git requires exec calls.
+   */
+  async load(shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
+    const g = this.ensureGit();
+    if (!g) return;
+
+    // enabled state is determined by whether the interactive-review git dir exists on disk
+    const gitDir = path.join(this.stateDir!, 'git');
+    if (!fs.existsSync(gitDir)) return;
+
+    this._enabled = true;
+    this.applySettings(g.loadSettings());
+
+    // Initialize git (idempotent) then restore in-memory state from HEAD
+    await g.initGit();
+    // Both branches below mean "there is no baseline to restore from", which is only
+    // ever a recovery case here: reaching load() at all means a previous session
+    // enabled review and snapshotted, so its baselines should still be readable.
+    if (g.baselineLost) {
+      await this.recoverLostBaseline(g, 'baseline repo had to be re-initialized', shouldIgnore);
+      return;
+    }
+    let tracked: string[];
+    try {
+      tracked = await g.listTrackedFiles();
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      await this.recoverLostBaseline(g, `${err.message}`, shouldIgnore);
+      return;
+    }
+    const { reviewing, idle, skippedNoBaseline, ignored } =
+      await this.scanTrackedIntoState(g, tracked, shouldIgnore);
     if (skippedNoBaseline.length > 0) {
       log(`load: skipped ${skippedNoBaseline.length} file(s) with no baseline in index: ${logFileList(skippedNoBaseline, this.workspaceRoot)}`);
     }
@@ -213,13 +460,9 @@ export class StateManager {
     }
 
     // Detect files on disk not tracked in git — these are externally created new files
-    const trackedSet = new Set(tracked);
-    const untrackedFiles = await this.collectUntrackedFiles(trackedSet, shouldIgnore);
+    const untrackedFiles = await this.adoptUntrackedFiles(tracked, shouldIgnore);
     if (untrackedFiles.length > 0) {
       log(`load: ${untrackedFiles.length} untracked new file(s): ${logFileList(untrackedFiles, this.workspaceRoot)}`);
-      for (const fp of untrackedFiles) {
-        this.state.set(fp, { status: 'reviewing', baseline: null });
-      }
     }
     this.noteReviewActivity();
   }
@@ -242,36 +485,28 @@ export class StateManager {
 
     // Snapshot old state for comparison
     const oldState = new Map<string, FileState>();
-    for (const [fp, fs] of this.state) {
-      oldState.set(fp, { ...fs });
+    for (const [fp, st] of this.state) {
+      oldState.set(fp, { ...st });
     }
 
-    // Rebuild: clear and reload from git (same logic as load, but parallelized)
-    this.state.clear();
+    // Rebuild: clear and reload from git via the shared tracked-file scan.
+    // Read before clearing — an unreadable baseline must leave the in-memory state
+    // intact (it is now the only surviving record of the session) rather than swap it
+    // for a workspace-wide list of null-baseline "new" files.
     await g.initGit();
-    const tracked = await g.listTrackedFiles();
-    const filtered = tracked.filter(fp => !shouldIgnore?.(fp));
-    await Promise.all(filtered.map(async filePath => {
-      const baseline = await g.getBaseline(filePath);
-      if (baseline === undefined) return;
-      let diskContent: string | undefined;
-      let fileDeleted = false;
-      try {
-        diskContent = await fs.promises.readFile(filePath, 'utf-8');
-      } catch (err: any) {
-        if (err?.code === 'ENOENT') { fileDeleted = true; }
-      }
-      if (fileDeleted || (diskContent !== undefined && diskContent !== baseline)) {
-        this.state.set(filePath, { status: 'reviewing', baseline });
-      }
-    }));
+    let tracked: string[];
+    try {
+      tracked = await g.listTrackedFiles();
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      log(`rebuildState: aborting, in-memory state left untouched — ${err.message}`);
+      return;
+    }
+    this.clearState();
+    await this.scanTrackedIntoState(g, tracked, shouldIgnore);
 
     // Detect files on disk not tracked in git — these are externally created new files
-    const trackedSet = new Set(tracked);
-    const untrackedFiles = await this.collectUntrackedFiles(trackedSet, shouldIgnore);
-    for (const fp of untrackedFiles) {
-      this.state.set(fp, { status: 'reviewing', baseline: null });
-    }
+    await this.adoptUntrackedFiles(tracked, shouldIgnore);
     this.noteReviewActivity();
 
     // Compare old vs new state
@@ -315,11 +550,85 @@ export class StateManager {
     return this.state.get(normalizePath(filePath));
   }
 
+  // ── the only writers to `this.state` ──────────────────────────────────────
+  //
+  // Every mutation goes through these three so `onDidChangeBaseline` cannot be
+  // forgotten. They take an already-normalized path: normalization is the public
+  // methods' job, and doing it twice would hide a caller that skipped it.
+
+  /** Set an entry, firing only if the baseline value actually moved. */
+  private writeState(filePath: string, state: FileState): void {
+    const prior = this.state.get(filePath);
+    this.state.set(filePath, state);
+    if (state.baseline === null && state.nullReason === 'created') this.sessionCreated.add(filePath);
+    // A status-only change (reviewing → reviewing with the same baseline) leaves the
+    // virtual document correct, so it is not worth a re-fetch. `!prior` counts as a
+    // move because an absent entry renders as `''`.
+    if (!prior || prior.baseline !== state.baseline) this.baselineChanged.fire(filePath);
+  }
+
+  /** Delete an entry, firing only if one was actually there. */
+  private dropState(filePath: string): void {
+    if (this.state.delete(filePath)) this.baselineChanged.fire(filePath);
+  }
+
+  /**
+   * Drop every entry, firing per path. Keys are snapshotted before the clear so the
+   * listeners (which read `getFile`) observe the post-clear map, not a half-cleared one.
+   */
+  private clearState(): void {
+    const paths = [...this.state.keys()];
+    this.state.clear();
+    for (const fp of paths) this.baselineChanged.fire(fp);
+  }
+
+  /** Releases the baseline-change emitter. Call from `deactivate`. */
+  dispose(): void {
+    this.baselineChanged.dispose();
+  }
+
+  /**
+   * Canonical "is this a deleted file" test — the single source of truth shared by
+   * the panel list, the diff-open routing, and the deleted-file CodeLenses so they
+   * can never disagree. Deleted = tracked with a real baseline (a null baseline is a
+   * *new* file, not a deletion) but no longer present on disk.
+   */
+  isDeleted(filePath: string): boolean {
+    const fileState = this.getFile(filePath);
+    return !!fileState && fileState.baseline !== null && !fs.existsSync(filePath);
+  }
+
+  /**
+   * Drop a *new* (null-baseline) entry whose file is no longer on disk, reporting whether
+   * one was dropped. The counterpart to `isDeleted`: a null baseline means the file did not
+   * exist when review began, so once it is gone from disk there is nothing left to review —
+   * no baseline to restore, no content to accept — and no diff to render, because neither
+   * side exists. It is not a deletion the user needs to disposition; it is a non-event.
+   *
+   * `load()` and `rebuildState()` already reconcile these away for free, since they rebuild
+   * from git-tracked plus on-disk files and a vanished new file is in neither. This covers
+   * the live in-memory state *between* those rebuilds: FileWatcher.onDiskDelete normally
+   * removes such an entry, but a dropped watcher event (the same class of miss documented
+   * in docs/terminal-edits-not-captured.md) can strand one, where it shows as an actionless
+   * panel row whose diff opens against a nonexistent file.
+   *
+   * Removal is in-memory only — `removeFile` skips the git op for a null baseline, which was
+   * never stored in the index.
+   */
+  reconcileVanishedNewFile(filePath: string): boolean {
+    const fileState = this.getFile(filePath);
+    if (!fileState || fileState.baseline !== null) return false;
+    if (fs.existsSync(filePath)) return false;
+    log(`reconcile: dropping vanished new file ${path.basename(filePath)} (null baseline, not on disk)`);
+    this.removeFile(filePath);
+    return true;
+  }
+
   setFile(filePath: string, state: FileState, skipSnapshot?: boolean): void {
     filePath = normalizePath(filePath);
     // Clone old state so callers mutating the FileState object don't corrupt the rollback snapshot
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
-    this.state.set(filePath, state);
+    this.writeState(filePath, state);
     // Latch review activity at the mutation point so reviewComplete works regardless
     // of whether the caller routes through the extension's onStateChanged funnel.
     if (state.status === 'reviewing') this._sawReviewingFiles = true;
@@ -330,7 +639,7 @@ export class StateManager {
         log(`git queue error (setFile rollback): ${err}`);
         // Only rollback if this exact state object is still current (no newer operation has updated it)
         if (this.state.get(filePath) === state) {
-          if (oldState) { this.state.set(filePath, oldState); } else { this.state.delete(filePath); }
+          if (oldState) { this.writeState(filePath, oldState); } else { this.dropState(filePath); }
           this.onRollback?.();
         }
       });
@@ -341,7 +650,7 @@ export class StateManager {
     filePath = normalizePath(filePath);
     // Clone old state so the rollback has an independent snapshot
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
-    this.state.delete(filePath);
+    this.dropState(filePath);
     // Skip git removal only when we know the file had a null baseline (never stored in git).
     // If oldState is undefined (idle file, not in map) or has a real baseline, queue the removal.
     if (this._git && !(oldState !== undefined && oldState.baseline === null)) {
@@ -350,11 +659,59 @@ export class StateManager {
         log(`git queue error (removeFile rollback): ${err}`);
         // Only rollback if no newer operation has re-added the entry
         if (!this.state.has(filePath) && oldState) {
-          this.state.set(filePath, { ...oldState });
+          this.writeState(filePath, { ...oldState });
           this.onRollback?.();
         }
       });
     }
+  }
+
+  /**
+   * Remove `dirPath` and everything beneath it, from memory and from the baseline repo.
+   *
+   * `removeFile` cannot do this job, and fails at it *silently*: it runs
+   * `git update-index --force-remove -- <dir>`, which **exits 0 having removed nothing**
+   * (confirmed against a scratch repo with two tracked files under one directory, both
+   * still present afterwards). Git's index has no directory entries to remove.
+   *
+   * The visible consequence was a folder deleted in the Explorer leaving every file under
+   * it still tracked with a baseline, so the next Refresh or window reload surfaced the
+   * whole folder as a queue of pending deletions the user had already carried out.
+   *
+   * The in-memory sweep alone is not enough either, which is why this reads the tracked
+   * list: a file that was never edited has a baseline in git but no entry in `state`, and
+   * those are exactly the ones that came back as phantom deletions.
+   *
+   * No rollback, deliberately. The directory is already gone from disk, so restoring the
+   * entries would only re-desync state from the filesystem — the same reasoning
+   * `renameFile` gives for not rolling back a path migration.
+   */
+  removePathAndChildren(dirPath: string): void {
+    dirPath = normalizePath(dirPath);
+    const prefix = dirPath + path.sep;
+    const under = (fp: string) => fp === dirPath || fp.startsWith(prefix);
+
+    for (const fp of Array.from(this.state.keys())) {
+      if (under(fp)) this.dropState(fp);
+    }
+
+    const g = this._git;
+    if (!g) return;
+    this.gitQueue = this.gitQueue.then(async () => {
+      let tracked: string[];
+      try {
+        tracked = await g.listTrackedFiles();
+      } catch (err) {
+        // A damaged repo must not turn a delete into a workspace-wide reclassification;
+        // leave the index alone and let load()/rebuildState's recovery handle it.
+        log(`removePathAndChildren: skipping git removal — ${err}`);
+        return;
+      }
+      const toRemove = tracked.filter(under);
+      if (toRemove.length === 0) return;
+      log(`removePathAndChildren: removing ${toRemove.length} baseline(s) under ${path.basename(dirPath)}`);
+      await g.removeFileBatch(toRemove);
+    }).catch(err => { log(`git queue error (removePathAndChildren): ${err}`); });
   }
 
   renameFile(oldFilePath: string, newFilePath: string): void {
@@ -368,15 +725,18 @@ export class StateManager {
     const fileState = this.state.get(oldFilePath);
     if (fileState) {
       // Exact match — single file rename
-      this.state.delete(oldFilePath);
-      this.state.set(newFilePath, fileState);
+      this.dropState(oldFilePath);
+      this.writeState(newFilePath, fileState);
+      // The create was witnessed at the old path; a rename does not make the file any
+      // less new, and losing the witness here would strand it as undeletable.
+      if (this.sessionCreated.delete(oldFilePath)) this.sessionCreated.add(newFilePath);
     }
     // Also check for directory children (entries whose path starts with oldFilePath + sep)
     for (const [fp, childState] of [...this.state.entries()]) {
       if (fp.startsWith(oldPrefix)) {
-        this.state.delete(fp);
+        this.dropState(fp);
         const newFp = newFilePath + fp.slice(oldFilePath.length);
-        this.state.set(newFp, childState);
+        this.writeState(newFp, childState);
         hasDirChildren = true;
       }
     }
@@ -405,6 +765,29 @@ export class StateManager {
     }
   }
 
+  /**
+   * The baseline repo's current baseline for `filePath`, read *after* every queued write.
+   *
+   * The event handlers must read baselines through this rather than `git.getBaseline`.
+   * Writes to the repo are queued (`gitQueue`) while a direct read goes to the index at
+   * once, so a read that lands behind a pending write answers with the value that write is
+   * about to replace — and the handler then records that stale value in memory, where a
+   * reload cannot agree with it:
+   *
+   * - accept a file, then delete it: the deletion is shown against the *pre-accept* text,
+   *   so Discard restores content the user already accepted away;
+   * - delete a folder from the Explorer, then recreate a file in it: the create finds the
+   *   baseline the delete is about to remove and queues an edit instead of a new file.
+   *
+   * `handleDiskChange` once did this by hand (a `flush()` before its read); the other two
+   * handlers did not. Owning the ordering here means a new caller cannot forget it.
+   * Guarded by the pinned sequences in `reloadEqualsMemory.test.ts`.
+   */
+  async readBaseline(filePath: string): Promise<string | undefined> {
+    await this.gitQueue;
+    return this._git?.getBaseline(normalizePath(filePath));
+  }
+
   getAllFiles(): ReadonlyMap<string, FileState> {
     return this.state;
   }
@@ -422,7 +805,7 @@ export class StateManager {
   exitReviewing(filePath: string, newBaseline?: string | null): void {
     filePath = normalizePath(filePath);
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
-    this.state.delete(filePath);
+    this.dropState(filePath);
     if (newBaseline !== undefined && newBaseline !== null) {
       if (this._git) {
         const g = this._git;
@@ -431,7 +814,7 @@ export class StateManager {
           log(`git queue error (exitReviewing rollback): ${err}`);
           // Restore reviewing state so the user can retry rather than silently getting a stale baseline
           if (!this.state.has(filePath) && oldState) {
-            this.state.set(filePath, { ...oldState });
+            this.writeState(filePath, { ...oldState });
             this.onRollback?.();
             void vscode.window.showErrorMessage(
               `Failed to update review baseline for ${path.basename(filePath)}. The file has been kept in reviewing so you can retry.`
@@ -447,10 +830,19 @@ export class StateManager {
 
   async setEnabled(value: boolean): Promise<void> {
     this._enabled = value;
+    const session = ++this._session;
     // A new session (open on enable, teardown on disable) starts fresh: no
     // pending work seen yet, so a subsequent drain-to-zero reads as complete.
     this._sawReviewingFiles = false;
     if (value) {
+      // An End review may still be draining. Its teardown deletes the repo directory, which
+      // a new BaselineGit would share, so nothing here may touch git until it has finished.
+      await this.teardown;
+      // An End review that arrived while this waited has already done its teardown — with
+      // nothing attached to tear down. Carrying on would create and snapshot a repo for a
+      // session that is over, and `load()` reads an existing repo as "review is on", so the
+      // next window reload would reopen the session the user ended.
+      if (this._session !== session) return;
       const g = this.ensureGit();
       if (!g) return;
       await g.initGit();
@@ -459,17 +851,30 @@ export class StateManager {
       // reflects stale in-memory values that survive across enable/disable cycles in a
       // long-lived host, so a fresh enable would silently inherit a prior session's
       // settings instead of resetting to disk/defaults.
-      const merged = g.mergeDefaultSettings(g.loadSettings());
-      this._ignorePatterns = merged.ignorePatterns;
-      this._respectGitignore = merged.respectGitignore;
-      this._clearOnBranchSwitch = merged.clearOnBranchSwitch;
-      this._quoteRotationInterval = merged.quoteRotationInterval;
-      this._useDiffEditor = merged.useDiffEditor;
-      this._showInlineDecorations = merged.showInlineDecorations;
+      this.applySettings(g.mergeDefaultSettings(g.loadSettings()));
     } else {
-      this.state.clear();
-      this._git?.destroyGit();
+      // Drain before tearing down. A write still queued behind the repo's deletion fails,
+      // and its rollback then re-adds the entry to a session that has ended and tells the
+      // user a baseline update failed "so you can retry" — after End review, for an accept
+      // that happened before it. Guarded by `reloadEqualsMemory.test.ts` ("End review
+      // straight after an accept").
+      //
+      // Draining opens a window, and two things keep a Begin review that lands in it from
+      // being destroyed by this teardown. `_git` is detached now, synchronously, so Begin
+      // cannot pick up this instance through `ensureGit` and snapshot into a repo about to
+      // be deleted. And Begin waits for `teardown` before creating its own, so it cannot
+      // initialise a repo at the same path that this then deletes. Guarded by
+      // `stateManagerGit.test.ts` ("Begin review during End review's drain").
+      const g = this._git;
       this._git = undefined;
+      const drained = this.gitQueue;
+      this.teardown = (async () => {
+        await drained;
+        this.clearState();
+        this.sessionCreated.clear();
+        g?.destroyGit();
+      })();
+      await this.teardown;
     }
   }
 
@@ -482,89 +887,85 @@ export class StateManager {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return results;
-      }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore(full, isDir)) continue;
-        if (isDir) {
-          results = results.concat(await collect(full));
-        } else if (entry.isFile()) {
-          results.push(full);
-        }
-      }
-      return results;
-    };
-
-    const filePaths = await collect(this.workspaceRoot);
-    const batch: { filePath: string; content: string }[] = [];
-    await Promise.all(filePaths.map(async filePath => {
-      try {
-        const content = await fs.promises.readFile(filePath, 'utf-8');
-        batch.push({ filePath, content });
-      } catch {
-        // Skip binary or unreadable files
-      }
-    }));
+    const filePaths = await this.collectWorkspaceFiles(shouldIgnore);
+    const batch = await this.readBatch(filePaths);
+    let failure: unknown;
     if (batch.length > 0) {
-      await g.snapshotBatch(batch);
+      // Through `gitQueue`, not a bare await, matching every other `snapshotBatch` call
+      // site. The queue exists because concurrent git invocations contend on
+      // `.git/index.lock` and the loser throws — and every queue consumer swallows that
+      // error, so a collision costs a file its baseline silently. Running off-queue was
+      // survivable only while nothing else wrote git during enable; `handleDiskCreate`'s
+      // adopt-during-snapshot branch now does exactly that.
+      //
+      // The failure is captured and re-thrown. A snapshot that fails leaves the session
+      // enabled over a repo with no baselines, which renders as an empty review queue —
+      // indistinguishable from a clean start with nothing to review, while every later edit
+      // surfaces as a whole-file "unbaselined" hunk. That is the one state where silence
+      // actively misleads.
+      //
+      // Re-thrown rather than reported from here, because the two callers must react
+      // differently and only they know how. `enableReview` tells the user and rejects, so an
+      // agent awaiting Begin review learns the baseline is not on disk instead of being told
+      // it succeeded. `recoverLostBaseline` needs it to reach its own failure branch: it
+      // sets `rebuilt = true` on the next line, so swallowing here made it announce "a fresh
+      // baseline has been taken" *alongside* the failure message — two notifications
+      // contradicting each other.
+      //
+      // The queue's own `.catch` stays: the chain must remain usable for later operations.
+      this.gitQueue = this.gitQueue
+        .then(() => g.snapshotBatch(batch))
+        .catch(err => { failure = err; log(`git queue error: ${err}`); });
     }
+    await this.gitQueue;
+    if (failure !== undefined) throw failure;
   }
 
-  private currentSettings() {
-    return { ignorePatterns: this._ignorePatterns, respectGitignore: this._respectGitignore, clearOnBranchSwitch: this._clearOnBranchSwitch, quoteRotationInterval: this._quoteRotationInterval, useDiffEditor: this._useDiffEditor, showInlineDecorations: this._showInlineDecorations };
+  private currentSettings(): Settings {
+    return { ignorePatterns: this._ignorePatterns, respectGitignore: this._respectGitignore, clearOnBranchSwitch: this._clearOnBranchSwitch, quoteRotationInterval: this._quoteRotationInterval };
+  }
+
+  /**
+   * Copy a full settings object into the backing fields. The single place the
+   * in-memory settings are populated, so every source of settings (load from disk,
+   * enable-time merge, external-edit reload, a panel setter) applies all fields —
+   * a new setting cannot be half-adopted by one path and missed by another.
+   */
+  private applySettings(settings: Settings): void {
+    this._ignorePatterns = settings.ignorePatterns;
+    this._respectGitignore = settings.respectGitignore;
+    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
+    this._quoteRotationInterval = settings.quoteRotationInterval;
+  }
+
+  /**
+   * Change one setting in memory, and persist the whole settings object when a review
+   * session is active. Persisting only while enabled is deliberate: settings.json is
+   * session state, and writing it from a disabled extension would resurrect a stale
+   * state dir. The in-memory update happens either way so the panel reflects the change.
+   */
+  private updateSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
+    const next: Settings = { ...this.currentSettings(), [key]: value };
+    this.applySettings(next);
+    if (this._enabled && this._git) {
+      this._git.saveSettings(next);
+    }
   }
 
   setIgnorePatterns(patterns: string[]): void {
-    this._ignorePatterns = patterns;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), ignorePatterns: patterns });
-    }
+    this.updateSetting('ignorePatterns', patterns);
   }
 
   setRespectGitignore(value: boolean): void {
-    this._respectGitignore = value;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), respectGitignore: value });
-    }
+    this.updateSetting('respectGitignore', value);
   }
 
   setClearOnBranchSwitch(value: boolean): void {
-    this._clearOnBranchSwitch = value;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), clearOnBranchSwitch: value });
-    }
+    this.updateSetting('clearOnBranchSwitch', value);
   }
 
   setQuoteRotationInterval(value: number): void {
-    const normalized = (Number.isFinite(value) && value >= 0) ? Math.floor(value) : 0;
-    this._quoteRotationInterval = normalized;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), quoteRotationInterval: normalized });
-    }
-  }
-
-  setUseDiffEditor(value: boolean): void {
-    log(`settings: useDiffEditor=${value}`);
-    this._useDiffEditor = value;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), useDiffEditor: value });
-    }
-  }
-
-  setShowInlineDecorations(value: boolean): void {
-    log(`settings: showInlineDecorations=${value}`);
-    this._showInlineDecorations = value;
-    if (this._enabled && this._git) {
-      this._git.saveSettings({ ...this.currentSettings(), showInlineDecorations: value });
-    }
+    this.updateSetting('quoteRotationInterval', (Number.isFinite(value) && value >= 0) ? Math.floor(value) : 0);
   }
 
   /**
@@ -573,13 +974,7 @@ export class StateManager {
    */
   reloadIgnorePatterns(): string[] | null {
     if (!this._enabled || !this._git) return null;
-    const settings = this._git.loadSettings();
-    this._ignorePatterns = settings.ignorePatterns;
-    this._respectGitignore = settings.respectGitignore;
-    this._clearOnBranchSwitch = settings.clearOnBranchSwitch;
-    this._quoteRotationInterval = settings.quoteRotationInterval;
-    this._useDiffEditor = settings.useDiffEditor;
-    this._showInlineDecorations = settings.showInlineDecorations;
+    this.applySettings(this._git.loadSettings());
     return this._ignorePatterns;
   }
 
@@ -590,49 +985,59 @@ export class StateManager {
    * Called after ignorePatterns / respectGitignore / .gitignore changes.
    */
   async syncIgnoreState(shouldIgnore: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
+    // The flag must cover the whole pass including its awaits, and every exit from it —
+    // the early returns and the `BaselineUnreadableError` abort as much as the success
+    // path. A `finally` around a delegating call is the only form that cannot be defeated
+    // by adding another `return` to the body later.
+    this.ignoreSyncDepth++;
+    try {
+      await this.syncIgnoreStateInner(shouldIgnore);
+    } finally {
+      this.ignoreSyncDepth--;
+    }
+  }
+
+  private async syncIgnoreStateInner(shouldIgnore: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return results;
-      }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore(full, isDir)) continue;
-        if (isDir) {
-          results = results.concat(await collect(full));
-        } else if (entry.isFile()) {
-          results.push(full);
-        }
-      }
-      return results;
-    };
+    let allowedFiles: string[];
+    let trackedFiles: string[];
+    try {
+      [allowedFiles, trackedFiles] = await Promise.all([
+        this.collectWorkspaceFiles(shouldIgnore),
+        g.listTrackedFiles(),
+      ]);
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      // Without a readable tracked list every allowed file looks un-snapshotted, so
+      // proceeding would re-snapshot the entire workspace over a damaged repo.
+      log(`syncIgnoreState: aborting — ${err.message}`);
+      return;
+    }
 
-    const [allowedFiles, trackedFiles] = await Promise.all([
-      collect(this.workspaceRoot),
-      g.listTrackedFiles(),
-    ]);
-
-    // Remove tracked files that are now ignored (from git and from in-memory state)
-    const allowedSet = new Set(allowedFiles);
-    const toRemove = trackedFiles.filter(fp => !allowedSet.has(fp));
+    // Remove tracked files that are now ignored (from git and from in-memory state).
+    //
+    // Test `shouldIgnore` directly rather than "missing from allowedFiles":
+    // collectWorkspaceFiles only walks what exists on disk, so a *deleted* file
+    // awaiting review is absent from it for a reason that has nothing to do with
+    // ignore rules. Removing on absence git-rm'd its baseline, which permanently
+    // dropped the pending deletion from review the moment any .gitignore changed.
+    // Deletions are the file watcher's and rebuildState's business, not this
+    // function's — it syncs ignore rules and nothing else.
+    const toRemove = trackedFiles.filter(fp => shouldIgnore(fp));
     // Also remove in-memory state entries that are ignored but have no git baseline (e.g. new files in reviewing)
-    for (const fp of this.state.keys()) {
-      if (!allowedSet.has(fp) && !toRemove.includes(fp)) {
-        this.state.delete(fp);
+    const removeSet = new Set(toRemove);
+    for (const fp of Array.from(this.state.keys())) {
+      if (shouldIgnore(fp) && !removeSet.has(fp)) {
+        this.dropState(fp);
       }
     }
     if (toRemove.length > 0) {
       log(`syncIgnoreState: removing ${toRemove.length} file(s): ${logFileList(toRemove, this.workspaceRoot)}`);
     }
     for (const fp of toRemove) {
-      this.state.delete(fp);
+      this.dropState(fp);
     }
     if (toRemove.length > 0) {
       this.gitQueue = this.gitQueue.then(() => g.removeFileBatch(toRemove)).catch(err => { log(`git queue error: ${err}`); });
@@ -656,13 +1061,7 @@ export class StateManager {
       log(`syncIgnoreState: adding ${toAdd.length} file(s): ${logFileList(toAdd, this.workspaceRoot)}`);
     }
     if (toAdd.length > 0) {
-      const batch: { filePath: string; content: string }[] = [];
-      await Promise.all(toAdd.map(async fp => {
-        try {
-          const content = await fs.promises.readFile(fp, 'utf-8');
-          batch.push({ filePath: fp, content });
-        } catch { /* skip unreadable */ }
-      }));
+      const batch = await this.readBatch(toAdd);
       if (batch.length > 0) {
         this.gitQueue = this.gitQueue.then(() => g.snapshotBatch(batch)).catch(err => { log(`git queue error: ${err}`); });
       }
@@ -686,45 +1085,29 @@ export class StateManager {
     const reviewingCount = Array.from(this.state.values()).filter(s => s.status === 'reviewing').length;
     log(`clearHunksOnBranchSwitch: clearing ${reviewingCount} reviewing file(s), re-syncing all baselines`);
 
+    // Collect all current workspace files (respecting ignore rules).
+    // Read before clearing, for the same reason as rebuildState: a damaged baseline
+    // repo must not cost the caller its in-memory state on the way out.
+    let diskFiles: string[];
+    let trackedFiles: string[];
+    try {
+      [diskFiles, trackedFiles] = await Promise.all([
+        this.collectWorkspaceFiles(shouldIgnore),
+        g.listTrackedFiles(),
+      ]);
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      log(`clearHunksOnBranchSwitch: aborting — ${err.message}`);
+      return;
+    }
+
     // Clear all in-memory state — fresh start
-    this.state.clear();
-
-    // Collect all current workspace files (respecting ignore rules)
-    const collect = async (dir: string): Promise<string[]> => {
-      let results: string[] = [];
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return results;
-      }
-      for (const entry of entries) {
-        const full = normalizePath(path.join(dir, entry.name));
-        const isDir = entry.isDirectory();
-        if (shouldIgnore?.(full, isDir)) continue;
-        if (isDir) {
-          results = results.concat(await collect(full));
-        } else if (entry.isFile()) {
-          results.push(full);
-        }
-      }
-      return results;
-    };
-
-    const [diskFiles, trackedFiles] = await Promise.all([
-      collect(this.workspaceRoot),
-      g.listTrackedFiles(),
-    ]);
+    this.clearState();
+    this.sessionCreated.clear();
 
     // Snapshot all disk files as new baselines
     const diskSet = new Set(diskFiles);
-    const batch: { filePath: string; content: string }[] = [];
-    await Promise.all(diskFiles.map(async fp => {
-      try {
-        const content = await fs.promises.readFile(fp, 'utf-8');
-        batch.push({ filePath: fp, content });
-      } catch { /* skip unreadable */ }
-    }));
+    const batch = await this.readBatch(diskFiles);
 
     // Remove baselines for files that no longer exist on disk
     const toRemove = trackedFiles.filter(fp => !diskSet.has(fp));
@@ -745,11 +1128,11 @@ export class StateManager {
    */
   resetToDisabled(): void {
     this._enabled = false;
+    this._session++;
     this._sawReviewingFiles = false;
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
-    this._useDiffEditor = false;
-    this._showInlineDecorations = true;
-    this.state.clear();
+    this.clearState();
+    this.sessionCreated.clear();
     this._git = undefined;
     this.gitQueue = Promise.resolve();
   }
@@ -758,7 +1141,4 @@ export class StateManager {
   async flush(): Promise<void> {
     await this.gitQueue;
   }
-
-  /** Cancel any pending saves (no-op now, kept for API compatibility). */
-  cancelPendingSave(): void {}
 }
