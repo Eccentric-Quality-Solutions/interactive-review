@@ -53,6 +53,13 @@ export class StateManager {
 
   // Serial queue: git ops run one at a time; flush() awaits the tail
   private gitQueue: Promise<void> = Promise.resolve();
+  /**
+   * The teardown of the last End review: drain the queue, clear state, delete the repo.
+   * Begin review waits on it before touching git — see `setEnabled`.
+   */
+  private teardown: Promise<void> = Promise.resolve();
+  /** Bumped whenever a session opens or closes — see `session`. */
+  private _session: number = 0;
   /** Overlapping-safe depth counter behind `ignoreSyncActive`. */
   private ignoreSyncDepth: number = 0;
 
@@ -98,6 +105,18 @@ export class StateManager {
   // ── accessors ─────────────────────────────────────────────────────────────
 
   get enabled(): boolean { return this._enabled; }
+
+  /**
+   * Identifies the current review session. Changes on every Begin and End review.
+   *
+   * For async work that decides on one session's state and writes after an await: sample
+   * it before, compare after, and drop the write on a mismatch. A disk-event handler that
+   * reads a baseline across an End review would otherwise put a file into the review
+   * queue *after* teardown cleared it, and since Begin review does not clear state, the
+   * next session would open with that phantom entry. Comparing `enabled` alone misses an
+   * End immediately followed by a Begin.
+   */
+  get session(): number { return this._session; }
 
   /**
    * Is a `syncIgnoreState` pass in flight?
@@ -746,6 +765,29 @@ export class StateManager {
     }
   }
 
+  /**
+   * The baseline repo's current baseline for `filePath`, read *after* every queued write.
+   *
+   * The event handlers must read baselines through this rather than `git.getBaseline`.
+   * Writes to the repo are queued (`gitQueue`) while a direct read goes to the index at
+   * once, so a read that lands behind a pending write answers with the value that write is
+   * about to replace — and the handler then records that stale value in memory, where a
+   * reload cannot agree with it:
+   *
+   * - accept a file, then delete it: the deletion is shown against the *pre-accept* text,
+   *   so Discard restores content the user already accepted away;
+   * - delete a folder from the Explorer, then recreate a file in it: the create finds the
+   *   baseline the delete is about to remove and queues an edit instead of a new file.
+   *
+   * `handleDiskChange` once did this by hand (a `flush()` before its read); the other two
+   * handlers did not. Owning the ordering here means a new caller cannot forget it.
+   * Guarded by the pinned sequences in `reloadEqualsMemory.test.ts`.
+   */
+  async readBaseline(filePath: string): Promise<string | undefined> {
+    await this.gitQueue;
+    return this._git?.getBaseline(normalizePath(filePath));
+  }
+
   getAllFiles(): ReadonlyMap<string, FileState> {
     return this.state;
   }
@@ -788,10 +830,19 @@ export class StateManager {
 
   async setEnabled(value: boolean): Promise<void> {
     this._enabled = value;
+    const session = ++this._session;
     // A new session (open on enable, teardown on disable) starts fresh: no
     // pending work seen yet, so a subsequent drain-to-zero reads as complete.
     this._sawReviewingFiles = false;
     if (value) {
+      // An End review may still be draining. Its teardown deletes the repo directory, which
+      // a new BaselineGit would share, so nothing here may touch git until it has finished.
+      await this.teardown;
+      // An End review that arrived while this waited has already done its teardown — with
+      // nothing attached to tear down. Carrying on would create and snapshot a repo for a
+      // session that is over, and `load()` reads an existing repo as "review is on", so the
+      // next window reload would reopen the session the user ended.
+      if (this._session !== session) return;
       const g = this.ensureGit();
       if (!g) return;
       await g.initGit();
@@ -802,10 +853,28 @@ export class StateManager {
       // settings instead of resetting to disk/defaults.
       this.applySettings(g.mergeDefaultSettings(g.loadSettings()));
     } else {
-      this.clearState();
-      this.sessionCreated.clear();
-      this._git?.destroyGit();
+      // Drain before tearing down. A write still queued behind the repo's deletion fails,
+      // and its rollback then re-adds the entry to a session that has ended and tells the
+      // user a baseline update failed "so you can retry" — after End review, for an accept
+      // that happened before it. Guarded by `reloadEqualsMemory.test.ts` ("End review
+      // straight after an accept").
+      //
+      // Draining opens a window, and two things keep a Begin review that lands in it from
+      // being destroyed by this teardown. `_git` is detached now, synchronously, so Begin
+      // cannot pick up this instance through `ensureGit` and snapshot into a repo about to
+      // be deleted. And Begin waits for `teardown` before creating its own, so it cannot
+      // initialise a repo at the same path that this then deletes. Guarded by
+      // `stateManagerGit.test.ts` ("Begin review during End review's drain").
+      const g = this._git;
       this._git = undefined;
+      const drained = this.gitQueue;
+      this.teardown = (async () => {
+        await drained;
+        this.clearState();
+        this.sessionCreated.clear();
+        g?.destroyGit();
+      })();
+      await this.teardown;
     }
   }
 
@@ -1059,6 +1128,7 @@ export class StateManager {
    */
   resetToDisabled(): void {
     this._enabled = false;
+    this._session++;
     this._sawReviewingFiles = false;
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
     this.clearState();

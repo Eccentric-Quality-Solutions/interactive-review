@@ -13,11 +13,14 @@ import { restoreDiffSettings } from './diffSettings';
 import { computeHunks, hunkId } from './diffEngine';
 import { findFileDocument } from './editorUtils';
 import { initLog, log } from './log';
+import { formatBuild, readBuildInfo } from './buildInfo';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
   initLog();
-  const ext = vscode.extensions.getExtension('eccentricqualitysolutions.vsc-interactive-review');
-  log(`activate v${ext?.packageJSON?.version ?? '?'}`);
+  // The commit, not just the version: the version never changes between local builds, so
+  // it cannot say whether the installed copy is the one the source describes. See
+  // scripts/build-stamp.js.
+  log(`activate ${formatBuild(readBuildInfo())}`);
   const stateManager = new StateManager();
   stateManager.onRollback = () => onStateChanged();
 

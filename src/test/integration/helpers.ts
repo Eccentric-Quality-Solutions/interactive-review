@@ -114,6 +114,20 @@ export async function waitForReviewing(filePath: string, timeoutMs = 15000): Pro
   await waitForConditionNudged(() => getStateManager()?.getFile(filePath)?.status === 'reviewing', timeoutMs);
 }
 
+/**
+ * Wait for a condition that only the file watcher can make true — no Refresh, no rescan.
+ *
+ * For tests whose subject is watcher *delivery*. `waitForConditionNudged` cannot serve them:
+ * it drives `interactiveReview.refresh` every poll, and the rescan reaches the same end
+ * state without the watcher, so such a test stays green with the watcher disconnected.
+ * A plain wait is the whole difference; the separate name is so a later reader does not
+ * "fix" a flake by swapping the nudge back in. If one of these flakes, check inotify
+ * starvation first (docs/test-strategy.md), then treat it as a watcher bug.
+ */
+export async function waitForWatcher(fn: () => boolean, timeoutMs = 15000): Promise<void> {
+  await waitForCondition(fn, timeoutMs);
+}
+
 export async function enableReview(): Promise<void> {
   await vscode.commands.executeCommand('interactiveReview.beginReview');
   const root = getWorkspaceRoot();

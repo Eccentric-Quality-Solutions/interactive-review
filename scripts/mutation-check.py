@@ -91,6 +91,62 @@ MUTATIONS = [
        "const acceptedTerminator = current.terminated;")],
      "hunkApply.test.js"),
 
+    ("readBaseline answers before queued writes land (stale baseline after accept / folder delete)",
+     "src/stateManager.ts",
+     [("    await this.gitQueue;\n    return this._git?.getBaseline(normalizePath(filePath));",
+       "    return this._git?.getBaseline(normalizePath(filePath));")],
+     "reloadEqualsMemory.test.js"),
+
+    ("FileWatcher reads a baseline straight from git, bypassing the queue",
+     "src/fileWatcher.ts",
+     [("const gitBaseline = await this.stateManager.readBaseline(filePath);\n    if (this.stateManager.session !== session) { log(`onDiskCreate(",
+       "const gitBaseline = await git.getBaseline(filePath);\n    if (this.stateManager.session !== session) { log(`onDiskCreate(")],
+     "reloadEqualsMemory.test.js"),
+
+    ("End review destroys the repo with writes still queued",
+     "src/stateManager.ts",
+     [("        await drained;\n", "")],
+     "reloadEqualsMemory.test.js"),
+
+    ("Begin review does not wait for End review's teardown",
+     "src/stateManager.ts",
+     [("      await this.teardown;\n      // An End review that arrived", "      // An End review that arrived")],
+     "stateManagerGit.test.js"),
+
+    ("Begin review carries on after an End review overtook it",
+     "src/stateManager.ts",
+     [("      if (this._session !== session) return;\n      const g = this.ensureGit();",
+       "      const g = this.ensureGit();")],
+     "stateManagerGit.test.js"),
+
+    ("End review leaves its git instance attached while draining",
+     "src/stateManager.ts",
+     [("      const g = this._git;\n      this._git = undefined;\n      const drained",
+       "      const g = this._git;\n      const drained")],
+     "stateManagerGit.test.js"),
+
+    ("session unchanged by Begin/End review",
+     "src/stateManager.ts",
+     [("    const session = ++this._session;", "    const session = this._session;")],
+     "stateManagerGit.test.js"),
+
+    ("disk-event handler writes after a baseline read across a session change",
+     "src/fileWatcher.ts",
+     [("    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }\n    if (gitBaseline === undefined) {",
+       "    if (gitBaseline === undefined) {")],
+     "reloadEqualsMemory.test.js"),
+
+    ("PathSerializer runs a key's tasks concurrently",
+     "src/pathSerializer.ts",
+     [("const result = prior.then(task);", "const result = task();")],
+     "pathSerializer.test.js"),
+
+    ("delete events bypass the per-path serializer",
+     "src/fileWatcher.ts",
+     [("return this.perPath.run(normalizePath(uri.fsPath), () => this.onDiskDelete(uri, session));",
+       "return this.onDiskDelete(uri, session);")],
+     "reloadEqualsMemory.test.js"),
+
     ("partial reject takes the document's final newline",
      "src/hunkApply.ts",
      [("  const tailTerminator = newTailIsContext\n    ? hunk.oldLines > 0 || baseline.terminated\n    : current.terminated;",

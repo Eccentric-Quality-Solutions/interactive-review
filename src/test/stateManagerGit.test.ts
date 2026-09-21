@@ -133,3 +133,64 @@ describe('StateManager.snapshotWorkspace', () => {
     assert.equal(await sm.git!.getBaseline(file), 'content\n');
   });
 });
+
+describe('StateManager End review / Begin review overlap', () => {
+  const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
+
+  // Defect: End review waits for queued git writes before deleting the repo, and a Begin
+  // review arriving in that wait found End's instance still attached, snapshotted into it,
+  // and then lost the repo when End resumed and deleted it — resolving as if the session
+  // were open, with no baseline on disk.
+  it('a Begin review during End review\'s drain keeps its own baseline repo', async () => {
+    const file = path.join(root, 'a.txt');
+    writeFile(file, 'v1\n');
+    await sm.snapshotWorkspace(ignore);
+    sm.snapshotFile(file, 'queued\n');   // a write End must drain before tearing down
+
+    const end = sm.setEnabled(false);
+    const begin = (async () => {
+      await sm.setEnabled(true);
+      await sm.snapshotWorkspace(ignore);
+    })();
+    await Promise.all([end, begin]);
+    await sm.flush();
+
+    assert.equal(sm.enabled, true);
+    assert.ok(sm.git, 'the new session has a baseline repo');
+    assert.equal(await sm.git!.getBaseline(file), 'v1\n', 'and the Begin snapshot is in it');
+    assert.equal(sm.getAllFiles().size, 0);
+  });
+
+  // Defect: a Begin waiting out End's drain resumed without noticing that a second End had
+  // arrived meanwhile, then created and snapshotted a repo for the ended session. `load()`
+  // reads an existing repo as "review is on", so the next window reload reopened it.
+  it('a Begin overtaken by a second End review leaves no repo behind', async () => {
+    const file = path.join(root, 'a.txt');
+    writeFile(file, 'v1\n');
+    await sm.snapshotWorkspace(ignore);
+    sm.snapshotFile(file, 'queued\n');   // keeps the first End draining
+
+    const end1 = sm.setEnabled(false);
+    const begin = (async () => {
+      await sm.setEnabled(true);
+      await sm.snapshotWorkspace(ignore);
+    })();
+    const end2 = sm.setEnabled(false);
+    await Promise.all([end1, begin, end2]);
+    await sm.flush();
+
+    assert.equal(sm.enabled, false);
+    assert.equal(sm.git, undefined, 'no baseline repo attached to an ended session');
+    assert.equal(fs.existsSync(path.join(root, '.vscode', 'interactive-review', 'git')), false,
+      'and none on disk for the next load() to reopen');
+  });
+
+  it('changes the session on every Begin and End review', async () => {
+    const opened = sm.session;
+    await sm.setEnabled(false);
+    const closed = sm.session;
+    await sm.setEnabled(true);
+    assert.notEqual(closed, opened);
+    assert.notEqual(sm.session, closed);
+  });
+});

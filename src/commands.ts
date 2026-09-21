@@ -309,8 +309,8 @@ async function disableReview(
   onStateChanged: () => void
 ): Promise<void> {
   log('disable');
-  // Awaited: the disable branch of setEnabled happens to run synchronously today, but
-  // callers await this command expecting teardown to be finished when it resolves.
+  // Awaited: the disable branch drains queued baseline writes before deleting the repo,
+  // and callers await this command expecting teardown to be finished when it resolves.
   await stateManager.setEnabled(false);
   // Hand the user's global diffEditor settings back now that no review surface needs
   // them forced (ADR-0003). Session-scoped, so this is the natural restore point.

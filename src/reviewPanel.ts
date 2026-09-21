@@ -7,6 +7,7 @@ import { computeHunks, hunkId } from './diffEngine';
 import { applyInlineDiffSettings } from './diffSettings';
 import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
 import { log } from './log';
+import { formatBuild, readBuildInfo } from './buildInfo';
 
 import {
   acceptAllFiles,
@@ -28,6 +29,8 @@ interface PanelState {
   totalRemoved: number;
   reviewComplete: boolean;
   files: PanelFile[];
+  /** Which build is running — see scripts/build-stamp.js. */
+  build: string;
 }
 
 interface PanelFile {
@@ -53,6 +56,8 @@ interface PanelHunk {
 export class ReviewPanel implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private _loading: boolean = false;
+  /** Read once: the stamp cannot change under a running extension host. */
+  private readonly build = formatBuild(readBuildInfo());
 
   get loading(): boolean { return this._loading; }
 
@@ -234,6 +239,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       totalRemoved,
       reviewComplete: this.stateManager.reviewComplete,
       files,
+      build: this.build,
     };
   }
 

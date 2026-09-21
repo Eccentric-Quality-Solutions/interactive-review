@@ -21,6 +21,9 @@ and reworked to run on **stable VS Code APIs only** (no proposed APIs).
 - **Inline diff review surface (default).** The native diff editor, forced to unified/inline
   rendering, shows removed (red) and added (green) lines in place with per-hunk
   `Accept`/`Discard` CodeLens.
+- **Build identity.** The panel's splash and settings screens, and the log on activation,
+  show the version, commit and build time, marked `-dirty` for a build of uncommitted
+  source, so it is clear which build is installed.
 - **File-level actions.** Approve or revert a whole file from the title bar, the review
   panel, or a keybinding.
 - **Cross-file auto-advance.** Resolving a file's last hunk opens the next reviewing file at

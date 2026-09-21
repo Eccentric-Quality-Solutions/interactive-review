@@ -648,3 +648,14 @@ body {
   opacity: 1;
   background: rgba(248, 81, 73, 0.1);
 }
+
+/* Build identity (see scripts/build-stamp.js): present, but out of the way. */
+.build-stamp {
+  margin: 12px 0 8px;
+  font-size: 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+  text-align: center;
+  user-select: text;
+}

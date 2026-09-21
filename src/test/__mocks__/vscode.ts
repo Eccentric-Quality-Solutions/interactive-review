@@ -95,3 +95,19 @@ export class EventEmitter<T> {
   }
   dispose(): void { this.listeners = []; }
 }
+
+/**
+ * Notifications, recorded rather than shown. StateManager reports rollbacks and baseline
+ * recovery through these; a unit test that reaches either path should be able to assert on
+ * what the user would have been told, not crash on a missing API. Kept on `global` for the
+ * same reason as the settings store: the module under test loads its own copy of this mock.
+ */
+export interface TestNotification { level: 'error' | 'warning' | 'info'; message: string }
+export function __notifications(): TestNotification[] {
+  return (global.__reviewTestNotifications ??= []) as TestNotification[];
+}
+export const window = {
+  async showErrorMessage(message: string) { __notifications().push({ level: 'error', message }); return undefined; },
+  async showWarningMessage(message: string) { __notifications().push({ level: 'warning', message }); return undefined; },
+  async showInformationMessage(message: string) { __notifications().push({ level: 'info', message }); return undefined; },
+};

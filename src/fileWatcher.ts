@@ -9,6 +9,7 @@ import { computeHunks } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 import { SnapshotCreateTracker } from './snapshotCreateTracker';
+import { PathSerializer } from './pathSerializer';
 import { readFileForReview, stripBom } from './textFile';
 
 // Transform gitignore rules from a sub-directory so they work in a single
@@ -36,6 +37,12 @@ function prefixGitignoreRules(content: string, prefix: string): string {
 
     return (neg ? '!' : '') + pattern;
   }).join('\n');
+}
+
+/** What a disk event's handler needs to know about the moment the event arrived. */
+interface EventArrival {
+  duringSnapshot: boolean;
+  session: number;
 }
 
 /** One VSCode-initiated save, tracked by object identity — see `pendingManualSaves`. */
@@ -91,6 +98,8 @@ export class FileWatcher {
   // Enable-window state: whether `snapshotWorkspace` is mid-flight (see
   // `snapshotInProgress`) plus the create handlers that began inside it.
   private snapshotCreates: SnapshotCreateTracker = new SnapshotCreateTracker();
+  // Disk-event handlers for one path run one at a time, in arrival order — see PathSerializer.
+  private perPath: PathSerializer = new PathSerializer();
 
   constructor(
     private stateManager: StateManager,
@@ -124,7 +133,10 @@ export class FileWatcher {
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     watcher.onDidChange(uri => this.onDiskChange(uri));
-    watcher.onDidDelete(uri => this.onDiskDelete(uri));
+    watcher.onDidDelete(uri => {
+      const { session } = this.arrival();  // on arrival — see the create/change wrappers
+      return this.perPath.run(normalizePath(uri.fsPath), () => this.onDiskDelete(uri, session));
+    });
     watcher.onDidCreate(uri => this.snapshotCreates.track(this.onDiskCreate(uri)));
     this.disposables.push(watcher);
 
@@ -419,24 +431,40 @@ export class FileWatcher {
    * user's own second save look like an external edit. Comparing identity leaves a
    * replacement token in place for the handler that will actually consume it.
    */
-  private async onDiskCreate(uri: vscode.Uri): Promise<void> {
+  //
+  // Everything that describes the *event* is sampled here, on arrival, before the handler
+  // waits its turn in `perPath`: the save token (a save landing while an earlier handler for
+  // the same file runs is a later event's), whether the enable snapshot is running (arrival
+  // time is the property that window tests), and the session (an event that arrived before
+  // End review belongs to the ended session, even if its handler runs after a new Begin).
+  private onDiskCreate(uri: vscode.Uri): Promise<void> {
     const filePath = normalizePath(uri.fsPath);
     const token = this.pendingManualSaves.get(filePath);
-    try {
-      await this.handleDiskCreate(filePath);
-    } finally {
-      this.releaseSaveToken(filePath, token);
-    }
+    const arrival = this.arrival();
+    return this.perPath.run(filePath, async () => {
+      try {
+        await this.handleDiskCreate(filePath, arrival);
+      } finally {
+        this.releaseSaveToken(filePath, token);
+      }
+    });
   }
 
-  private async onDiskChange(uri: vscode.Uri): Promise<void> {
+  private onDiskChange(uri: vscode.Uri): Promise<void> {
     const filePath = normalizePath(uri.fsPath);
     const token = this.pendingManualSaves.get(filePath);
-    try {
-      await this.handleDiskChange(filePath);
-    } finally {
-      this.releaseSaveToken(filePath, token);
-    }
+    const arrival = this.arrival();
+    return this.perPath.run(filePath, async () => {
+      try {
+        await this.handleDiskChange(filePath, arrival);
+      } finally {
+        this.releaseSaveToken(filePath, token);
+      }
+    });
+  }
+
+  private arrival(): EventArrival {
+    return { duringSnapshot: this.snapshotCreates.active, session: this.stateManager.session };
   }
 
   /** Drop `token` if it is still the entry for `filePath` — see the wrappers above. */
@@ -446,16 +474,18 @@ export class FileWatcher {
     }
   }
 
-  private async handleDiskCreate(filePath: string): Promise<void> {
+  private async handleDiskCreate(filePath: string, { duringSnapshot, session }: EventArrival): Promise<void> {
     const basename = path.basename(filePath);
-    // Sampled at entry, not at the branch that consumes it. This handler awaits a disk
-    // read and a git read before classifying, and `endSnapshot` can land in either gap —
-    // reading the field late would classify a create that arrived *inside* the enable
-    // window against a flag that has since cleared, reinstating the exact false-new-file
-    // race the flag was added to remove. Arrival time is the property being tested.
-    const duringSnapshot = this.snapshotCreates.active;
+    // `duringSnapshot` and `session` were sampled on arrival, in the wrapper, not here and
+    // not at the branch that consumes them. This handler awaits a disk read and a git read
+    // before classifying, and `endSnapshot` can land in either gap — reading the flag late
+    // would classify a create that arrived *inside* the enable window against a flag that
+    // has since cleared, reinstating the exact false-new-file race the flag was added to
+    // remove. Arrival time is the property being tested. Every write below comes after an
+    // await, hence the `session` checks; see `StateManager.session`.
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
+    if (this.stateManager.session !== session) return;  // changed while queued in `perPath`
     if (this.shouldIgnore(filePath)) return;
     if (this.selfEditFiles.has(filePath)) return;
 
@@ -470,6 +500,7 @@ export class FileWatcher {
         log(`onDiskCreate(${basename}): read failed while reviewing, skip`);
         return;
       }
+      if (this.stateManager.session !== session) return;
       log(`onDiskCreate(${basename}): reviewing, recompute hunks (baseline.len=${fileState.baseline?.length ?? 'null'}, disk.len=${diskContent.length})`);
       this.recomputeHunks(filePath, fileState.baseline, diskContent);
       return;
@@ -488,7 +519,8 @@ export class FileWatcher {
       return;
     }
 
-    const gitBaseline = await git.getBaseline(filePath);
+    const gitBaseline = await this.stateManager.readBaseline(filePath);
+    if (this.stateManager.session !== session) { log(`onDiskCreate(${basename}): session changed while reading, skip`); return; }
     log(`onDiskCreate(${basename}): gitBaseline=${gitBaseline !== undefined ? `'${gitBaseline.length} chars'` : 'undefined'}`);
     if (gitBaseline !== undefined) {
       // Interactive Review already has a baseline — treat as a change
@@ -539,11 +571,14 @@ export class FileWatcher {
     this.enterReviewing(filePath, null, diskContent, 'created');
   }
 
-  private async onDiskDelete(uri: vscode.Uri): Promise<void> {
+  private async onDiskDelete(uri: vscode.Uri, session: number): Promise<void> {
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
+    if (this.stateManager.session !== session) return;  // changed while queued in `perPath`
     const filePath = normalizePath(uri.fsPath);
     const basename = path.basename(filePath);
+    // `session` was sampled on arrival; the external-delete branch writes after an await.
+    // See `StateManager.session`.
     if (this.shouldIgnore(filePath)) return;
     if (this.selfEditFiles.has(filePath)) return;
 
@@ -592,7 +627,8 @@ export class FileWatcher {
       return;
     }
 
-    const gitBaseline = fileState?.baseline ?? await git.getBaseline(filePath);
+    const gitBaseline = fileState?.baseline ?? await this.stateManager.readBaseline(filePath);
+    if (this.stateManager.session !== session) { log(`onDiskDelete(${basename}): session changed while reading, skip`); return; }
     log(`onDiskDelete(${basename}): external delete, gitBaseline=${gitBaseline !== undefined ? `'${gitBaseline.length} chars'` : 'undefined'}`);
     if (gitBaseline === undefined) {
       // Not tracked at all — nothing to show
@@ -636,17 +672,17 @@ export class FileWatcher {
     this.enterReviewing(filePath, gitBaseline, '');
   }
 
-  private async handleDiskChange(filePath: string): Promise<void> {
+  private async handleDiskChange(filePath: string, { duringSnapshot, session }: EventArrival): Promise<void> {
     const basename = path.basename(filePath);
     if (this._suppressed) return;
     if (!this.stateManager.enabled) return;
+    if (this.stateManager.session !== session) return;  // changed while queued in `perPath`
 
-    // Sampled at entry, not at the no-baseline branch far below, and for the same reason
-    // `handleDiskCreate` samples it at entry: arrival time is the property being tested.
-    // This handler awaits a disk read and a git read before reaching that branch, so a
-    // late read would see the window closed for an event that genuinely arrived inside it
-    // — and would then show the enable snapshot's own files as new.
-    const duringSnapshot = this.snapshotCreates.active;
+    // `duringSnapshot` and `session` were sampled on arrival, in the wrapper, for the same
+    // reason as in `handleDiskCreate`: arrival time is the property being tested. This
+    // handler awaits a disk read and a git read before reaching the no-baseline branch, so
+    // a late read would see the window closed for an event that genuinely arrived inside
+    // it — and would then show the enable snapshot's own files as new.
 
     if (this.shouldIgnore(filePath)) { log(`onDiskChange(${basename}): ignored, skip`); return; }
     if (this.selfEditFiles.has(filePath)) {
@@ -664,6 +700,8 @@ export class FileWatcher {
       log(`onDiskChange(${basename}): read failed, skip`);
       return;
     }
+    // Before the save-absorb and reviewing branches, which write without a further await.
+    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }
 
     // Resolve the save token here, while the disk content needed to compare it is in
     // hand; the branches below only read the boolean. Reclamation itself is guaranteed
@@ -700,9 +738,10 @@ export class FileWatcher {
     // consumes the save token and queues the new baseline, and without this the second
     // reads the pre-save baseline, finds a diff, and puts the user's own typing in the
     // queue — the exact outcome the save token exists to prevent. Reading a baseline
-    // while writes to it are in flight was never sound.
-    await this.stateManager.flush();
-    const gitBaseline = await git.getBaseline(filePath);
+    // while writes to it are in flight was never sound, which is why `readBaseline` drains
+    // the queue itself.
+    const gitBaseline = await this.stateManager.readBaseline(filePath);
+    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }
     if (gitBaseline === undefined) {
       // No baseline in git. Two populations reach here and they want opposite handling
       // (ADR-0012, superseding ADR-0008's blanket absorb):

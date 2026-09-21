@@ -17,6 +17,7 @@ const app = document.getElementById("app");
  * @property {number} totalRemoved
  * @property {any[]} files
  * @property {boolean} reviewComplete
+ * @property {string} build
  */
 
 /** @type {PanelState | null} */
@@ -205,11 +206,13 @@ function render(state) {
 
   if (!state.enabled) {
     renderSetupScreen();
+    appendBuildStamp(state);
     return;
   }
 
   if (view === "settings") {
     renderSettingsScreen(state);
+    appendBuildStamp(state);
     return;
   }
 
@@ -221,10 +224,26 @@ function render(state) {
     } else {
       renderIdleScreen(state.quoteRotationInterval);
     }
+    appendBuildStamp(state);
     return;
   }
 
+  // No stamp on the review screen, where every line belongs to the queue. Settings (the
+  // gear in the view title) carries it mid-review.
   renderReviewScreen(state);
+}
+
+/**
+ * Which build is running, in small print. Answers "is the installed copy the one I think
+ * it is" before a bug report rather than after — see scripts/build-stamp.js.
+ * @param {PanelState} state
+ */
+function appendBuildStamp(state) {
+  if (!app || !state.build) return;
+  // Inside a splash screen rather than after it: the splash fills the viewport, so a
+  // sibling would sit below the fold where nobody looks.
+  const host = app.querySelector(".splash-screen") ?? app;
+  host.appendChild(el("p", "build-stamp", state.build));
 }
 
 function renderCompleteScreen() {

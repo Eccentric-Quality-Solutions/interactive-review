@@ -102,54 +102,26 @@ decision one function that all three call.
 
 ---
 
-## 3. `readBatch` docstring claims binary files are skipped — they are not
-
-**Severity:** low — wrong comment, correct behavior.
-
-[stateManager.ts:125](src/stateManager.ts#L125) states the skip is "deliberate and
-load-bearing: binary files and unreadable files ... must not abort the batch." But
-`fs.promises.readFile(fp, 'utf-8')` does not throw on binary input — it returns lossy
-U+FFFD replacement text, which is then snapshotted as a baseline. Only genuinely
-*unreadable* files reach the `catch`.
-
-The behavior predates the refactor and may well be fine. The problem is the comment
-asserting a guarantee that isn't there, on a helper now shared by three call sites. Either
-trim the claim to what's true, or add a real binary sniff if binary baselines are actually
-undesirable — but decide, don't leave the comment lying.
-
----
-
 ## 4. Test scaffolding compensates for a retracted premise
 
-**Severity:** low as a bug, medium as a blind spot — five tests currently cannot fail.
+**Severity:** low.
 
-[helpers.ts](src/test/integration/helpers.ts) carries `WAIT_FLOOR_MS = 15000` and
-`waitForConditionNudged`, both built on the belief that VS Code's `createFileSystemWatcher`
-drops external raw-fs create/delete events on headless Linux. **That premise was retracted
-2026-08-10** — see [docs/design.md §4c.1](docs/design.md), which now carries the measurements.
+[helpers.ts](src/test/integration/helpers.ts) carries `WAIT_FLOOR_MS = 15000`, built on the
+belief that VS Code's `createFileSystemWatcher` drops external raw-fs create/delete events on
+headless Linux. **That premise was retracted 2026-08-10** — see
+[docs/design.md §4c.1](docs/design.md), which carries the measurements. The July failures were
+inotify starvation on a saturated workstation, not a platform limit.
 
-The blind spot: `waitForConditionNudged` drives `interactiveReview.refresh` every poll, so the
-five brand-new-external-file tests assert the *synchronous rescan* works, not the watcher.
-They would stay green if watcher delivery broke entirely.
+The nudge was dropped from the five watcher-delivery tests on 2026-09-21 (they now use
+`waitForWatcher`). What remains:
 
-**The instrument:** [watcherProbe.test.ts](src/test/integration/watcherProbe.test.ts) measures
-raw `onDidCreate`/`onDidChange`/`onDidDelete` delivery plus the end-to-end no-nudge path. It
-self-skips unless `WATCHER_PROBE=1`, so it never runs in the normal suite:
-
-```sh
-WATCHER_PROBE=1 WATCHER_PROBE_ROUNDS=30 npx vscode-test --grep "watcher probe"
-```
-
-Measured on an idle headless Lima VM at *stock* inotify limits: 30/30 on every event type,
-p50 ~130ms. The July failures were inotify starvation on a saturated workstation (~145 fds in
-use against a 128 cap), not a platform limit.
-
-**Sequence if you pick this up:** (1) reproduce the one unexplained flake seen in two VM suite
-runs — loop it ~5× and *save full logs*, don't grep them away; (2) drop the nudge from the five
-watcher tests so they test the watcher; (3) then reconsider the 15s floor. Delete the probe once
-step 2 lands and the regular tests are honest — at that point it is redundant, and the starvation
-check is a shell one-liner (`cat /proc/sys/fs/inotify/max_user_instances` vs. actual fd usage).
-If it *stays*, give it assertions — it currently only checks that it ran.
+1. Reproduce the one unexplained flake seen in two VM suite runs — loop it ~5× and *save full
+   logs*, don't grep them away.
+2. Reconsider the 15s floor.
+3. Delete [watcherProbe.test.ts](src/test/integration/watcherProbe.test.ts) (self-skips unless
+   `WATCHER_PROBE=1`). With the regular tests honest it is redundant, and the starvation check
+   is a shell one-liner (`cat /proc/sys/fs/inotify/max_user_instances` vs. actual fd usage). If
+   it *stays*, give it assertions — it currently only checks that it ran.
 
 ---
 

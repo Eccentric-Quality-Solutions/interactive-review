@@ -28,7 +28,9 @@
     "src/diffSettings.ts",
     "src/log.ts",
     "src/baselineGit.ts",
-    "src/pathNormalize.ts"
+    "src/pathNormalize.ts",
+    "src/buildInfo.ts",
+    "src/pathSerializer.ts"
   ],
   "exclude": [
     "node_modules",
