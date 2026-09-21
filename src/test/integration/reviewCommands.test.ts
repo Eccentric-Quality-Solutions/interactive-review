@@ -161,7 +161,11 @@ suite('interactive-review keyboard commands', function () {
 
     await openWithSelection(a, 1); // cursor on/after a's only hunk
     await vscode.commands.executeCommand('interactiveReview.nextHunk');
-    await sleep(300);
+    // The command opens the next file without awaiting it, so executeCommand resolves first.
+    // Wait for the editor to change rather than guessing how long that takes; the assert
+    // below still reports the mismatch if it never does.
+    await waitForCondition(() => vscode.window.activeTextEditor?.document.uri.fsPath === b)
+      .catch(() => undefined);
 
     assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, b,
       'no further hunk in a → advance opens the next reviewing file b');
