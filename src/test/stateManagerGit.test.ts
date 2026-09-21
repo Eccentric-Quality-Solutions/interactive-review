@@ -194,3 +194,58 @@ describe('StateManager End review / Begin review overlap', () => {
     assert.notEqual(sm.session, closed);
   });
 });
+
+describe('StateManager.rebuildState keeps each null baseline\'s nullReason', () => {
+  const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
+
+  // Defect: Refresh clears memory and re-adopts every untracked readable file as 'created',
+  // the value that licenses Discard to delete it. A file the session had deliberately marked
+  // 'unbaselined' (a change with no baseline and no evidence of a create) became deletable
+  // after one Refresh. See code-review-2026-09-20.md §1.2.
+  it('an unbaselined file stays unbaselined across a Refresh', async () => {
+    const file = path.join(root, 'preexisting.txt');
+    writeFile(file, 'the user\'s content\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(file)?.nullReason, 'unbaselined',
+      'a Refresh must not turn a file Discard would keep into one it deletes');
+  });
+
+  it('a witnessed create stays created across a Refresh', async () => {
+    // The other direction, so the test above cannot pass by adopting everything as unbaselined.
+    const file = path.join(root, 'new.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(file)?.nullReason, 'created');
+  });
+
+  it('a witnessed create wins over an earlier unbaselined classification', async () => {
+    const file = path.join(root, 'recreated.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(file)?.nullReason, 'created');
+  });
+
+  it('the unbaselined classification follows a rename', async () => {
+    const from = path.join(root, 'before.txt');
+    const to = path.join(root, 'after.txt');
+    writeFile(from, 'the user\'s content\n');
+    sm.setFile(from, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    fs.renameSync(from, to);
+    sm.renameFile(from, to);
+    await sm.flush();
+
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(to)?.nullReason, 'unbaselined');
+  });
+});

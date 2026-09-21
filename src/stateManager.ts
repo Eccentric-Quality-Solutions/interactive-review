@@ -51,6 +51,17 @@ export class StateManager {
    */
   private sessionCreated = new Set<string>();
 
+  /**
+   * Paths this session classified `nullReason: 'unbaselined'` — the counterpart of
+   * `sessionCreated`, and for the same reason: Refresh throws the classification away, and
+   * `adoptUntrackedFiles` would otherwise re-adopt these as `'created'`, making a file the
+   * session had decided to keep deletable. A witnessed create outranks it (see
+   * `adoptedNullReason`). Same lifetime as `sessionCreated`.
+   *
+   * Guarded by `stateManagerGit.test.ts` ("keeps each null baseline's nullReason").
+   */
+  private sessionUnbaselined = new Set<string>();
+
   // Serial queue: git ops run one at a time; flush() awaits the tail
   private gitQueue: Promise<void> = Promise.resolve();
   /**
@@ -328,10 +339,10 @@ export class StateManager {
    * is the tracked half); kept here so the two entry points can't drift on what counts as
    * an unbaselined file. Returns the adopted paths so `load()` can log them.
    *
-   * Note what this does *not* claim: that the files are new. It cannot — a scan of the
-   * end state cannot distinguish a file an agent just created from one whose baseline we
-   * failed to take — so every entry here is `nullReason: 'unbaselined'` and is therefore
-   * safe from Discard's delete branch. See `FileState.nullReason`.
+   * A scan of the end state cannot distinguish a file an agent just created from one whose
+   * baseline we failed to take, so the classification comes from `adoptedNullReason`: the
+   * session's own record where it has one, `'created'` where it has none. See
+   * `FileState.nullReason`.
    */
   private async adoptUntrackedFiles(
     tracked: string[],
@@ -343,16 +354,27 @@ export class StateManager {
       // and one we failed to baseline produce identically. The discrimination therefore
       // happens in `collectUntrackedFiles` above, not here.
       //
-      // 'created' is the right answer here despite being the deleting one, because of
-      // what has already been filtered out above: unreadable files are dropped by the
-      // `access` check and unwitnessed binaries by the sniff, and those two *are* the
-      // pre-existing-but-unbaselined population. What is left — readable text with no
-      // blob — is overwhelmingly a real new file, including every new file from a prior
-      // session after a window reload, where the witness set is necessarily empty. Those
-      // must stay deletable or the queue becomes un-actionable.
-      this.writeState(filePath, { status: 'reviewing', baseline: null, nullReason: 'created' });
+      this.writeState(filePath, { status: 'reviewing', baseline: null, nullReason: this.adoptedNullReason(filePath) });
     }
     return untracked;
+  }
+
+  /**
+   * The `nullReason` for a file adopted by a rescan.
+   *
+   * A witnessed create is `'created'`, and a file this session already classified
+   * `'unbaselined'` stays so: a Refresh must never turn a file Discard would keep into one
+   * it deletes. With no record either way, `'created'` is the answer despite being the
+   * deleting one, because of what `collectUntrackedFiles` has filtered out: unreadable
+   * files and unwitnessed binaries, which *are* the pre-existing-but-unbaselined
+   * population. What is left — readable text with no blob — is overwhelmingly a real new
+   * file, including every new file from a prior session after a window reload, where both
+   * sets are necessarily empty. Those must stay deletable or the queue becomes
+   * un-actionable.
+   */
+  private adoptedNullReason(filePath: string): 'created' | 'unbaselined' {
+    if (this.sessionCreated.has(filePath)) return 'created';
+    return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';
   }
 
   /**
@@ -561,6 +583,8 @@ export class StateManager {
     const prior = this.state.get(filePath);
     this.state.set(filePath, state);
     if (state.baseline === null && state.nullReason === 'created') this.sessionCreated.add(filePath);
+    // Absent reads as 'unbaselined' (see FileState.nullReason), so record it the same way.
+    if (state.baseline === null && state.nullReason !== 'created') this.sessionUnbaselined.add(filePath);
     // A status-only change (reviewing → reviewing with the same baseline) leaves the
     // virtual document correct, so it is not worth a re-fetch. `!prior` counts as a
     // move because an absent entry renders as `''`.
@@ -872,6 +896,7 @@ export class StateManager {
         await drained;
         this.clearState();
         this.sessionCreated.clear();
+        this.sessionUnbaselined.clear();
         g?.destroyGit();
       })();
       await this.teardown;
@@ -1104,6 +1129,7 @@ export class StateManager {
     // Clear all in-memory state — fresh start
     this.clearState();
     this.sessionCreated.clear();
+    this.sessionUnbaselined.clear();
 
     // Snapshot all disk files as new baselines
     const diskSet = new Set(diskFiles);
@@ -1133,6 +1159,7 @@ export class StateManager {
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
     this.clearState();
     this.sessionCreated.clear();
+    this.sessionUnbaselined.clear();
     this._git = undefined;
     this.gitQueue = Promise.resolve();
   }

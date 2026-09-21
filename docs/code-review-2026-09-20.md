@@ -11,7 +11,9 @@ argument), unbounded `git hash-object` fan-out during the enable snapshot, git p
 global-config hardening, directory deletes that removed nothing from the index, re-entering
 an open review session, and three UI-level items. §1.1, the rename guards, was resolved on
 2026-09-21 when the disk-event handlers started reading baselines through
-`StateManager.readBaseline`, which waits for queued writes such as the rename. See the git
+`StateManager.readBaseline`, which waits for queued writes such as the rename. §1.2, the
+`nullReason` contradiction, was resolved the same day: a Refresh now keeps the session's
+own classification instead of re-adopting every untracked file as `'created'`. See the git
 history for those. The remaining sections keep their original numbers.
 
 Ordered by what a defect would cost the user, not by how interesting it is.
@@ -19,22 +21,6 @@ Ordered by what a defect would cost the user, not by how interesting it is.
 ---
 
 ## 1. Unresolved correctness
-
-### 1.2 `nullReason` has two carefully-argued comments that disagree
-
-`types.ts` states that an absent `nullReason` reads as `'unbaselined'`, and that declining
-to delete is "the safe direction on purpose". `adoptUntrackedFiles` then writes
-`'created'` — the deleting value — to *every* untracked readable file on both `load()` and
-Refresh, with its own argument for why that is acceptable.
-
-Both arguments are reasonable in isolation. Together they mean a file that was merely
-unreadable at enable time, or that `handleDiskChange` deliberately labelled `unbaselined`,
-becomes deletable after a single Refresh.
-
-Nothing was reproduced here and no change was made, because the resolution is a product
-decision about Discard's blast radius rather than a repair. It is listed high because it is
-the mechanism that gates deleting a user's file, and it is specified by prose in two places
-that do not agree. It wants a test, not a third comment. See also §4.
 
 ### 1.3 Multi-root workspaces produce spurious entries
 
@@ -71,8 +57,7 @@ in git. Nothing filters events down to the known root.
 
 ## 4. The structural note
 
-Kept because the finding it rests on is still open, and because it is the reason the fixed
-items were fixed the way they were.
+Kept because it is the reason the fixed items were fixed the way they were.
 
 This codebase uses comments where it should use tests. The proof came from the review
 itself. `discardHunk` re-added a newline to files that had none, so the file could never
@@ -89,10 +74,10 @@ found the identical bug next door, missed it.
 The prose in this repo is often excellent and worth keeping; the BOM and save-token essays
 are real institutional memory about real bugs. The failure mode is narrower than "too many
 comments": it is *an invariant given a twenty-line argument for why it holds, instead of an
-assertion that it holds*. §1.2 is the same shape, still open, in the one mechanism where
-being wrong deletes a file.
+assertion that it holds*. §1.2 was the same shape, in the one mechanism where being wrong
+deletes a file: two comments, each arguing its own side, and no test where they met.
 
 The counter-move is already in the tree. One generator over random baseline/edit pairs
 covers the trailing-newline case, the BOM cases, the EOL cases and the partial-selection
-splices at once, and fails loudly when any of them stops being true. Extending that pattern
-to §1.2 is the recommended way to close it.
+splices at once, and fails loudly when any of them stops being true. §1.2 was closed the same way, with
+tests in `stateManagerGit.test.ts` and a mutation that re-introduces the defect.

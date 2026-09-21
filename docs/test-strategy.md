@@ -94,6 +94,7 @@ any of them, check its mutation in `scripts/mutation-check.py`.
 | Begin review during End review's drain | `stateManagerGit.test.ts` | End deleting the new session's repo |
 | Handlers for one path run in arrival order | `pathSerializer.test.ts` + source scan | a change overwriting a create's `'created'` |
 | Session re-checked after every baseline read | `reloadEqualsMemory.test.ts` (source scan) | a phantom entry written after End review |
+| Refresh keeps an unbaselined file unbaselined | `stateManagerGit.test.ts` | a file Discard kept becoming one it deletes |
 
 The four integration guards are not in the mutation script; they were verified by hand.
 
@@ -138,6 +139,11 @@ new generators at least that adversarial.
   not enough for the plain create test: the same write fires a change event, which queues
   the file too. Only `nullReason: 'created'` proves the create handler ran. The check is to
   switch the handler off and watch the test fail.
+- **What a rebuild throws away, it must remember elsewhere.** Refresh re-derives state
+  from disk and git, which cannot tell a new file from one never baselined. The session's
+  own classification has to survive in a set beside the state, in both directions:
+  `sessionCreated` so agent output stays deletable, `sessionUnbaselined` so the user's
+  files do not become deletable.
 - **A partial operation may increase the hunk count.** Accepting a line from the middle of
   a replace hunk legitimately splits it. Assert on pending work instead: additions drop by
   at least the number selected, removals never rise. Recorded so nobody re-proposes the
@@ -172,8 +178,11 @@ Real, but each is a design change rather than a test, so none is started.
   and a reload disagrees. Either the pending deletion silently leaves review (source wins),
   or the moved file is reviewed as an edit of the deleted one (target wins). Pinned as a
   `todo` in `reloadEqualsMemory.test.ts`. The generator avoids the case until it is decided.
-- **The `nullReason` contradiction** in [code-review-2026-09-20.md](code-review-2026-09-20.md)
-  §1.2, which is a product decision about how much Discard may delete.
+- **Persist `nullReason` across a window reload.** A Refresh keeps each file's
+  classification, but a reload starts with no record, so a file the previous window marked
+  `'unbaselined'` is re-adopted as `'created'` and Discard would delete it. Closing this
+  means storing the classification beside the baseline repo, which changes what a reload
+  trusts.
 
 ## Deliberately not building
 

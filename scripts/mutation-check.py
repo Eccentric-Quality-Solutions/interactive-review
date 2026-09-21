@@ -152,6 +152,11 @@ MUTATIONS = [
      [("  const tailTerminator = newTailIsContext\n    ? hunk.oldLines > 0 || baseline.terminated\n    : current.terminated;",
        "  const tailTerminator = current.terminated;")],
      "hunkApply.test.js"),
+
+    ("Refresh re-adopts an unbaselined file as 'created' (deletable)",
+     "src/stateManager.ts",
+     [("return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';", "return 'created';")],
+     "stateManagerGit.test.js"),
 ]
 
 
