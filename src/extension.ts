@@ -196,9 +196,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   /**
    * Does this CodeLens click carry a hunk id that no longer resolves?
    *
-   * Hunk ids are derived from position, so every accept or discard renumbers the ones that
-   * follow it. `acceptHunk`/`discardHunk` handle a stale id by logging and returning, which
-   * from the outside is indistinguishable from the button doing nothing at all — the user
+   * Hunk ids are derived from position and content, so every accept or discard renumbers
+   * the ones that follow it, and a hunk the agent has since rewritten gets a new id.
+   * `acceptHunk`/`discardHunk` handle a stale id by logging and returning, which from the
+   * outside is indistinguishable from the button doing nothing at all — the user
    * clicks, the block stays, and there is no way to tell whether the tool ignored them or
    * acted somewhere they could not see.
    *

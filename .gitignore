@@ -4,9 +4,6 @@ out/
 out-test/
 out-integration/
 .vscode-test/
-# Python tooling caches (scripts/mutation-check.py makes the editor create these)
-.mypy_cache/
-__pycache__/
 *.vsix
 # interactive-review
 .vscode/interactive-review/

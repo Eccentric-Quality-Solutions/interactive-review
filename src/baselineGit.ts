@@ -150,6 +150,62 @@ export class BaselineGit {
     return stdout;
   }
 
+  // ── unbaselined.json ──────────────────────────────────────────────────────
+
+  /**
+   * The paths the session last classified `nullReason: 'unbaselined'`, so a window reload
+   * does not re-adopt them as `'created'` and make them deletable. See
+   * `StateManager.sessionUnbaselined`.
+   *
+   * Kept inside the git directory so it shares the baselines' lifetime: End review's
+   * `destroyGit` and a recovery's `resetRepo` remove both together, and git ignores files
+   * it does not know in its own directory.
+   */
+  private get unbaselinedPath(): string {
+    return path.join(this.gitDir, 'interactive-review-unbaselined.json');
+  }
+
+  /**
+   * Absolute paths, or none when the file is absent or unreadable. None is the behaviour
+   * from before this file existed, so a damaged record costs the protection, not the review.
+   */
+  loadUnbaselined(): string[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.unbaselinedPath, 'utf-8');
+    } catch {
+      return []; // absent: nothing was recorded
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every(p => typeof p === 'string')) {
+        return parsed.map(rel => path.join(this.workTree, rel));
+      }
+    } catch { /* fall through */ }
+    this.log('loadUnbaselined: record is unreadable, ignoring it');
+    return [];
+  }
+
+  /** Replace the record. An empty set removes the file rather than writing `[]`. */
+  saveUnbaselined(filePaths: Iterable<string>): void {
+    if (this.destroyed) return;
+    const rel = [...filePaths].map(fp => path.relative(this.workTree, fp).split(path.sep).join('/')).sort();
+    try {
+      if (rel.length === 0) {
+        fs.rmSync(this.unbaselinedPath, { force: true });
+        return;
+      }
+      // No mkdir: a git directory that is gone was removed on purpose, and recreating it
+      // here would make `load()` read review as still on. Write-then-rename, so a crash
+      // mid-write leaves the old record rather than a truncated one.
+      const tmp = `${this.unbaselinedPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(rel, null, 2), 'utf-8');
+      fs.renameSync(tmp, this.unbaselinedPath);
+    } catch (err) {
+      this.log(`saveUnbaselined failed: ${err}`);
+    }
+  }
+
   // ── settings.json ─────────────────────────────────────────────────────────
 
   private get settingsPath(): string {
@@ -318,7 +374,14 @@ export class BaselineGit {
       // ls-files returns all entries matching the path (a single file or all files under a directory)
       const lsOut = await this.git(['ls-files', '--stage', '--', oldRel]);
       const lines = lsOut.trim().split('\n').filter(Boolean);
-      if (lines.length === 0) return; // not tracked — nothing to rename
+      if (lines.length === 0) {
+        // No baseline to move, but the source still replaces the target: a baseline left
+        // there would review the moved file as an edit of whatever the path held before.
+        // A no-op when the target is untracked too. Guarded by `stateManagerGit.test.ts`
+        // ("an untracked source still replaces the target's baseline").
+        await this.removeFile(newFilePath);
+        return;
+      }
 
       // Parse all matching entries
       const entries: { mode: string; hash: string; entryRel: string }[] = [];

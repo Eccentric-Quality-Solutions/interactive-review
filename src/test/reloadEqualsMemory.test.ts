@@ -267,9 +267,9 @@ function pickOp(rnd: () => number): Op {
   }
   if (r < 0.64 && existing) {
     const target = abs(FILES[Math.floor(rnd() * FILES.length)]);
-    // Not onto a path that still has a review entry (a pending deletion): what that should
-    // mean is undecided — see the `todo` test at the bottom of this file.
-    if (!fs.existsSync(target) && !sm.getFile(target)) {
+    // Onto a free path, which includes one whose deletion is still in review: the rename
+    // replaces it (see "renaming onto a pending deletion" below).
+    if (!fs.existsSync(target)) {
       // Explorer rename: onWillRenameFiles migrates state first, then the disk moves.
       return {
         name: `rename ${rel(existing)} → ${rel(target)}`,
@@ -410,16 +410,12 @@ describe('reload equals memory — pinned sequences', () => {
     assert.equal(sm.getFile(abs('g.txt'))?.baseline, 'before\n');
   });
 
-  // Undecided, so pinned as `todo` rather than fixed: it fails today and does not fail the run.
-  //
-  // Renaming an *unedited* file onto a path that still has a pending deletion. git moves the
-  // source's baseline over the target's (`BaselineGit.renameFile`), but memory keeps the
-  // target's deletion entry, so the queue shows a change a reload does not. Making them agree
-  // means choosing whose baseline the path keeps — the source's, which silently drops a
-  // deletion the user never dispositioned, or the target's, which reviews the moved file as
-  // an edit of the deleted one. That is a product decision (docs/test-strategy.md, "Open design questions").
-  // Found by the deep sweep; 30 of 400 seeds reached it.
-  it('renaming an unedited file onto a pending deletion', { todo: 'needs a decision: whose baseline wins' }, async () => {
+  // Defect: renaming an *unedited* file onto a path that still had a pending deletion. git
+  // moved the source's baseline over the target's (`BaselineGit.renameFile`), but memory kept
+  // the target's deletion entry, so the queue showed a change a reload did not. Decided
+  // 2026-09-21: the source wins, so the rename replaces the pending deletion, as a reload
+  // already read it. Found by the deep sweep; 30 of 400 seeds reached it.
+  it('renaming an unedited file onto a pending deletion', async () => {
     writeDisk(abs('a.txt'), 'deleted soon\n');
     writeDisk(abs('b.txt'), 'moved\n');
     await beginReview();
@@ -430,6 +426,25 @@ describe('reload equals memory — pinned sequences', () => {
     fs.renameSync(abs('b.txt'), abs('a.txt'));
 
     await assertReloadEqualsMemory('after renaming onto a pending deletion');
+    assert.equal(sm.getFile(abs('a.txt')), undefined, 'the moved file is unedited, so nothing is pending');
+  });
+
+  // The same decision when the source is a new file, which has no baseline for git to move:
+  // the target's old baseline had to be removed, or a reload reviewed the moved file as an
+  // edit of the deleted one.
+  it('renaming a new file onto a pending deletion', async () => {
+    writeDisk(abs('a.txt'), 'deleted soon\n');
+    await beginReview();
+    fs.rmSync(abs('a.txt'));
+    await onExternalDelete(abs('a.txt'));
+    writeDisk(abs('b.txt'), 'agent output\n');
+    await onDiskCreate(abs('b.txt'));
+
+    sm.renameFile(abs('b.txt'), abs('a.txt'));
+    fs.renameSync(abs('b.txt'), abs('a.txt'));
+
+    await assertReloadEqualsMemory('after renaming a new file onto a pending deletion');
+    assert.equal(sm.getFile(abs('a.txt'))?.nullReason, 'created', 'still reviewed as the new file it is');
   });
 });
 

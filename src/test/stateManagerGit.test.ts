@@ -264,3 +264,140 @@ describe('StateManager.rebuildState keeps each null baseline\'s nullReason', () 
     assert.equal(sm.getFile(to)?.nullReason, 'unbaselined');
   });
 });
+
+describe('StateManager.load keeps each null baseline\'s nullReason across a window reload', () => {
+  const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
+
+  /** A window reload: a fresh StateManager loading the same repo and disk. */
+  async function reload(): Promise<StateManager> {
+    await sm.flush();
+    const fresh = new StateManager();
+    await fresh.load(ignore);
+    return fresh;
+  }
+
+  // Defect: the 'unbaselined' classification lived only in memory. A reload started with
+  // no record, re-adopted the file as 'created', and Discard would then delete it.
+  it('an unbaselined file stays unbaselined across a reload', async () => {
+    const file = path.join(root, 'preexisting.txt');
+    writeFile(file, 'the user\'s content\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'unbaselined',
+      'a reload must not turn a file Discard would keep into one it deletes');
+  });
+
+  it('a file with no record is still adopted as created after a reload', async () => {
+    // The other direction: new files from the previous window must stay deletable.
+    const file = path.join(root, 'new.txt');
+    writeFile(file, 'agent output\n');
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'created');
+  });
+
+  it('a later witnessed create clears the saved record', async () => {
+    const file = path.join(root, 'recreated.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'created');
+  });
+
+  it('End review forgets the record, so the next session starts clean', async () => {
+    const file = path.join(root, 'preexisting.txt');
+    writeFile(file, 'the user\'s content\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    await sm.setEnabled(false);
+    await sm.setEnabled(true);
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'created');
+  });
+
+  // Defect: a branch switch cleared the classification in memory but left the saved record,
+  // so a path it listed was restored as 'unbaselined' on the next reload even after the
+  // session had since witnessed a new file being created there. Memory and a reload
+  // disagreed, and Discard would keep the agent's file.
+  it('a branch switch forgets the saved record as well as the in-memory one', async () => {
+    const file = path.join(root, 'x.txt');
+    writeFile(file, 'the user\'s content\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    await sm.clearHunksOnBranchSwitch(ignore);
+    sm.removeFile(file);   // the branch switch baselined it; e.g. an accepted deletion drops that
+    await sm.flush();
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, sm.getFile(file)?.nullReason);
+  });
+
+  it('a damaged record is ignored rather than failing the load', async () => {
+    const file = path.join(root, 'new.txt');
+    writeFile(file, 'agent output\n');
+    const record = path.join(root, '.vscode', 'interactive-review', 'git', 'interactive-review-unbaselined.json');
+    fs.writeFileSync(record, '{ not json');
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'created');
+  });
+});
+
+describe('StateManager.renameFile onto a pending deletion', () => {
+  const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
+
+  // Defect: the source wins, so memory drops the target's pending deletion. But when git had
+  // no baseline for the source (never snapshotted, e.g. created while ignored), git's rename
+  // returned early and left the deleted file's baseline at the target. A reload then showed
+  // the moved file as an edit of the deleted one, and Discard would have written the deleted
+  // content over it.
+  it('an untracked source still replaces the target\'s baseline', async () => {
+    const target = path.join(root, 'a.txt');
+    writeFile(target, 'deleted soon\n');
+    await sm.snapshotWorkspace(ignore);
+    fs.rmSync(target);
+    sm.setFile(target, { status: 'reviewing', baseline: 'deleted soon\n' }, true);
+    const source = path.join(root, 'b.txt');
+    writeFile(source, 'never baselined\n');
+
+    sm.renameFile(source, target);
+    fs.renameSync(source, target);
+    await sm.flush();
+
+    assert.equal(await sm.git!.getBaseline(target), undefined, 'the deleted file\'s baseline is gone');
+    const fresh = new StateManager();
+    await fresh.load(ignore);
+    assert.equal(fresh.getFile(target)?.baseline ?? null, sm.getFile(target)?.baseline ?? null,
+      'a reload agrees with memory about the target');
+  });
+
+  // Defect: an untracked source moved over an unedited, baselined file (a drag-move with
+  // Replace). Its baseline was removed, so a Refresh re-adopted the moved file as 'created'
+  // and Discard would have trashed it. Nothing says the moved file is new — only that git
+  // had no baseline for it, which is what 'unbaselined' means.
+  it('an untracked source moved over a baselined file is kept by Discard', async () => {
+    const target = path.join(root, 'a.txt');
+    writeFile(target, 'the user\'s file\n');
+    await sm.snapshotWorkspace(ignore);
+    const source = path.join(root, 'b.txt');
+    writeFile(source, 'never baselined\n');
+
+    sm.renameFile(source, target);
+    fs.rmSync(target);
+    fs.renameSync(source, target);
+    await sm.flush();
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(target)?.nullReason, 'unbaselined');
+  });
+});

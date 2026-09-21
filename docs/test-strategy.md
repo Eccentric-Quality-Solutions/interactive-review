@@ -34,7 +34,7 @@ test investment go a long way:
 ## The rules
 
 1. **A fix lands with a test that fails on the code before it.** Proven, not assumed: add a
-   mutation for it to [`scripts/mutation-check.py`](../scripts/mutation-check.py), which
+   mutation for it to [`scripts/mutation-check.mjs`](../scripts/mutation-check.mjs), which
    re-introduces each defect and requires the guarding test to fail. A regression test that
    passes on broken code is worse than none — it manufactures confidence.
 2. **A comment that asserts an invariant names the test that fails if it is false.** If
@@ -66,7 +66,7 @@ deliberate local install, and the stamp then says `-dirty`.
 ## Existing regression guards
 
 Each of these guards a defect that shipped at least once. Before deleting or "simplifying"
-any of them, check its mutation in `scripts/mutation-check.py`.
+any of them, check its mutation in `scripts/mutation-check.mjs`.
 
 | Guard | Where | Catches |
 |---|---|---|
@@ -95,6 +95,10 @@ any of them, check its mutation in `scripts/mutation-check.py`.
 | Handlers for one path run in arrival order | `pathSerializer.test.ts` + source scan | a change overwriting a create's `'created'` |
 | Session re-checked after every baseline read | `reloadEqualsMemory.test.ts` (source scan) | a phantom entry written after End review |
 | Refresh keeps an unbaselined file unbaselined | `stateManagerGit.test.ts` | a file Discard kept becoming one it deletes |
+| A window reload keeps it unbaselined too | `stateManagerGit.test.ts` | the same, after restarting VS Code |
+| A branch switch forgets the saved record too | `stateManagerGit.test.ts` | a reload restoring what memory forgot |
+| A rewritten hunk at the same position gets a new id | `diffEngine.test.ts` | a stale click accepting text the user never saw |
+| Renaming onto a pending deletion or over a file: the source wins, and Discard keeps an unbaselined source | `reloadEqualsMemory.test.ts` + `stateManagerGit.test.ts` | memory and a reload disagreeing on the target |
 
 The four integration guards are not in the mutation script; they were verified by hand.
 
@@ -103,8 +107,8 @@ mirrors `FileWatcher` and `commands.ts` at the StateManager boundary, so a chang
 needs its mirror updated. It cannot reach defects in which text the command layer passes
 (such as `todo.md` item D, dirty-buffer accept), because that layer is not modelled.
 Nor does its generator ever produce an `'unbaselined'` entry: a change event only reaches
-files that already have a baseline or a state entry. A green sweep says nothing about
-`nullReason` across a reload; `stateManagerGit.test.ts` covers it across a Refresh.
+files that already have a baseline or a state entry. A green sweep says nothing about that
+population; `stateManagerGit.test.ts` covers it across a Refresh and a reload.
 
 The property generators live in [`src/test/generators.ts`](../src/test/generators.ts) and
 cover the shapes that have actually broken: independent line endings and final newlines per
@@ -166,9 +170,6 @@ new generators at least that adversarial.
 
 Real, but each is a design change rather than a test, so none is started.
 
-- **Content-hash hunk ids.** Ids are positional. The stale-click warning added on
-  2026-09-20 catches an id that no longer resolves, but not one that now happens to match a
-  *different* hunk's coordinates, which would act on the wrong hunk.
 - **Make the whole-file-flash fix independent of VS Code's cache.** The content provider
   still returns `''` for a file with no state; the fix works by not invalidating the cache.
   Any re-fetch of the baseline document, such as reopening the tab, would still paint the
@@ -176,16 +177,6 @@ Real, but each is a design change rather than a test, so none is started.
 - **Extract `classifyDiskEvent` and `planAccept`/`planDiscard`** as pure functions, the way
   `hunkApply` was extracted. The first also closes `todo.md` item 1 — three separate answers
   to "is this file new".
-- **Renaming onto a pending deletion.** An unedited file renamed onto a path whose deletion
-  is still in review: git gives the path the source's baseline, memory keeps the deletion,
-  and a reload disagrees. Either the pending deletion silently leaves review (source wins),
-  or the moved file is reviewed as an edit of the deleted one (target wins). Pinned as a
-  `todo` in `reloadEqualsMemory.test.ts`. The generator avoids the case until it is decided.
-- **Persist `nullReason` across a window reload.** A Refresh keeps each file's
-  classification, but a reload starts with no record, so a file the previous window marked
-  `'unbaselined'` is re-adopted as `'created'` and Discard would delete it. Closing this
-  means storing the classification beside the baseline repo, which changes what a reload
-  trusts.
 
 ## Deliberately not building
 

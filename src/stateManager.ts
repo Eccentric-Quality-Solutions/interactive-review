@@ -59,7 +59,8 @@ export class StateManager {
    * `adoptUntrackedFiles` would otherwise re-adopt these as `'created'`, making a file the
    * session had decided to keep deletable. It holds only paths whose *most recent*
    * classification is `'unbaselined'`: a later witnessed create removes the path. Same
-   * lifetime as `sessionCreated`.
+   * lifetime as `sessionCreated`, except that it is also saved beside the baseline repo
+   * and restored by `load()`, so a window reload keeps it too.
    *
    * Guarded by `stateManagerGit.test.ts` ("keeps each null baseline's nullReason").
    */
@@ -366,19 +367,38 @@ export class StateManager {
    * The `nullReason` for a file adopted by a rescan.
    *
    * The session's most recent classification of the path stands: a witnessed create is
-   * `'created'`, and a file last classified `'unbaselined'` stays so, because a Refresh must
-   * never turn a file Discard would keep into one it deletes. With no record either way,
-   * `'created'` is the answer despite being the deleting one, because of what
-   * `collectUntrackedFiles` has filtered out: unreadable
-   * files and unwitnessed binaries, which *are* the pre-existing-but-unbaselined
-   * population. What is left — readable text with no blob — is overwhelmingly a real new
-   * file, including every new file from a prior session after a window reload, where both
-   * sets are necessarily empty. Those must stay deletable or the queue becomes
-   * un-actionable.
+   * `'created'`, and a file last classified `'unbaselined'` stays so, because neither a
+   * Refresh nor a window reload may turn a file Discard would keep into one it deletes.
+   * With no record either way, `'created'` is the answer despite being the deleting one,
+   * because of what `collectUntrackedFiles` has filtered out: unreadable files and
+   * unwitnessed binaries, which *are* the pre-existing-but-unbaselined population. What is
+   * left — readable text with no blob — is overwhelmingly a real new file, including every
+   * new file from a prior session after a window reload, where the witness set is
+   * necessarily empty. Those must stay deletable or the queue becomes un-actionable.
    */
   private adoptedNullReason(filePath: string): 'created' | 'unbaselined' {
     // Not `sessionCreated`: it keeps a witness after a later 'unbaselined' classification.
     return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';
+  }
+
+  /** Persist `sessionUnbaselined`, so a window reload keeps it. See `BaselineGit.loadUnbaselined`. */
+  private saveUnbaselined(): void {
+    this._git?.saveUnbaselined(this.sessionUnbaselined);
+  }
+
+  /**
+   * Forget both classification sets, in memory and in the saved record. For session
+   * boundaries only.
+   *
+   * The save matters after a branch switch, where the repo survives: a record left behind
+   * would restore paths on the next reload that memory has forgotten, so a reload and
+   * memory would disagree. Guarded by `stateManagerGit.test.ts` ("a branch switch forgets
+   * the saved record"). End review and recovery remove the record with the repo anyway.
+   */
+  private forgetClassifications(): void {
+    this.sessionCreated.clear();
+    this.sessionUnbaselined.clear();
+    this.saveUnbaselined();
   }
 
   /**
@@ -468,6 +488,10 @@ export class StateManager {
       await this.recoverLostBaseline(g, `${err.message}`, shouldIgnore);
       return;
     }
+    // Restore the previous window's 'unbaselined' classifications before anything is
+    // adopted, or `adoptUntrackedFiles` would re-adopt those files as 'created'. The
+    // witness set is not persisted: with no record, adoption already answers 'created'.
+    for (const fp of g.loadUnbaselined()) this.sessionUnbaselined.add(normalizePath(fp));
     const { reviewing, idle, skippedNoBaseline, ignored } =
       await this.scanTrackedIntoState(g, tracked, shouldIgnore);
     if (skippedNoBaseline.length > 0) {
@@ -592,10 +616,11 @@ export class StateManager {
     // deletable because of the old witness.
     if (state.baseline === null && state.nullReason === 'created') {
       this.sessionCreated.add(filePath);
-      this.sessionUnbaselined.delete(filePath);
-    } else if (state.baseline === null) {
+      if (this.sessionUnbaselined.delete(filePath)) this.saveUnbaselined();
+    } else if (state.baseline === null && !this.sessionUnbaselined.has(filePath)) {
       // Absent reads as 'unbaselined' (see FileState.nullReason), so record it the same way.
       this.sessionUnbaselined.add(filePath);
+      this.saveUnbaselined();
     }
     // A status-only change (reviewing → reviewing with the same baseline) leaves the
     // virtual document correct, so it is not worth a re-fetch. `!prior` counts as a
@@ -759,6 +784,18 @@ export class StateManager {
     const oldPrefix = oldFilePath + path.sep;
     let hasDirChildren = false;
     const fileState = this.state.get(oldFilePath);
+    // The source wins: a rename replaces whatever the target path held, including a
+    // deletion still in review there. git moves the source's baseline over the target's, so
+    // memory must drop the target's entry too, or the queue shows a change a reload does
+    // not. Guarded by `reloadEqualsMemory.test.ts` ("renaming onto a pending deletion").
+    if (!fileState && this.state.has(newFilePath)) this.dropState(newFilePath);
+    // A source with no entry may have no baseline either, and then nothing says the moved
+    // file is new, so a later rescan must not adopt it as deletable. Recording the target
+    // is harmless when git does move a baseline there: adoption never consults it then.
+    if (!fileState && !this.sessionUnbaselined.has(newFilePath)) {
+      this.sessionUnbaselined.add(newFilePath);
+      this.saveUnbaselined();
+    }
     if (fileState) {
       // Exact match — single file rename
       this.dropState(oldFilePath);
@@ -786,6 +823,14 @@ export class StateManager {
         // Do not rollback in-memory path mapping: the file has already been renamed on disk,
         // so reverting to oldFilePath would desync state/UI from the filesystem.
         log(`git queue error (renameFile): ${err}`);
+      });
+    } else if (this._git) {
+      // No baseline to move, but the target may still hold one: a deletion in review, or a
+      // file the rename overwrote. The source wins, so remove it, or a reload would review
+      // the moved file as an edit of the old one. A no-op when the target is untracked.
+      const g = this._git;
+      this.gitQueue = this.gitQueue.then(() => g.removeFile(newFilePath)).catch(err => {
+        log(`git queue error (renameFile, clearing target): ${err}`);
       });
     }
   }
@@ -907,8 +952,7 @@ export class StateManager {
       this.teardown = (async () => {
         await drained;
         this.clearState();
-        this.sessionCreated.clear();
-        this.sessionUnbaselined.clear();
+        this.forgetClassifications();
         g?.destroyGit();
       })();
       await this.teardown;
@@ -1140,8 +1184,7 @@ export class StateManager {
 
     // Clear all in-memory state — fresh start
     this.clearState();
-    this.sessionCreated.clear();
-    this.sessionUnbaselined.clear();
+    this.forgetClassifications();
 
     // Snapshot all disk files as new baselines
     const diskSet = new Set(diskFiles);
@@ -1170,8 +1213,7 @@ export class StateManager {
     this._sawReviewingFiles = false;
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
     this.clearState();
-    this.sessionCreated.clear();
-    this.sessionUnbaselined.clear();
+    this.forgetClassifications();
     this._git = undefined;
     this.gitQueue = Promise.resolve();
   }

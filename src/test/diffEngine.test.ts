@@ -360,10 +360,30 @@ describe('hunkId', () => {
     assert.notEqual(hunkId(hunks[0]), hunkId(hunks[1]));
   });
 
-  it('id format is newStart:newLines:oldStart:oldLines', () => {
+  it('id starts with newStart:newLines:oldStart:oldLines', () => {
     const hunks = computeHunks('a\nb\nc\n', 'a\nX\nc\n');
     const h = hunks[0];
-    assert.equal(hunkId(h), `${h.newStart}:${h.newLines}:${h.oldStart}:${h.oldLines}`);
+    assert.ok(hunkId(h).startsWith(`${h.newStart}:${h.newLines}:${h.oldStart}:${h.oldLines}:`));
+  });
+
+  // Defect: ids were positional only. An agent that rewrote the same line again after the
+  // user saw it produced a hunk with identical coordinates, so a click on the old lens or
+  // panel row accepted text the user never saw, or discarded the agent's newer version.
+  it('a hunk at the same coordinates with different content gets a different id', () => {
+    const seen = computeHunks('a\nb\nc\n', 'a\nX\nc\n')[0];
+    const now = computeHunks('a\nb\nc\n', 'a\nY\nc\n')[0];
+    assert.deepEqual(
+      [seen.newStart, seen.newLines, seen.oldStart, seen.oldLines],
+      [now.newStart, now.newLines, now.oldStart, now.oldLines],
+      'precondition: the two hunks share coordinates');
+    assert.notEqual(hunkId(seen), hunkId(now));
+  });
+
+  it('removed and added content are not interchangeable in the id', () => {
+    // A naive concatenation would give 'ab' + '' and 'a' + 'b' the same hash input.
+    const h = computeHunks('a\nb\nc\n', 'a\nX\nc\n')[0];
+    const moved = { ...h, removedContent: [...h.removedContent, ...h.addedContent], addedContent: [] };
+    assert.notEqual(hunkId(h), hunkId(moved));
   });
 });
 

@@ -23,10 +23,29 @@ export interface ParsedHunk {
   addedContent: string[];    // lines in current content that were added
 }
 
-// Stable id derived from hunk position — same hunk always gets the same id
-// within a single review session (no random component needed).
+/**
+ * Id for a hunk: its position plus a hash of its content, so the same hunk gets the same id
+ * each time it is recomputed.
+ *
+ * Position alone is not enough. An agent that rewrites a line again after the user saw it
+ * produces a hunk at identical coordinates, and a click on the old lens or panel row would
+ * then accept text the user never saw, or discard the agent's newer version. With content
+ * in the id, that click no longer resolves and takes the stale-id path instead. Guarded by
+ * `diffEngine.test.ts` ("same coordinates with different content").
+ */
 export function hunkId(hunk: ParsedHunk): string {
-  return `${hunk.newStart}:${hunk.newLines}:${hunk.oldStart}:${hunk.oldLines}`;
+  const content = fnv1a(JSON.stringify([hunk.removedContent, hunk.addedContent]));
+  return `${hunk.newStart}:${hunk.newLines}:${hunk.oldStart}:${hunk.oldLines}:${content}`;
+}
+
+/** 32-bit FNV-1a, hex. Distinguishes edits, not adversaries, so no crypto is needed. */
+function fnv1a(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
 }
 
 /**
