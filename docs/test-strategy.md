@@ -149,6 +149,9 @@ new generators at least that adversarial.
   to settle rather than polling. The brand-new-external-file tests use `waitForWatcher`, a
   plain wait, not `waitForConditionNudged`; keep it that way.
 - **Replace fixed sleeps before negative assertions** ("not queued") with waits on events.
+  A sleep before a positive assertion fails when the machine is slow; wait on the condition
+  instead. A sleep before a negative one passes when the event is late, so it can pass on
+  broken code; that needs `whenIdle()`.
 
 ## Open design questions
 
@@ -192,10 +195,16 @@ pass all eleven. A deterministic regression fails the same tests every time. The
 inotify starvation: this workstation runs at roughly 121 of 128 inotify instances. See the
 `integration-suite-inotify` note and `todo.md` item 4.
 
-The watcher tests are now honest, so they flake here *more* than before. On 2026-09-21, at
-129–130 instances against the 128 limit, runs of identical code passed 11/11 and then failed
-3–4, with a different set each time. For every failing test, the extension log showed no
-create or change event for its file at all. Until CI has run on a pull request, treat a
-watcher failure as environmental **only if** it fails to reproduce
-in isolation and a different test fails on the next run. Never treat it as environmental
-merely because it is inconvenient.
+The watcher tests are honest, so they flake here *more* than dishonest ones would. On
+2026-09-21, at 129–130 instances against the 128 limit, runs of identical code passed 11/11
+and then failed 3–4, with a different set each time. For every failing test, the extension
+log showed no create or change event for its file at all. The same day, the first CI run on
+a pull request passed every watcher test on a runner with raised limits.
+
+**CI settles it.** A watcher failure that reproduces on the pull request's integration job
+is a real bug. One that fails only here, and fails a different test on the next run, is
+starvation. Never call a failure environmental without that evidence.
+
+The first CI run did find one real test defect: a fixed 300 ms sleep before an assertion,
+which the runner took 1.8 s to satisfy. That is the fixed-sleep problem under "Open test
+work", failing loudly instead of silently.
