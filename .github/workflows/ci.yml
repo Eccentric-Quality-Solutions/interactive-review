@@ -1,4 +1,4 @@
-# Plan of record: docs/test-strategy.md, Tier 2 item 1.
+# See docs/test-strategy.md, "The rules" (the CI paragraph under the test commands).
 #
 # Unit + mutation on every push: both run in about a minute and between them prove the
 # regression tests exist *and* can fail. The integration suite (real VS Code, ~4 min) runs on

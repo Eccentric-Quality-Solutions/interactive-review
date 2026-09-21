@@ -417,7 +417,7 @@ describe('reload equals memory — pinned sequences', () => {
   // target's deletion entry, so the queue shows a change a reload does not. Making them agree
   // means choosing whose baseline the path keeps — the source's, which silently drops a
   // deletion the user never dispositioned, or the target's, which reviews the moved file as
-  // an edit of the deleted one. That is a product decision (docs/test-strategy.md, Tier 3).
+  // an edit of the deleted one. That is a product decision (docs/test-strategy.md, "Open design questions").
   // Found by the deep sweep; 30 of 400 seeds reached it.
   it('renaming an unedited file onto a pending deletion', { todo: 'needs a decision: whose baseline wins' }, async () => {
     writeDisk(abs('a.txt'), 'deleted soon\n');
