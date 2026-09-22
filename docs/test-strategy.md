@@ -96,6 +96,9 @@ any of them, check its mutation in `scripts/mutation-check.mjs`.
 | Session re-checked after every baseline read | `reloadEqualsMemory.test.ts` (source scan) | a phantom entry written after End review |
 | Refresh keeps an unbaselined file unbaselined | `stateManagerGit.test.ts` | a file Discard kept becoming one it deletes |
 | A window reload keeps it unbaselined too | `stateManagerGit.test.ts` | the same, after restarting VS Code |
+| A rescan answers `'created'` only from a saved witness; no record means `'unbaselined'` | `stateManagerGit.test.ts` | any lost record (ignored at Begin, renamed directory, damaged file) making the user's file one Discard deletes |
+| A witness survives a reload and follows a rename; a branch switch forgets it | `stateManagerGit.test.ts` | agent output becoming undeletable, or a stale witness making the user's file deletable |
+| A failed Begin review can be retried | `beginReview.test.ts` | the retry resolving over a repo with no baselines |
 | A branch switch forgets the saved record too | `stateManagerGit.test.ts` | a reload restoring what memory forgot |
 | A rewritten hunk at the same position gets a new id | `diffEngine.test.ts` | a stale click accepting text the user never saw |
 | Renaming onto a pending deletion or over a file: the source wins, and Discard keeps an unbaselined source | `reloadEqualsMemory.test.ts` + `stateManagerGit.test.ts` | memory and a reload disagreeing on the target |
@@ -164,6 +167,10 @@ new generators at least that adversarial.
   own classification has to survive in a set beside the state, in both directions:
   `sessionCreated` so agent output stays deletable, `sessionUnbaselined` so the user's
   files do not become deletable.
+- **A missing record must read as the safe value.** Until 2026-09-22 a rescan answered
+  `'created'` for any file with no record, and review found four unrelated ways to lose the
+  record, each of which made a user's file deletable. Only positive evidence (a saved
+  witness) now licenses a delete, so a lost record costs a manual delete instead.
 - **A rescan can hide the bug it should reveal.** A Refresh rebuilds memory from git, so
   a Refresh between a defect and the next reload check makes memory and git agree again.
   The `refresh` step therefore asserts that a Refresh changes nothing, rather than relying

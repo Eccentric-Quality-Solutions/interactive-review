@@ -150,29 +150,31 @@ export class BaselineGit {
     return stdout;
   }
 
-  // ── unbaselined.json ──────────────────────────────────────────────────────
+  // ── classification records ────────────────────────────────────────────────
 
   /**
-   * The paths the session last classified `nullReason: 'unbaselined'`, so a window reload
-   * does not re-adopt them as `'created'` and make them deletable. See
-   * `StateManager.sessionUnbaselined`.
+   * The session's two `nullReason` records, saved so a window reload keeps them:
+   * - `unbaselined`: paths the session last classified `'unbaselined'`
+   *   (`StateManager.sessionUnbaselined`).
+   * - `created`: paths the session witnessed being created (`StateManager.sessionCreated`).
    *
-   * Kept inside the git directory so it shares the baselines' lifetime: End review's
-   * `destroyGit` and a recovery's `resetRepo` remove both together, and git ignores files
+   * Kept inside the git directory so they share the baselines' lifetime: End review's
+   * `destroyGit` and a recovery's `resetRepo` remove them together, and git ignores files
    * it does not know in its own directory.
    */
-  private get unbaselinedPath(): string {
-    return path.join(this.gitDir, 'interactive-review-unbaselined.json');
+  private recordPath(kind: 'unbaselined' | 'created'): string {
+    return path.join(this.gitDir, `interactive-review-${kind}.json`);
   }
 
   /**
-   * Absolute paths, or none when the file is absent or unreadable. None is the behaviour
-   * from before this file existed, so a damaged record costs the protection, not the review.
+   * Absolute paths, or none when the file is absent or unreadable. A damaged record reads
+   * as empty, and both records fail safe that way: an empty `created` record means no
+   * adopted file is deletable. See `StateManager.adoptedNullReason`.
    */
-  loadUnbaselined(): string[] {
+  private loadRecord(kind: 'unbaselined' | 'created'): string[] {
     let raw: string;
     try {
-      raw = fs.readFileSync(this.unbaselinedPath, 'utf-8');
+      raw = fs.readFileSync(this.recordPath(kind), 'utf-8');
     } catch {
       return []; // absent: nothing was recorded
     }
@@ -182,29 +184,35 @@ export class BaselineGit {
         return parsed.map(rel => path.join(this.workTree, rel));
       }
     } catch { /* fall through */ }
-    this.log('loadUnbaselined: record is unreadable, ignoring it');
+    this.log(`loadRecord(${kind}): record is unreadable, ignoring it`);
     return [];
   }
 
-  /** Replace the record. An empty set removes the file rather than writing `[]`. */
-  saveUnbaselined(filePaths: Iterable<string>): void {
+  /** Replace a record. An empty set removes the file rather than writing `[]`. */
+  private saveRecord(kind: 'unbaselined' | 'created', filePaths: Iterable<string>): void {
     if (this.destroyed) return;
     const rel = [...filePaths].map(fp => path.relative(this.workTree, fp).split(path.sep).join('/')).sort();
+    const file = this.recordPath(kind);
     try {
       if (rel.length === 0) {
-        fs.rmSync(this.unbaselinedPath, { force: true });
+        fs.rmSync(file, { force: true });
         return;
       }
       // No mkdir: a git directory that is gone was removed on purpose, and recreating it
       // here would make `load()` read review as still on. Write-then-rename, so a crash
       // mid-write leaves the old record rather than a truncated one.
-      const tmp = `${this.unbaselinedPath}.tmp`;
+      const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(rel, null, 2), 'utf-8');
-      fs.renameSync(tmp, this.unbaselinedPath);
+      fs.renameSync(tmp, file);
     } catch (err) {
-      this.log(`saveUnbaselined failed: ${err}`);
+      this.log(`saveRecord(${kind}) failed: ${err}`);
     }
   }
+
+  loadUnbaselined(): string[] { return this.loadRecord('unbaselined'); }
+  saveUnbaselined(filePaths: Iterable<string>): void { this.saveRecord('unbaselined', filePaths); }
+  loadCreated(): string[] { return this.loadRecord('created'); }
+  saveCreated(filePaths: Iterable<string>): void { this.saveRecord('created', filePaths); }
 
   // ── settings.json ─────────────────────────────────────────────────────────
 

@@ -289,14 +289,47 @@ describe('StateManager.load keeps each null baseline\'s nullReason across a wind
       'a reload must not turn a file Discard would keep into one it deletes');
   });
 
-  it('a file with no record is still adopted as created after a reload', async () => {
+  it('a witnessed create stays created after a reload', async () => {
     // The other direction: new files from the previous window must stay deletable.
     const file = path.join(root, 'new.txt');
     writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
 
     const fresh = await reload();
 
     assert.equal(fresh.getFile(file)?.nullReason, 'created');
+  });
+
+  // Defect: a rescan answered 'created' for any readable text file with no blob and no
+  // record, so every way of losing the record was a way of deleting a user's file. The
+  // shape found in review: a file ignored at Begin review, so never baselined, whose ignore
+  // rule is gone by the next reload. See code-review-2026-09-20.md §5.
+  it('a file with no record is never adopted as deletable', async () => {
+    const file = path.join(root, 'notes', 'mine.txt');
+    writeFile(file, 'the user\'s content\n');
+    const ignoringNotes = (fp: string) => ignore(fp) || fp.startsWith(path.join(root, 'notes'));
+    await sm.snapshotWorkspace(ignoringNotes);
+
+    const fresh = await reload();   // the rule is gone: `reload` uses the plain `ignore`
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'unbaselined',
+      'a file the user had before Begin review must not become one Discard deletes');
+  });
+
+  it('a later unbaselined classification outranks a restored witness', async () => {
+    // With no record meaning 'unbaselined', the saved 'unbaselined' record only matters
+    // where a witness exists too: an agent's file discarded, then the user's own copy
+    // restored at the same path unseen. The witness comes back on reload; the later
+    // classification must come back with it.
+    const file = path.join(root, 'restored.txt');
+    writeFile(file, 'the user\'s content\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    sm.removeFile(file);
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'unbaselined');
   });
 
   it('a later witnessed create clears the saved record', async () => {
@@ -311,15 +344,17 @@ describe('StateManager.load keeps each null baseline\'s nullReason across a wind
   });
 
   it('End review forgets the record, so the next session starts clean', async () => {
-    const file = path.join(root, 'preexisting.txt');
-    writeFile(file, 'the user\'s content\n');
-    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }, true);
+    // A witness from an ended session is evidence about that session only. By the next
+    // Begin review the file predates the session, so it must not stay deletable.
+    const file = path.join(root, 'from-last-session.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
     await sm.setEnabled(false);
     await sm.setEnabled(true);
 
     const fresh = await reload();
 
-    assert.equal(fresh.getFile(file)?.nullReason, 'created');
+    assert.equal(fresh.getFile(file)?.nullReason, 'unbaselined');
   });
 
   // Defect: a branch switch cleared the classification in memory but left the saved record,
@@ -341,15 +376,72 @@ describe('StateManager.load keeps each null baseline\'s nullReason across a wind
     assert.equal(fresh.getFile(file)?.nullReason, sm.getFile(file)?.nullReason);
   });
 
+  it('a branch switch forgets the saved witnesses', async () => {
+    const file = path.join(root, 'x.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    await sm.clearHunksOnBranchSwitch(ignore);
+    sm.removeFile(file);   // the branch switch baselined it; drop that so a reload adopts it
+    await sm.flush();
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'unbaselined',
+      'a create witnessed before the switch is not evidence about the new branch');
+  });
+
   it('a damaged record is ignored rather than failing the load', async () => {
     const file = path.join(root, 'new.txt');
     writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    await sm.flush();
     const record = path.join(root, '.vscode', 'interactive-review', 'git', 'interactive-review-unbaselined.json');
     fs.writeFileSync(record, '{ not json');
 
     const fresh = await reload();
 
     assert.equal(fresh.getFile(file)?.nullReason, 'created');
+  });
+
+  // `saveCreated` defers its write a tick; `flush` must write it, or a caller that flushes
+  // and then reads the repo (every reload test here) depends on timing.
+  it('flush writes a pending witness record', async () => {
+    const file = path.join(root, 'new.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    await sm.flush();
+
+    const record = path.join(root, '.vscode', 'interactive-review', 'git', 'interactive-review-created.json');
+    assert.deepEqual(JSON.parse(fs.readFileSync(record, 'utf-8')), ['new.txt']);
+  });
+
+  it('a damaged witness record fails safe: nothing adopted is deletable', async () => {
+    const file = path.join(root, 'new.txt');
+    writeFile(file, 'agent output\n');
+    sm.setFile(file, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    await sm.flush();
+    const record = path.join(root, '.vscode', 'interactive-review', 'git', 'interactive-review-created.json');
+    fs.writeFileSync(record, '{ not json');
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(file)?.nullReason, 'unbaselined');
+  });
+
+  it('a witnessed create keeps its witness through a directory rename', async () => {
+    const from = path.join(root, 'd1', 'new.txt');
+    const to = path.join(root, 'd2', 'new.txt');
+    writeFile(from, 'agent output\n');
+    sm.setFile(from, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    fs.renameSync(path.join(root, 'd1'), path.join(root, 'd2'));
+    sm.renameFile(path.join(root, 'd1'), path.join(root, 'd2'));
+    // Something the user puts at the old path afterwards was never witnessed.
+    writeFile(from, 'the user\'s content\n');
+
+    const fresh = await reload();
+
+    assert.equal(fresh.getFile(to)?.nullReason, 'created');
+    assert.equal(fresh.getFile(from)?.nullReason, 'unbaselined');
   });
 });
 
@@ -436,6 +528,26 @@ describe('StateManager.renameFile onto a pending deletion', () => {
 
     sm.renameFile(source, target);
     fs.rmSync(target);
+    fs.renameSync(source, target);
+    await sm.flush();
+    await sm.rebuildState(ignore);
+
+    assert.equal(sm.getFile(target)?.nullReason, 'unbaselined');
+  });
+
+  // Since a rescan needs a witness to answer 'created', the target's own record matters only
+  // where a stale witness sits at the target: an agent's file there, discarded, and then an
+  // untracked file moved onto the same path.
+  it('an untracked source moved onto a path with a stale witness is kept by Discard', async () => {
+    const target = path.join(root, 'a.txt');
+    writeFile(target, 'agent output\n');
+    sm.setFile(target, { status: 'reviewing', baseline: null, nullReason: 'created' }, true);
+    sm.removeFile(target);
+    fs.rmSync(target);
+    const source = path.join(root, 'b.txt');
+    writeFile(source, 'the user\'s file\n');
+
+    sm.renameFile(source, target);
     fs.renameSync(source, target);
     await sm.flush();
     await sm.rebuildState(ignore);

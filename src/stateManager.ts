@@ -44,14 +44,21 @@ export class StateManager {
    * unbaselined and Discard would stop deleting agent output — the functionality this
    * whole mechanism is meant to protect, lost from the other direction.
    *
-   * Session-scoped and monotonic: entries are added by `writeState` and cleared only when
-   * a session starts or ends, never by `dropState` — `clearState` fires `dropState` for
-   * every path, so shrinking it there would wipe the set on the very rebuild it exists to
-   * survive. A path that leaves review and is later recreated is simply re-witnessed.
-   * Because it only grows, it is not what decides a rescan's `nullReason`; see
-   * `adoptedNullReason`.
+   * Session-scoped and monotonic: entries are added by `writeState`, moved by a rename,
+   * and cleared only when a session starts or ends, never by `dropState` — `clearState`
+   * fires `dropState` for every path, so shrinking it there would wipe the set on the very
+   * rebuild it exists to survive. A path that leaves review and is later recreated is
+   * simply re-witnessed. Because it only grows, a later `'unbaselined'` classification
+   * outranks it; see `adoptedNullReason`.
+   *
+   * Saved beside the baseline repo and restored by `load()`, because it is the *only*
+   * thing that makes an adopted file deletable: with no witness, a rescan answers
+   * `'unbaselined'`. Unsaved, every agent-created file would become undeletable after a
+   * window reload.
    */
   private sessionCreated = new Set<string>();
+  /** A `saveCreated` write is scheduled but not yet done. See `saveCreated`. */
+  private createdSavePending = false;
 
   /**
    * Paths this session classified `nullReason: 'unbaselined'` — the counterpart of
@@ -220,14 +227,9 @@ export class StateManager {
    * neither must abort the batch, and neither has content that means anything as a
    * baseline.
    *
-   * An unreadable file is recorded as `'unbaselined'` on the way out. It predates the
-   * session, but once it becomes readable a rescan sees readable text with no blob, which
-   * `adoptedNullReason` otherwise reads as a new file that Discard deletes. Guarded by
-   * `stateManagerGit.test.ts` ("a file unreadable at Begin review"). A file deleted between
-   * the listing and the read is recorded too. It did predate the session, so that is the
-   * safe direction; the cost is that Discard keeps, rather than deletes, a file an agent
-   * recreates there unseen. Deliberately left: the window is milliseconds and it cannot be
-   * tested deterministically.
+   * An unreadable file needs no record. Once readable, a rescan sees text with no blob and
+   * no witnessed create, which `adoptedNullReason` answers `'unbaselined'`: Discard keeps
+   * it. Guarded by `stateManagerGit.test.ts` ("a file unreadable at Begin review").
    *
    * The binary case needs an explicit test rather than the failed read this comment used
    * to claim. `fs.readFile(path, 'utf-8')` does not throw on binary input — it returns
@@ -236,7 +238,7 @@ export class StateManager {
    */
   private async readBatch(filePaths: string[]): Promise<{ filePath: string; content: string }[]> {
     const batch: { filePath: string; content: string }[] = [];
-    const unreadable: string[] = [];
+    let unreadable = 0;
     await Promise.all(filePaths.map(async filePath => {
       try {
         const content = await readTextFile(filePath);
@@ -247,15 +249,10 @@ export class StateManager {
         batch.push({ filePath, content });
       } catch {
         // Unreadable (permissions, transient race) — see method doc.
-        unreadable.push(filePath);
+        unreadable++;
       }
     }));
-    const fresh = unreadable.filter(fp => !this.sessionUnbaselined.has(fp));
-    if (fresh.length > 0) {
-      log(`readBatch: ${fresh.length} unreadable file(s) recorded as unbaselined`);
-      for (const fp of fresh) this.sessionUnbaselined.add(fp);
-      this.saveUnbaselined();
-    }
+    if (unreadable > 0) log(`readBatch: skipped ${unreadable} unreadable file(s)`);
     return batch;
   }
 
@@ -361,8 +358,8 @@ export class StateManager {
    * an unbaselined file. Returns the adopted paths so `load()` can log them.
    *
    * A scan of the end state cannot distinguish a file an agent just created from one whose
-   * baseline we failed to take, so the classification comes from `adoptedNullReason`: the
-   * session's own record where it has one, `'created'` where it has none. See
+   * baseline we failed to take, so the classification comes from `adoptedNullReason`:
+   * `'created'` only for a witnessed create, `'unbaselined'` otherwise. See
    * `FileState.nullReason`.
    */
   private async adoptUntrackedFiles(
@@ -381,26 +378,54 @@ export class StateManager {
   }
 
   /**
-   * The `nullReason` for a file adopted by a rescan.
+   * The `nullReason` for a file adopted by a rescan: `'created'` only when the session
+   * witnessed the create and has not classified the path `'unbaselined'` since.
    *
-   * The session's most recent classification of the path stands: a witnessed create is
-   * `'created'`, and a file last classified `'unbaselined'` stays so, because neither a
-   * Refresh nor a window reload may turn a file Discard would keep into one it deletes.
-   * With no record either way, `'created'` is the answer despite being the deleting one,
-   * because of what `collectUntrackedFiles` has filtered out: unreadable files and
-   * unwitnessed binaries, which *are* the pre-existing-but-unbaselined population. What is
-   * left — readable text with no blob — is overwhelmingly a real new file, including every
-   * new file from a prior session after a window reload, where the witness set is
-   * necessarily empty. Those must stay deletable or the queue becomes un-actionable.
+   * No record reads as `'unbaselined'` — the value Discard keeps. This used to answer
+   * `'created'` on the argument that readable text with no blob is "overwhelmingly" a new
+   * file, and every way of losing the record then became a way of deleting a user's file:
+   * a file ignored at Begin review and un-ignored before a reload, the children of a renamed
+   * directory, a filename git reports C-quoted, a damaged record. Each was a separate bug
+   * with a separate fix. Requiring positive evidence closes them as a class. The cost runs
+   * the safe way: a new file whose witness was lost is kept on Discard, and the user
+   * deletes it by hand. Guarded by `stateManagerGit.test.ts` ("a file with no record is
+   * never adopted as deletable").
+   *
+   * Both sets are needed. `sessionCreated` is monotonic, so it still holds a witness for a
+   * path discarded as 'created' and later restored by the user; `sessionUnbaselined` holds
+   * that later classification, and `writeState` keeps the two consistent so the most recent
+   * one wins.
    */
   private adoptedNullReason(filePath: string): 'created' | 'unbaselined' {
-    // Not `sessionCreated`: it keeps a witness after a later 'unbaselined' classification.
-    return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';
+    return this.sessionCreated.has(filePath) && !this.sessionUnbaselined.has(filePath)
+      ? 'created'
+      : 'unbaselined';
   }
 
   /** Persist `sessionUnbaselined`, so a window reload keeps it. See `BaselineGit.loadUnbaselined`. */
   private saveUnbaselined(): void {
     this._git?.saveUnbaselined(this.sessionUnbaselined);
+  }
+
+  /**
+   * Persist `sessionCreated`, so a window reload keeps it. See `BaselineGit.loadCreated`.
+   *
+   * Coalesced to one write per tick: the record is rewritten whole, so saving on every
+   * create cost O(n²) and blocked the extension host for 17s over a 5000-file burst.
+   * Deferring is safe only for this record: a write lost to a crash drops a witness, and
+   * the file is then kept on Discard. `saveUnbaselined` stays synchronous because losing
+   * it would let a stale witness win. `flush` writes a pending save.
+   */
+  private saveCreated(): void {
+    if (this.createdSavePending) return;
+    this.createdSavePending = true;
+    setImmediate(() => this.writeCreatedRecord());
+  }
+
+  private writeCreatedRecord(): void {
+    if (!this.createdSavePending) return;
+    this.createdSavePending = false;
+    this._git?.saveCreated(this.sessionCreated);
   }
 
   /**
@@ -415,6 +440,7 @@ export class StateManager {
   private forgetClassifications(): void {
     this.sessionCreated.clear();
     this.sessionUnbaselined.clear();
+    this.saveCreated();
     this.saveUnbaselined();
   }
 
@@ -505,9 +531,11 @@ export class StateManager {
       await this.recoverLostBaseline(g, `${err.message}`, shouldIgnore);
       return;
     }
-    // Restore the previous window's 'unbaselined' classifications before anything is
-    // adopted, or `adoptUntrackedFiles` would re-adopt those files as 'created'. The
-    // witness set is not persisted: with no record, adoption already answers 'created'.
+    // Restore the previous window's classifications before anything is adopted. Without
+    // the witnesses, every file an agent created would come back 'unbaselined' and stay on
+    // disk through Discard; without the 'unbaselined' record, a restored witness would
+    // outrank a later classification.
+    for (const fp of g.loadCreated()) this.sessionCreated.add(normalizePath(fp));
     for (const fp of g.loadUnbaselined()) this.sessionUnbaselined.add(normalizePath(fp));
     const { reviewing, idle, skippedNoBaseline, ignored } =
       await this.scanTrackedIntoState(g, tracked, shouldIgnore);
@@ -632,7 +660,10 @@ export class StateManager {
     // and later restored by the user surfaces as an 'unbaselined' change, and must not stay
     // deletable because of the old witness.
     if (state.baseline === null && state.nullReason === 'created') {
-      this.sessionCreated.add(filePath);
+      if (!this.sessionCreated.has(filePath)) {
+        this.sessionCreated.add(filePath);
+        this.saveCreated();
+      }
       if (this.sessionUnbaselined.delete(filePath)) this.saveUnbaselined();
     } else if (state.baseline === null && !this.sessionUnbaselined.has(filePath)) {
       // Absent reads as 'unbaselined' (see FileState.nullReason), so record it the same way.
@@ -819,7 +850,10 @@ export class StateManager {
       this.writeState(newFilePath, fileState);
       // The create was witnessed at the old path; a rename does not make the file any
       // less new, and losing the witness here would strand it as undeletable.
-      if (this.sessionCreated.delete(oldFilePath)) this.sessionCreated.add(newFilePath);
+      if (this.sessionCreated.delete(oldFilePath)) {
+        this.sessionCreated.add(newFilePath);
+        this.saveCreated();
+      }
     }
     // Also check for directory children (entries whose path starts with oldFilePath + sep)
     for (const [fp, childState] of [...this.state.entries()]) {
@@ -827,6 +861,11 @@ export class StateManager {
         this.dropState(fp);
         const newFp = newFilePath + fp.slice(oldFilePath.length);
         this.writeState(newFp, childState);
+        // As for a single file: the witness moves with the child.
+        if (this.sessionCreated.delete(fp)) {
+          this.sessionCreated.add(newFp);
+          this.saveCreated();
+        }
         hasDirChildren = true;
       }
     }
@@ -1238,5 +1277,6 @@ export class StateManager {
   /** Wait for all pending git operations to complete. Call on deactivate. */
   async flush(): Promise<void> {
     await this.gitQueue;
+    this.writeCreatedRecord();
   }
 }

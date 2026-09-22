@@ -21,6 +21,10 @@ Early development. The single-file review loop (baseline → per-hunk `Accept`/`
 CodeLens in a native diff editor → baseline update) works today, along with the
 bounded-changeset flow (cross-file auto-advance and an explicit review-complete state).
 
+**Supported:** a single-folder workspace on Linux (macOS is untested). Multi-root workspaces and Windows
+are not supported: only the first workspace folder is reviewed, and paths are assumed to
+use `/`.
+
 **Documentation map:**
 
 | Doc | What it answers |

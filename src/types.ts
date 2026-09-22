@@ -18,7 +18,8 @@ export interface FileState {
    * Absent is read as 'unbaselined'. That is the safe direction on purpose: a writer that
    * forgets to set it declines to delete rather than destroying a pre-existing file. The
    * cost of being wrong that way is a file that stays on disk; the cost of the other way
-   * is a file that is gone.
+   * is a file that is gone. A rescan follows the same rule: it answers 'created' only from
+   * the session's saved witness of the create (`StateManager.adoptedNullReason`).
    */
   nullReason?: 'created' | 'unbaselined';
 }

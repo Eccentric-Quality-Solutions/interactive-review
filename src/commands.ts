@@ -163,7 +163,7 @@ let beginInFlight: Promise<void> | undefined;
  * The 750ms leg of the `Promise.all` is a *floor* on the splash duration, not a timeout:
  * both legs are awaited, so a slower snapshot still completes before this resolves.
  */
-async function enableReview(
+export async function enableReview(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
   reviewPanel: ReviewPanel,
@@ -280,13 +280,15 @@ async function runBeginReview(
     ]);
   } catch (err) {
     log(`enable: failed — ${err}`);
+    // Close the half-open session. `setEnabled(true)` flips `enabled` before anything that
+    // can fail, and left open, the retry an agent makes next hits the "already open" guard
+    // in `enableReview` and *resolves* — reporting baselines on disk that were never
+    // written. Tearing down makes a plain retry work, for an agent and a user alike.
+    // Guarded by `beginReview.test.ts` ("a failed Begin review can be retried").
+    await stateManager.setEnabled(false).catch(e => log(`enable: teardown after failure failed — ${e}`));
     void vscode.window.showErrorMessage(
-      // Says what the user will actually see. With no baselines on disk, every edit enters
-      // review as a whole-file "unbaselined" change rather than the hunks that were made —
-      // see `handleDiskChange` — so the panel fills up rather than staying empty.
-      'Interactive Review: Begin review failed, so no baseline was recorded. Edited files ' +
-      'will show as entirely new rather than as the changes actually made. Run ' +
-      `"Interactive Review: End review", then "Begin review" to retry. (${err})`
+      'Interactive Review: Begin review failed, so no baseline was recorded and the session ' +
+      `was closed. Run "Interactive Review: Begin review" again to retry. (${err})`
     );
     throw err;
   } finally {

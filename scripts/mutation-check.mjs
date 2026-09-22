@@ -250,7 +250,7 @@ const MUTATIONS = [
     desc: "Refresh re-adopts an unbaselined file as 'created' (deletable)",
     file: "src/stateManager.ts",
     edits: [
-      ["return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';",
+      ["return this.sessionCreated.has(filePath) && !this.sessionUnbaselined.has(filePath)\n      ? 'created'\n      : 'unbaselined';",
        "return 'created';"],
     ],
     test: "stateManagerGit.test.js",
@@ -268,8 +268,8 @@ const MUTATIONS = [
     desc: "an old witnessed create outranks a later unbaselined classification",
     file: "src/stateManager.ts",
     edits: [
-      ["    return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';",
-       "    if (this.sessionCreated.has(filePath)) return 'created';\n    return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';"],
+      ["return this.sessionCreated.has(filePath) && !this.sessionUnbaselined.has(filePath)\n      ? 'created'\n      : 'unbaselined';",
+       "return this.sessionCreated.has(filePath) ? 'created' : 'unbaselined';"],
     ],
     test: "stateManagerGit.test.js",
   },
@@ -281,6 +281,69 @@ const MUTATIONS = [
        ""],
     ],
     test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "a rescan adopts a file with no record as 'created' (the pre-2026-09-22 default)",
+    file: "src/stateManager.ts",
+    edits: [
+      ["return this.sessionCreated.has(filePath) && !this.sessionUnbaselined.has(filePath)\n      ? 'created'\n      : 'unbaselined';",
+       "return this.sessionUnbaselined.has(filePath) ? 'unbaselined' : 'created';"],
+    ],
+    test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "a window reload does not restore the witnessed creates",
+    file: "src/stateManager.ts",
+    edits: [
+      ["    for (const fp of g.loadCreated()) this.sessionCreated.add(normalizePath(fp));\n",
+       ""],
+    ],
+    test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "a witnessed create is not saved",
+    file: "src/stateManager.ts",
+    edits: [
+      ["        this.sessionCreated.add(filePath);\n        this.saveCreated();\n",
+       "        this.sessionCreated.add(filePath);\n"],
+    ],
+    test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "flush leaves the deferred witness record unwritten",
+    file: "src/stateManager.ts",
+    edits: [
+      ["    await this.gitQueue;\n    this.writeCreatedRecord();\n",
+       "    await this.gitQueue;\n"],
+    ],
+    test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "a directory rename leaves a child's witness at its old path",
+    file: "src/stateManager.ts",
+    edits: [
+      ["        if (this.sessionCreated.delete(fp)) {\n          this.sessionCreated.add(newFp);\n          this.saveCreated();\n        }\n",
+       ""],
+    ],
+    test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "a branch switch leaves the saved witness record behind",
+    file: "src/stateManager.ts",
+    edits: [
+      ["    this.saveCreated();\n    this.saveUnbaselined();\n",
+       "    this.saveUnbaselined();\n"],
+    ],
+    test: "stateManagerGit.test.js",
+  },
+  {
+    desc: "a failed Begin review leaves the session open, so a retry resolves without baselines",
+    file: "src/commands.ts",
+    edits: [
+      ["    await stateManager.setEnabled(false).catch(e => log(`enable: teardown after failure failed — ${e}`));\n",
+       ""],
+    ],
+    test: "beginReview.test.js",
   },
   {
     desc: "hunk ids from position only (a rewritten line keeps its id)",
@@ -349,8 +412,8 @@ const MUTATIONS = [
     desc: "a branch switch leaves the saved unbaselined record behind",
     file: "src/stateManager.ts",
     edits: [
-      ["    this.sessionUnbaselined.clear();\n    this.saveUnbaselined();\n",
-       "    this.sessionUnbaselined.clear();\n"],
+      ["    this.saveCreated();\n    this.saveUnbaselined();\n",
+       "    this.saveCreated();\n"],
     ],
     test: "stateManagerGit.test.js",
   },
@@ -369,15 +432,6 @@ const MUTATIONS = [
     edits: [
       ["    if (!fileState && !this.sessionUnbaselined.has(newFilePath)) {\n",
        "    if (false) {\n"],
-    ],
-    test: "stateManagerGit.test.js",
-  },
-  {
-    desc: "a file unreadable at Begin review is adopted as deletable once readable",
-    file: "src/stateManager.ts",
-    edits: [
-      ["        unreadable.push(filePath);\n",
-       ""],
     ],
     test: "stateManagerGit.test.js",
   },
