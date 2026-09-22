@@ -37,6 +37,8 @@ function store(): TestConfigStore {
 }
 
 export const workspace = {
+  /** No open documents: code under test falls back to reading files from disk. */
+  textDocuments: [] as unknown[],
   get workspaceFolders() {
     const root = global.__reviewTestRoot as string | undefined;
     if (!root) return undefined;

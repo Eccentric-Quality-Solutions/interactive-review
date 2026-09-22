@@ -435,6 +435,33 @@ const MUTATIONS = [
     ],
     test: "stateManagerGit.test.js",
   },
+  {
+    desc: "Discard All runs without waiting for the user's answer",
+    file: "src/commands.ts",
+    edits: [
+      ["  if (choice !== 'Discard All') {\n",
+       "  if (false) {\n"],
+    ],
+    test: "discardAllConfirm.test.js",
+  },
+  {
+    desc: "Discard All re-reads the queue after the dialog (discards files it never counted)",
+    file: "src/commands.ts",
+    edits: [
+      ["await discardAllFiles(stateManager, fileWatcher, onStateChanged, entries.map(([fp]) => fp));",
+       "await discardAllFiles(stateManager, fileWatcher, onStateChanged);"],
+    ],
+    test: "discardAllConfirm.test.js",
+  },
+  {
+    desc: "the panel refreshes without updating its tab badge",
+    file: "src/reviewPanel.ts",
+    edits: [
+      ["    this.view.badge = panelBadge(state);\n",
+       ""],
+    ],
+    test: "panelBadge.test.js",
+  },
 ];
 
 // The file currently holding a mutation, so a signal or crash can put it back.

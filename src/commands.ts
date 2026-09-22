@@ -330,12 +330,75 @@ export async function acceptAllFiles(
   onStateChanged();
 }
 
+/**
+ * The question Discard All asks before it runs, or undefined when there is nothing to
+ * discard. Counts each outcome `discardFileByPath` will actually produce, and names deletes
+ * separately because a deleted file is the one outcome the user cannot get back by editing
+ * (it goes to the trash, if there is one).
+ */
+export function discardAllPrompt(
+  files: Iterable<[string, FileState]>,
+  exists: (filePath: string) => boolean = fs.existsSync,
+): string | undefined {
+  let reverted = 0;
+  let deleted = 0;
+  let kept = 0;
+  for (const [filePath, f] of files) {
+    if (f.status !== 'reviewing') continue;
+    if (discardDeletesFile(f)) {
+      // Already gone from disk: discarding only drops the entry.
+      if (exists(filePath)) deleted++; else kept++;
+    } else if (f.baseline === null) {
+      // Predates the session with no saved original: left as it is (`keepsUnbaselinedFile`).
+      kept++;
+    } else {
+      reverted++;
+    }
+  }
+  if (reverted + deleted + kept === 0) return undefined;
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const parts: string[] = [];
+  if (reverted > 0) parts.push(`revert ${plural(reverted, 'file')} to the start of the review`);
+  if (deleted > 0) parts.push(`delete ${plural(deleted, 'new file')}`);
+  if (kept > 0) parts.push(`stop reviewing ${plural(kept, 'file')} it cannot revert, leaving ${kept === 1 ? 'it' : 'them'} as ${kept === 1 ? 'it is' : 'they are'}`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
+  return `Discard all pending changes? This will ${list}.`;
+}
+
+/**
+ * Discard All from the panel button: ask, then discard exactly the files the question
+ * counted. One click there rewrites every file in the queue, so it needs the guard, while
+ * `discardAllFiles` itself stays dialog-free for tests and programmatic callers.
+ *
+ * The paths are snapshotted before the modal opens. It can stay up indefinitely while an
+ * agent keeps writing, and re-reading the queue after the answer would discard — possibly
+ * delete — files the user was never told about. Returns whether anything was discarded.
+ */
+export async function confirmAndDiscardAll(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  onStateChanged: () => void,
+): Promise<boolean> {
+  const entries = Array.from(stateManager.getAllFiles().entries());
+  const prompt = discardAllPrompt(entries);
+  if (!prompt) return false;
+  const choice = await vscode.window.showWarningMessage(prompt, { modal: true }, 'Discard All');
+  if (choice !== 'Discard All') {
+    log('discardAll: not confirmed, skipping');
+    return false;
+  }
+  await discardAllFiles(stateManager, fileWatcher, onStateChanged, entries.map(([fp]) => fp));
+  return true;
+}
+
 export async function discardAllFiles(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
-  onStateChanged: () => void
+  onStateChanged: () => void,
+  /** Restrict to these files; defaults to the whole queue. Entries resolved since are skipped. */
+  only?: readonly string[],
 ): Promise<void> {
-  for (const [filePath] of Array.from(stateManager.getAllFiles().entries())) {
+  for (const filePath of only ?? Array.from(stateManager.getAllFiles().keys())) {
     try {
       await discardFileByPath(stateManager, fileWatcher, filePath, () => {});
     } catch (err) { log(`discardAllFiles: failed to restore ${filePath}: ${err}`); }

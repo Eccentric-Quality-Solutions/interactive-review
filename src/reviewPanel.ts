@@ -11,7 +11,7 @@ import { formatBuild, readBuildInfo } from './buildInfo';
 
 import {
   acceptAllFiles,
-  discardAllFiles,
+  confirmAndDiscardAll,
   acceptFileByPath,
   discardFileByPath,
   acceptHunk,
@@ -51,6 +51,17 @@ interface PanelHunk {
   newStart: number;
   newLines: number;
   oldLines: number;
+}
+
+/**
+ * The count on the panel's tab, the way Problems and Ports show theirs: one per file row the
+ * panel lists, so the badge and the list can never disagree. None outside a session or once
+ * nothing is left, since a "0" would read as something still to look at.
+ */
+export function panelBadge(state: Pick<PanelState, 'enabled' | 'totalFiles'>): vscode.ViewBadge | undefined {
+  if (!state.enabled || state.totalFiles === 0) return undefined;
+  const n = state.totalFiles;
+  return { value: n, tooltip: `${n} file${n === 1 ? '' : 's'} to review` };
 }
 
 export class ReviewPanel implements vscode.WebviewViewProvider {
@@ -106,7 +117,18 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
 
   refresh(): void {
     if (!this.view || this._loading) return;
+    this.postState();
+  }
+
+  /**
+   * Send the current state to the webview and update the tab badge from the same snapshot.
+   * The badge lives on the view, so it only exists once the panel has been shown in this
+   * window: VS Code resolves webview views lazily, and there is no view to badge before that.
+   */
+  private postState(): void {
+    if (!this.view) return;
     const state = this.buildPanelState();
+    this.view.badge = panelBadge(state);
     this.view.webview.postMessage({ type: 'update', state });
   }
 
@@ -132,8 +154,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       this.view.webview.postMessage({ type: 'loading', loading: true });
     } else {
       // Send the real state immediately so there's no flash of the disabled screen
-      const state = this.buildPanelState();
-      this.view.webview.postMessage({ type: 'update', state });
+      this.postState();
     }
   }
 
@@ -288,7 +309,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         await acceptAllFiles(this.stateManager, this.onStateChanged);
         break;
       case 'discardAll':
-        await discardAllFiles(this.stateManager, this.fileWatcher, this.onStateChanged);
+        await confirmAndDiscardAll(this.stateManager, this.fileWatcher, this.onStateChanged);
         break;
       case 'acceptFile':
         if (msg.filePath) {
