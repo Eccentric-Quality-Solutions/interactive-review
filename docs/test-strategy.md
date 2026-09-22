@@ -110,8 +110,9 @@ any of them, check its mutation in `scripts/mutation-check.mjs`.
 | Only a create is ever classified `'created'`; binaries are never adopted | `diskEvent.test.ts` (every input) | a change making the user's file one Discard deletes |
 | Hunk accept refuses a buffer with unsaved edits | `reviewCommands.test.ts` (integration) | unsaved text in the baseline, file queued again on reload (`todo.md` item D) |
 | A file that has left review diffs against its baseline | `diffEditor.test.ts` (integration) | a re-fetched diff painting the whole file as added |
+| An externally deleted directory queues its untouched tracked files | `deleteRestore.test.ts` (integration) + `baselineGit.test.ts` (the subtree listing) | an idle child's deletion missing until Refresh, its baseline lost if review ends first |
 
-The nine integration guards are not in the mutation script; they were verified by hand.
+The ten integration guards are not in the mutation script; they were verified by hand.
 
 **Limits of the reload property.** [`reloadEqualsMemory.test.ts`](../src/test/reloadEqualsMemory.test.ts)
 mirrors `FileWatcher` and `commands.ts` at the StateManager boundary, so a change to either

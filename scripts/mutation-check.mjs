@@ -462,6 +462,35 @@ const MUTATIONS = [
     ],
     test: "panelBadge.test.js",
   },
+  {
+    desc: "subtree listing without -z (C-quoted names missed on a directory delete)",
+    file: "src/baselineGit.ts",
+    edits: [
+      ["'-r', '-z', '--name-only'",
+       "'-r', '--name-only'"],
+      [".split('\\0')",
+       ".split('\\n')"],
+    ],
+    test: "baselineGit.test.js",
+  },
+  {
+    desc: "subtree listing treats a `..cache` folder as outside the workspace",
+    file: "src/baselineGit.ts",
+    edits: [
+      ["rel.startsWith('..' + path.sep)",
+       "rel.startsWith('..')"],
+    ],
+    test: "baselineGit.test.js",
+  },
+  {
+    desc: "property generator seeded unscrambled (never an empty baseline)",
+    file: "src/test/generators.ts",
+    edits: [
+      ["  let s = Math.imul(seed ^ (seed >>> 16), 0x45d9f3b) >>> 0;\n  s = (s ^ (s >>> 16)) >>> 0;\n",
+       "  let s = seed >>> 0;\n"],
+    ],
+    test: "hunkApply.test.js",
+  },
 ];
 
 // The file currently holding a mutation, so a signal or crash can put it back.
