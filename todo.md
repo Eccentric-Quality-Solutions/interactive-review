@@ -26,7 +26,7 @@ User note: slower than expected, possibly because the repo is on a VM. Measure b
 changing anything: time from a disk write to the lens rendering, split into watcher
 delivery, the `perPath` queue, git reads, and `computeHunks`. Suspects: the 150ms panel
 debounce plus 50ms watcher debounce (extension.ts), `shouldIgnore` recompiling its matcher
-per call (code review §2.3), and git subprocess latency on a VM filesystem. On Remote-SSH the
+per call (see §6), and git subprocess latency on a VM filesystem. On Remote-SSH the
 extension runs on the VM, so its logs are there too.
 
 ## I. "Sometimes it is grabbing bigger chunks of code"
@@ -251,6 +251,53 @@ The nudge was dropped from the five watcher-delivery tests on 2026-09-21 (they n
    `WATCHER_PROBE=1`). With the regular tests honest it is redundant, and the starvation check
    is a shell one-liner (`cat /proc/sys/fs/inotify/max_user_instances` vs. actual fd usage). If
    it *stays*, give it assertions — it currently only checks that it ran.
+
+---
+
+## 6. Hardening carried over from the 2026-09-20 code review
+
+**Severity:** low, each one. Triaged 2026-09-22. These were kept because each is a small fix
+for a failure that is silent or blocks Begin outright. The full review is in git history:
+`git show 0e7c707:docs/code-review-2026-09-20.md`. Ordered by payoff.
+
+1. **Isolate git from the user's environment and config.** Only `commit.gpgsign` and
+   `core.hooksPath` are pinned ([baselineGit.ts:139](src/baselineGit.ts#L139)). A `required`
+   clean filter from global config (Git LFS) fails Begin review outright. `core.fsmonitor`
+   runs, and an inherited `GIT_INDEX_FILE` / `GIT_OBJECT_DIRECTORY` (VS Code launched from a
+   git hook) redirects the baseline repo. Fix: strip `GIT_*` from the child env, set
+   `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, and pin a commit identity.
+   `GIT_CONFIG_GLOBAL` needs git ≥ 2.32.
+2. **Bound `readBatch` concurrency.** [stateManager.ts:239](src/stateManager.ts#L239) opens
+   every workspace file at once. Under a low `ulimit -n` the excess fails with EMFILE and is
+   counted as "unreadable", so those files are silently left unbaselined. This box has already
+   shown fd/inotify exhaustion. Use the same limiter as the `hash-object` batch.
+3. **`ls-files` without `-z`.** [baselineGit.ts:383](src/baselineGit.ts#L383),
+   [:433](src/baselineGit.ts#L433) and [:580](src/baselineGit.ts#L580) parse C-quoted output.
+   `core.quotepath=false` covers only bytes ≥ 0x80, so names containing `"`, `\`, a tab or a
+   newline are skipped on load, missed by `renameFile` and missed by a directory delete. Add
+   `-z` and split on `\0`, as the subtree `ls-tree` at :607 already does.
+4. **Baselines over 10 MB read back as missing.** `maxBuffer` caps `git show`
+   ([baselineGit.ts:148](src/baselineGit.ts#L148)), but `hash-object` has no cap. A large text
+   file snapshots fine and then reviews as unbaselined. Either skip files over the cap at
+   snapshot time or raise the cap on reads. The two limits just need to agree.
+5. **Failures that are only logged.** A failed `syncIgnoreState` still makes Refresh report
+   success, and `removeFileBatch` never re-throws. Surface both. (A failed branch-switch
+   snapshot also clears state first, but that subsystem is off by default; see F.)
+
+Also folded into **H** above: `shouldIgnore` recompiles its matcher per call, and
+`collectGitignores` walks `.git` / unignored `node_modules` synchronously per gitignore event.
+
+**Considered and dropped:**
+- Save tokens for files under `files.watcherExclude` never release. Hand-saves there are rare,
+  and the leak is bounded by the user's own saves.
+- CRLF-baseline discard into an LF document can take two passes. It is cosmetic, and every
+  generated case converged.
+- `renameFile` bypasses `PathSerializer`, so a handler in flight can leave a phantom "deleted"
+  entry. The window is one `git cat-file` wide, and fixing it honestly needs a
+  forced-interleaving test.
+- End review during Begin's snapshot shows a misleading "retry" message. Nothing is damaged.
+- The review's "structural note" (assert invariants, don't argue them in prose). It is already
+  policy in [docs/test-strategy.md](docs/test-strategy.md).
 
 ---
 

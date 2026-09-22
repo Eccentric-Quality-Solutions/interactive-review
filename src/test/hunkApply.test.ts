@@ -8,7 +8,7 @@ import {
   minimalSplice,
   rejectLinesText,
 } from '../hunkApply';
-import { cases } from './generators';
+import { cases, makeRng, randomLines } from './generators';
 
 /**
  * The accept/discard invariants, as properties over generated inputs.
@@ -50,6 +50,16 @@ function pick<T>(rnd: () => number, xs: readonly T[]): T {
 }
 
 const CASES = 1500;
+
+// The properties below are only as broad as their inputs. `randomCase` draws the baseline's
+// line count first, so this replays that draw for every seed the suite uses.
+describe('generator coverage', () => {
+  it('the generator reaches every baseline length', () => {
+    const seen = new Set<number>();
+    for (let seed = 1; seed <= CASES; seed++) seen.add(randomLines(makeRng(seed), 12).length);
+    for (let n = 0; n < 12; n++) assert.ok(seen.has(n), `no seed in 1..${CASES} yields a ${n}-line baseline`);
+  });
+});
 
 // ── whole-hunk operations ────────────────────────────────────────────────────
 
@@ -220,8 +230,8 @@ describe('property: rejecting a selection', () => {
 // would find them again, but a named case says what broke and survives a generator change.
 
 describe('regression: whole-hunk operations at end of file', () => {
-  // Reproduced in review (docs/code-review-2026-09-20.md). Before the fix each left exactly
-  // one hunk behind, permanently: discard appended a newline the file never had.
+  // Reproduced in review (`git show 0e7c707:docs/code-review-2026-09-20.md`). Before the fix
+  // each left exactly one hunk behind, permanently: discard appended a newline the file never had.
   const noTrailingNewline: [string, string, string][] = [
     ['modified last line', 'a\nc', 'a\nb'],
     ['appended line', 'a', 'a\nb'],

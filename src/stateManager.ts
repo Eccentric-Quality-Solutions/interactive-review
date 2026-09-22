@@ -925,6 +925,15 @@ export class StateManager {
     return this._git?.getBaseline(normalizePath(filePath));
   }
 
+  /**
+   * The baselined files under `dirPath`, read after queued git writes like `readBaseline`.
+   * Empty with no repo. May throw `BaselineUnreadableError`.
+   */
+  async listTrackedUnder(dirPath: string): Promise<string[]> {
+    await this.gitQueue;
+    return (await this._git?.listTrackedUnder(normalizePath(dirPath))) ?? [];
+  }
+
   getAllFiles(): ReadonlyMap<string, FileState> {
     return this.state;
   }

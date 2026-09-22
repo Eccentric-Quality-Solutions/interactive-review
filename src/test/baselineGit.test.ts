@@ -268,6 +268,31 @@ describe('BaselineGit', () => {
     });
   });
 
+  describe('listTrackedUnder', () => {
+    it('lists only files strictly under the directory, including quoted names and nesting', async () => {
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'interactive-review-under-'));
+      const g2 = new BaselineGit(path.join(dir2, '.vscode', 'interactive-review'), dir2);
+      await g2.initGit();
+      const p = (...parts: string[]) => normalizePath(path.join(dir2, ...parts));
+      await g2.snapshotBatch([
+        { filePath: p('lib', 'a.txt'), content: 'a\n' },
+        { filePath: p('lib', 'deep', 'b.txt'), content: 'b\n' },
+        { filePath: p('lib', 'q"uote\\d.txt'), content: 'q\n' },  // C-quoted without -z
+        { filePath: p('library.txt'), content: 'sibling sharing the prefix\n' },
+        { filePath: p('lib2', 'c.txt'), content: 'c\n' },
+        { filePath: p('..cache', 'd.txt'), content: 'd\n' },   // inside the workspace, not `..`
+      ]);
+      const under = (await g2.listTrackedUnder(p('lib'))).sort();
+      assert.deepEqual(under, [p('lib', 'a.txt'), p('lib', 'deep', 'b.txt'), p('lib', 'q"uote\\d.txt')].sort());
+      // A file path lists nothing: it has no children.
+      assert.deepEqual(await g2.listTrackedUnder(p('library.txt')), []);
+      assert.deepEqual(await g2.listTrackedUnder(p('missing')), []);
+      assert.deepEqual(await g2.listTrackedUnder(p('..cache')), [p('..cache', 'd.txt')]);
+      assert.deepEqual(await g2.listTrackedUnder(path.dirname(dir2)), [], 'outside the workspace');
+      fs.rmSync(dir2, { recursive: true, force: true });
+    });
+  });
+
   describe('listTrackedFiles', () => {
     it('returns empty when nothing tracked', async () => {
       // fresh instance to avoid interference

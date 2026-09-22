@@ -3,7 +3,7 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitGetBaseline,
-  sleep, waitForCondition, waitForConditionNudged, waitForReviewing, enableReview, disableReview,
+  sleep, waitForCondition, waitForConditionNudged, waitForReviewing, waitForWatcher, enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 import { discardAllFiles, discardFileByPath, discardHunk, rejectSelection } from '../../commands';
@@ -66,6 +66,48 @@ suite('interactive-review delete & restore integration', function () {
       const f = sm.getFile(filePath);
       return !f || f.status !== 'reviewing';
     }, 5000);
+  });
+
+  test('an externally deleted directory queues every baselined child, untouched ones too', async () => {
+    const root = getWorkspaceRoot();
+    const dir = path.join(root, 'doomed-dir');
+    const edited = path.join(dir, 'edited.txt');
+    const idle = path.join(dir, 'idle.txt');
+    const idleNested = path.join(dir, 'nested', 'idle-nested.txt');
+
+    writeFileExternally(edited, 'edited original\n');
+    writeFileExternally(idle, 'idle original\n');
+    writeFileExternally(idleNested, 'nested original\n');
+    await enableReview();
+    for (const f of [edited, idle, idleNested]) {
+      const rel = path.relative(root, f);
+      await waitForCondition(() => gitGetBaseline(root, rel) !== undefined, 5000);
+    }
+
+    // One child is in state before the delete; the other two never are.
+    const sm = getStateManager();
+    assert.ok(sm, 'StateManager should be available');
+    writeFileExternally(edited, 'edited changed\n');
+    await waitForReviewing(edited);
+    assert.strictEqual(sm.getFile(idle), undefined, 'precondition: idle child has no state entry');
+
+    // VS Code's watcher reports only the directory itself for a recursive delete. Watcher
+    // only: a Refresh surfaces the deletions by itself, so a nudged wait passes without the fix.
+    fs.rmSync(dir, { recursive: true, force: true });
+
+    await waitForWatcher(
+      () => [edited, idle, idleNested].every(f => sm.getFile(f)?.status === 'reviewing'),
+      5000,
+    );
+    assert.strictEqual(sm.getFile(idle)?.baseline, 'idle original\n');
+    assert.strictEqual(sm.getFile(idleNested)?.baseline, 'nested original\n');
+
+    const fw = getFileWatcher();
+    assert.ok(fw, 'FileWatcher should be available');
+    await discardAllFiles(sm, fw, () => {});
+    assert.strictEqual(fs.readFileSync(idle, 'utf-8'), 'idle original\n');
+    assert.strictEqual(fs.readFileSync(idleNested, 'utf-8'), 'nested original\n');
+    assert.strictEqual(fs.readFileSync(edited, 'utf-8'), 'edited original\n');
   });
 
   test('discardFileByPath restores an externally deleted file', async () => {
@@ -222,9 +264,13 @@ suite('interactive-review delete & restore integration', function () {
 
     const sm = getStateManager();
     assert.ok(sm, 'StateManager should be available');
-    await waitForReviewing(filePath);
+    // Watcher only. A Refresh can reach the file first, and a rescan has no witness of the
+    // create, so it queues the file as 'unbaselined', which Discard keeps by design.
+    await waitForWatcher(() => sm.getFile(filePath)?.status === 'reviewing');
 
     assert.strictEqual(sm.getFile(filePath)?.baseline, null, 'New file should have null baseline');
+    // Discard deletes only a witnessed create; an 'unbaselined' file is kept on purpose.
+    assert.strictEqual(sm.getFile(filePath)?.nullReason, 'created', 'New file should be classified as created');
 
     // Discard → should delete the file
     const fw = getFileWatcher();

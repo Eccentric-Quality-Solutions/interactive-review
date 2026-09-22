@@ -660,6 +660,34 @@ export class FileWatcher {
         if (childLeftReview) this.onFileLeftReview?.();
         this.onStateChanged();
       }
+
+      // The sweep above only sees files already in `state`. A child never edited this
+      // session has a baseline but no entry, so only the baseline repo knows it was there.
+      // Without this pass its deletion stayed out of the queue until the next Refresh, and
+      // ending the review first threw its baseline away. Children are read one at a time:
+      // a deleted directory can be large, and this must not start a git process per file
+      // at once.
+      let tracked: string[] = [];
+      try {
+        tracked = await this.stateManager.listTrackedUnder(filePath);
+      } catch (err) {
+        log(`onDiskDelete(${basename}): cannot list tracked children — ${err}`);
+      }
+      // `session` alone misses a branch switch: it suppresses the watcher and clears state
+      // without starting a new session, and a child queued after that clear would survive
+      // it as a false deletion. Checked after every await, since each child is one.
+      let idleSurfaced = 0;
+      for (const childPath of tracked) {
+        if (this.stateManager.session !== session || this._suppressed || !this.stateManager.enabled) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while surfacing children, stop`); return; }
+        if (this.stateManager.getFile(childPath) || this.shouldIgnore(childPath) || fs.existsSync(childPath)) continue;
+        const childBaseline = await this.stateManager.readBaseline(childPath);
+        if (this.stateManager.session !== session || this._suppressed || !this.stateManager.enabled) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while surfacing children, stop`); return; }
+        // Re-checked after the await: another handler may have queued or recreated it.
+        if (childBaseline === undefined || this.stateManager.getFile(childPath) || fs.existsSync(childPath)) continue;
+        this.enterReviewing(childPath, childBaseline, '');
+        idleSurfaced++;
+      }
+      if (idleSurfaced > 0) log(`onDiskDelete(${basename}): surfaced ${idleSurfaced} untouched child deletion(s) from deleted directory`);
       return;
     }
     // gitBaseline is '' (empty file) or has content — show deletion diff.

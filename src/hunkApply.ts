@@ -8,7 +8,8 @@ import { ParsedHunk } from './diffEngine';
  * replacement text unconditionally. On a file with no trailing newline that re-added a
  * newline the file never had, so the discard *left a hunk behind* — and discarding again
  * reproduced it, permanently. Three shapes were reproduced (a modified last line, an
- * appended line, a removed last line); see `docs/code-review-2026-09-20.md` §1.1.
+ * appended line, a removed last line); see §1.1 of the 2026-09-20 code review
+ * (`git show 0e7c707:docs/code-review-2026-09-20.md`).
  *
  * The fix is not better range arithmetic, it is not doing range arithmetic at all. Each
  * function below answers "what should the whole text be afterwards?" by splicing arrays,

@@ -201,7 +201,7 @@ describe('StateManager.rebuildState keeps each null baseline\'s nullReason', () 
   // Defect: Refresh clears memory and re-adopts every untracked readable file as 'created',
   // the value that licenses Discard to delete it. A file the session had deliberately marked
   // 'unbaselined' (a change with no baseline and no evidence of a create) became deletable
-  // after one Refresh. See code-review-2026-09-20.md §1.2.
+  // after one Refresh. See §1.2 of `git show 0e7c707:docs/code-review-2026-09-20.md`.
   it('an unbaselined file stays unbaselined across a Refresh', async () => {
     const file = path.join(root, 'preexisting.txt');
     writeFile(file, 'the user\'s content\n');
@@ -303,7 +303,7 @@ describe('StateManager.load keeps each null baseline\'s nullReason across a wind
   // Defect: a rescan answered 'created' for any readable text file with no blob and no
   // record, so every way of losing the record was a way of deleting a user's file. The
   // shape found in review: a file ignored at Begin review, so never baselined, whose ignore
-  // rule is gone by the next reload. See code-review-2026-09-20.md §5.
+  // rule is gone by the next reload. See §5 of `git show 0e7c707:docs/code-review-2026-09-20.md`.
   it('a file with no record is never adopted as deletable', async () => {
     const file = path.join(root, 'notes', 'mine.txt');
     writeFile(file, 'the user\'s content\n');

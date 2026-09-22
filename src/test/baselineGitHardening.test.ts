@@ -11,8 +11,8 @@ import { BaselineGit } from '../baselineGit';
  *
  * Every test here pins a defect that shipped, and each one was checked to FAIL against the
  * code as it stood before its fix — a regression test that passes on the broken code is
- * decoration. See docs/test-strategy.md for the rule and docs/code-review-2026-09-20.md for
- * the defects.
+ * decoration. See docs/test-strategy.md for the rule and
+ * `git show 0e7c707:docs/code-review-2026-09-20.md` for the defects.
  *
  * The shared theme: the baseline repo runs real git against the user's real work tree and
  * inherits the user's real git config, so git's leniency and the user's environment are both

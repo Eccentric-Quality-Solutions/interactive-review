@@ -590,6 +590,33 @@ export class BaselineGit {
   }
 
   /**
+   * The tracked files strictly under `dirPath`, absolute. `listTrackedFiles` restricted to
+   * one directory, so a single delete event costs one `ls-tree` over that subtree rather
+   * than a listing of the whole workspace. `-z` so names git would C-quote come back
+   * verbatim. Throws `BaselineUnreadableError` under the same conditions as
+   * `listTrackedFiles`.
+   */
+  async listTrackedUnder(dirPath: string): Promise<string[]> {
+    await this.initGit();
+    const rel = path.relative(this.workTree, dirPath);
+    // `..` + sep, not a bare `..` prefix: `..cache` is an ordinary folder inside the workspace.
+    if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) return [];
+    const relPosix = normalizePath(rel.split(path.sep).join('/'));  // git prints `/` everywhere
+    if (!(await this.hasHead())) return [];
+    try {
+      const out = await this.git(['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', relPosix]);
+      const prefix = relPosix + '/';
+      return out
+        .split('\0')
+        .filter(entry => entry.startsWith(prefix))
+        .map(entry => normalizePath(path.join(this.workTree, entry)));
+    } catch (err) {
+      this.log(`listTrackedUnder failed — baseline repo has a HEAD but is unreadable: ${err}`);
+      throw new BaselineUnreadableError('listTrackedUnder', err);
+    }
+  }
+
+  /**
    * Throw away the current repo and start a fresh, empty one, clearing the
    * `baselineLost` flag. The recovery path for an unreadable baseline: unlike
    * `destroyGit` this leaves the instance usable, so the caller can immediately

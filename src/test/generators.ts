@@ -23,7 +23,12 @@
  */
 
 export function makeRng(seed: number): () => number {
-  let s = seed >>> 0;
+  // Scramble the seed first. Unscrambled, the first draw is `a*seed + c`, which does not wrap
+  // for small seeds: it rises almost linearly with the seed, so over seeds 1–1500 the first
+  // `randomLines(rnd, 12)` only ever produced 2–9 lines — never an empty baseline. Guarded
+  // by "the generator reaches every baseline length" in hunkApply.test.ts.
+  let s = Math.imul(seed ^ (seed >>> 16), 0x45d9f3b) >>> 0;
+  s = (s ^ (s >>> 16)) >>> 0;
   return () => {
     s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
     return s / 0x100000000;
