@@ -458,6 +458,7 @@ export function acceptHunk(
 
   const doc = findFileDocument(filePath);
   if (!doc) { log(`acceptHunk(${basename}): no doc found, skip`); return; }
+  if (refusesDirtyAccept(doc, 'acceptHunk')) return;
   // `?? bomFromFile` rather than `?? ''`: a null baseline has no marker to carry, so for a
   // new BOM'd file the disk is the only witness. Seeding it here means every baseline built
   // below — the partial one and the final one alike — inherits it through `withBomFrom`.
@@ -482,6 +483,26 @@ export function acceptHunk(
   );
 
   finishBaselineAdvance(stateManager, filePath, newBaseline, doc, originalNewStart, onStateChanged, 'acceptHunk');
+}
+
+/**
+ * Refuse a hunk-level accept while the file has unsaved edits, and say why.
+ *
+ * Accept folds the *buffer* into the baseline, but a rescan rebuilds from *disk*. With
+ * unsaved edits the baseline would hold text the file does not contain, and the next Refresh
+ * or window reload would queue the file again with a hunk undoing text that was never saved.
+ * File-level Accept reads disk and is unaffected. The proper fix is to save first, which
+ * makes these commands async; see `todo.md` item D. Guarded by `reviewCommands.test.ts`
+ * ("refuses to accept a hunk while the file has unsaved edits").
+ */
+function refusesDirtyAccept(doc: vscode.TextDocument, label: string): boolean {
+  if (!doc.isDirty) return false;
+  const basename = path.basename(doc.uri.fsPath);
+  log(`${label}(${basename}): buffer has unsaved edits, refusing`);
+  void vscode.window.showWarningMessage(
+    `Interactive Review: save ${basename} before accepting. Its unsaved edits are not on disk yet.`,
+  );
+  return true;
 }
 
 /** Reveal the next hunk in the editor after an accept/discard operation. */
@@ -794,6 +815,7 @@ export async function acceptSelection(
   const resolved = await resolveSelectionHunk(stateManager, filePath, selStartLine, selEndLine, 'acceptSelection');
   if (!resolved) return;
   const { doc, hunk, fileState } = resolved;
+  if (refusesDirtyAccept(doc, 'acceptSelection')) return;
 
   const split = splitHunkByRange(hunk, selStartLine, selEndLine);
   if (!split.hasAddedInRange) {

@@ -7,7 +7,7 @@ import {
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher, getReviewPanel,
   setupReviewingFile,
 } from './helpers';
-import { acceptHunk, discardHunk } from '../../commands';
+import { acceptFileByPath, acceptHunk, discardHunk } from '../../commands';
 import { computeHunks, hunkId } from '../../diffEngine';
 
 suite('interactive-review diff editor integration', function () {
@@ -92,6 +92,21 @@ suite('interactive-review diff editor integration', function () {
   });
 
   // ── closeStaleTabs ────────────────────────────────────────────
+
+  // The original side of a diff is fetched again whenever VS Code drops its copy, such as
+  // on reopening a closed tab. For a file that has left review it used to come back empty,
+  // painting every line of the file as added.
+  test('a file that has left review has its baseline as the original side, not nothing', async () => {
+    const filePath = await setupReviewingFile('left-review.txt', 'a\n', 'a\nb\n');
+    const sm = getStateManager();
+    acceptFileByPath(sm, filePath, () => {});
+    await sm.flush();
+    assert.strictEqual(sm.getFile(filePath), undefined, 'precondition: the file has left review');
+
+    const original = await vscode.workspace.openTextDocument(
+      vscode.Uri.file(filePath).with({ scheme: 'interactive-review-baseline' }));
+    assert.strictEqual(original.getText(), 'a\nb\n', 'the accepted baseline, so the diff shows no change');
+  });
 
   test('accepting last hunk closes interactive-review diff tab', async () => {
     const filePath = await setupReviewingFile(

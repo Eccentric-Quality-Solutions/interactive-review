@@ -205,8 +205,8 @@ const MUTATIONS = [
     desc: "disk-event handler writes after a baseline read across a session change",
     file: "src/fileWatcher.ts",
     edits: [
-      ["    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }\n    if (gitBaseline === undefined) {",
-       "    if (gitBaseline === undefined) {"],
+      ["    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }\n\n    // With no baseline",
+       "\n    // With no baseline"],
     ],
     test: "reloadEqualsMemory.test.js",
   },
@@ -218,6 +218,15 @@ const MUTATIONS = [
        "const result = task();"],
     ],
     test: "pathSerializer.test.js",
+  },
+  {
+    desc: "a change with no baseline is classified 'created' (Discard would delete the user's file)",
+    file: "src/diskEvent.ts",
+    edits: [
+      ["return { action: 'review', baseline: null, nullReason: 'unbaselined' };",
+       "return { action: 'review', baseline: null, nullReason: 'created' };"],
+    ],
+    test: "diskEvent.test.js",
   },
   {
     desc: "delete events bypass the per-path serializer",

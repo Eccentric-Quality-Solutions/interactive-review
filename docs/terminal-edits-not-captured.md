@@ -264,8 +264,8 @@ fix:
 - **The enable-window create race got its own guard** (`ccb994d`,
   [snapshotCreateTracker.ts](../src/snapshotCreateTracker.ts)): a file created *while*
   `snapshotWorkspace` is running is adopted as a baseline rather than classified as new. That
-  guard is one of the three independent "is this file new" decisions now noted as a drift hazard
-  in [`../todo.md`](../todo.md) item 1.
+  guard was one of three independent "is this file new" decisions, a drift hazard since
+  resolved: the watcher's two now live in [diskEvent.ts](../src/diskEvent.ts).
 
 **Cause B remains open by decision**, and the code says so — `handleDiskChange` carries a
 `KNOWN GAP (Cause B)` comment pointing back at §5, plus the loud log line and a characterization

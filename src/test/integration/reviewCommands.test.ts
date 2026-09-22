@@ -50,6 +50,38 @@ suite('interactive-review keyboard commands', function () {
     assert.notStrictEqual(getStateManager().getFile(f)?.status, 'reviewing', 'file resolved');
   });
 
+  // todo.md item D. Accept folds the buffer; a reload rebuilds from disk. Accepting unsaved
+  // text stored a baseline the file does not contain, and the next reload queued the file
+  // again with a hunk undoing text that was never on disk.
+  test('refuses to accept a hunk while the file has unsaved edits', async () => {
+    const root = getWorkspaceRoot();
+    const f = path.join(root, 'dirty.txt');
+    writeFileExternally(f, 'l1\nl2\n');
+    await enableReview();
+    await waitForCondition(() => gitGetBaseline(root, 'dirty.txt') !== undefined);
+
+    writeFileExternally(f, 'l1\nl2\nl3\n');
+    await waitForReviewing(f);
+
+    const editor = await openWithSelection(f, 2);
+    await editor.edit(b => b.insert(new vscode.Position(2, 2), ' unsaved'));
+    // Reverted even on failure: a dirty buffer left behind can block teardown's
+    // closeAllEditors on a save prompt and time out the tests after this one.
+    try {
+      assert.ok(editor.document.isDirty, 'precondition: the buffer differs from disk');
+
+      await vscode.commands.executeCommand('interactiveReview.acceptHunk');
+      await settle();
+
+      assert.strictEqual(gitGetBaseline(root, 'dirty.txt'), 'l1\nl2\n', 'no unsaved text in the baseline');
+      assert.strictEqual(getStateManager().getFile(f)?.status, 'reviewing', 'the hunk is still pending');
+    } finally {
+      // Refocus first: revert acts on the active editor, and a regressed accept can move on.
+      await vscode.window.showTextDocument(editor.document);
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   test('rejectHunk command reverts the hunk under the cursor to baseline', async () => {
     const root = getWorkspaceRoot();
     const f = path.join(root, 'revert.txt');

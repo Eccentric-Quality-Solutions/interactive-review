@@ -104,12 +104,16 @@ any of them, check its mutation in `scripts/mutation-check.mjs`.
 | Discarding an unbaselined file keeps it out of the queue | `reloadEqualsMemory.test.ts` + `deleteRestore.test.ts` (integration) | the file coming back on the next Refresh or reload |
 | Discarding a hunk or rejecting lines of an unbaselined file keeps its content | `deleteRestore.test.ts` (integration) | the user's own file saved empty, or lines of it deleted |
 | Discarding an unreadable unbaselined file drops it without throwing | `deleteRestore.test.ts` (integration) | an unhandled rejection from a CodeLens Discard, file left queued |
+| Only a create is ever classified `'created'`; binaries are never adopted | `diskEvent.test.ts` (every input) | a change making the user's file one Discard deletes |
+| Hunk accept refuses a buffer with unsaved edits | `reviewCommands.test.ts` (integration) | unsaved text in the baseline, file queued again on reload (`todo.md` item D) |
+| A file that has left review diffs against its baseline | `diffEditor.test.ts` (integration) | a re-fetched diff painting the whole file as added |
 
-The seven integration guards are not in the mutation script; they were verified by hand.
+The nine integration guards are not in the mutation script; they were verified by hand.
 
 **Limits of the reload property.** [`reloadEqualsMemory.test.ts`](../src/test/reloadEqualsMemory.test.ts)
 mirrors `FileWatcher` and `commands.ts` at the StateManager boundary, so a change to either
-needs its mirror updated. It cannot reach defects in which text the command layer passes
+needs its mirror updated. The exception is what a create or change event decides: that is
+the real `classifyDiskEvent`, and the mirror copies only the reads around it. It cannot reach defects in which text the command layer passes
 (such as `todo.md` item D, dirty-buffer accept), because that layer is not modelled, and
 a defect in `commands.ts` that the mirror copies faithfully passes it. Such a fix needs an
 integration test as well, as the Discard fix below has.
@@ -193,15 +197,13 @@ new generators at least that adversarial.
 
 ## Open design questions
 
-Real, but each is a design change rather than a test, so none is started.
+- **Extract `planAccept`/`planDiscard`** as pure functions, the way `hunkApply` and
+  `classifyDiskEvent` were. Do it when next working in the command layer, not on its own:
+  the reload property already covers their decisions through its mirror.
 
-- **Make the whole-file-flash fix independent of VS Code's cache.** The content provider
-  still returns `''` for a file with no state; the fix works by not invalidating the cache.
-  Any re-fetch of the baseline document, such as reopening the tab, would still paint the
-  whole file as added. Remembering the last baseline served would remove the dependency.
-- **Extract `classifyDiskEvent` and `planAccept`/`planDiscard`** as pure functions, the way
-  `hunkApply` was extracted. The first also closes `todo.md` item 1 — three separate answers
-  to "is this file new".
+Closed 2026-09-21: the baseline provider now answers a file with no state with its recorded
+baseline rather than `''`, so the whole-file flash no longer depends on VS Code's cache; and
+`classifyDiskEvent` holds the watcher's decision about new files.
 
 ## Deliberately not building
 
@@ -212,7 +214,7 @@ Real, but each is a design change rather than a test, so none is started.
 - **Coverage targets.** Every defect above sat on lines that were already executed. What
   was missing was an assertion about composition.
 - **A test for the whole-file flash timing.** It is a repaint artifact over a few hundred
-  milliseconds. The cache-independence fix above is the better investment.
+  milliseconds, and the provider fix removed its cause; the provider has its own test.
 - **Tests for `media/panel.js`**, until it grows logic beyond rendering.
 
 ## The integration suite on this machine

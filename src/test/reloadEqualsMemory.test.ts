@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { StateManager } from '../stateManager';
 import { computeHunks } from '../diffEngine';
+import { classifyDiskEvent, DiskEventDecision } from '../diskEvent';
 import { acceptHunkBaseline, discardHunkText } from '../hunkApply';
 import { FileState } from '../types';
 import { log } from '../log';
@@ -123,16 +124,25 @@ function recomputeHunks(fp: string, baseline: string | null, current: string): v
   }
 }
 
+/** `FileWatcher.apply`. */
+function apply(fp: string, content: string, decision: DiskEventDecision): void {
+  if (decision.action === 'adopt') sm.snapshotFile(fp, content);
+  else if (decision.action === 'review') enterReviewing(fp, decision.baseline, content, decision.nullReason);
+}
+
+// The two handlers below mirror only the reads. What to do with them is the real
+// `classifyDiskEvent`, so a change to that decision is tested here without a mirror edit.
+
 /** `FileWatcher.handleDiskChange`, outside any snapshot or ignore-sync window. */
 async function onDiskChange(fp: string, manualSave: boolean): Promise<void> {
   const content = readDisk(fp);
   if (content === undefined) return;
   const st = sm.getFile(fp);
   if (st?.status === 'reviewing') { recomputeHunks(fp, st.baseline, content); return; }
-  if (manualSave) { sm.snapshotFile(fp, content); return; }
-  const gb = await sm.readBaseline(fp);
-  if (gb === undefined) { enterReviewing(fp, null, content, 'unbaselined'); return; }
-  enterReviewing(fp, gb, content);
+  const baseline = manualSave ? undefined : await sm.readBaseline(fp);
+  apply(fp, content, classifyDiskEvent({
+    kind: 'change', baseline, manualSave, duringSnapshot: false, ignoreSyncActive: false, binary: false,
+  }));
 }
 
 /** `FileWatcher.handleDiskCreate`, outside any snapshot window. */
@@ -142,9 +152,10 @@ async function onDiskCreate(fp: string): Promise<void> {
   const st = sm.getFile(fp);
   if (st?.status === 'reviewing') { recomputeHunks(fp, st.baseline, content); return; }
   if (st) return;
-  const gb = await sm.readBaseline(fp);
-  if (gb !== undefined) { enterReviewing(fp, gb, content); return; }
-  enterReviewing(fp, null, content, 'created');
+  const baseline = await sm.readBaseline(fp);
+  apply(fp, content, classifyDiskEvent({
+    kind: 'create', baseline, manualSave: false, duringSnapshot: false, ignoreSyncActive: false, binary: false,
+  }));
 }
 
 /** `FileWatcher.onDiskDelete` for an external (non-Explorer) delete of a single file. */

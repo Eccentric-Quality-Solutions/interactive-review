@@ -38,8 +38,10 @@ inverted hunk demanding you re-remove text that was never there.
 The extension actively invites the dirty-buffer case, since the modified side of the review
 diff *is* the real editor.
 
-**Fix now:** refuse on `doc.isDirty` with a warning. **Fix properly later:** `await doc.save()`
-before folding, which makes `acceptHunk` async and ripples to four call sites.
+**Fixed for now (2026-09-21):** hunk and selection Accept refuse a dirty buffer with a
+warning (`refusesDirtyAccept`). **Still to do properly:** `await doc.save()` before folding,
+which makes `acceptHunk` async and ripples to four call sites, and lets Accept work on unsaved
+edits instead of refusing.
 
 ## F. `git pull` mid-review floods the queue
 
@@ -79,26 +81,18 @@ fragmentation still bites.
 
 ---
 
-## 1. Three independent answers to "is this file new"
+## 5. `consumeManualSave` deletes whichever save token the path holds
 
-**Severity:** low — no known wrong behavior today; a drift hazard.
+**Severity:** low — no observed failure; a narrow race.
 
-Fixing the enable-window race (see below) left the codebase with three separate places that
-decide whether an on-disk file with no baseline is a *new* file or a *pre-existing* one:
-
-- [`handleDiskCreate`](src/fileWatcher.ts#L390) — new, unless the enable snapshot is running.
-- [`handleDiskChange`](src/fileWatcher.ts#L566) — never new; silently adopts as baseline.
-- [`adoptUntrackedFiles`](src/stateManager.ts#L234) — unconditionally new, no exceptions.
-
-The third is reached from `rebuildState`, i.e. the `interactiveReview.refresh` command. It
-has no guard and no comment tying it to the other two. It isn't wrong today only because
-refresh doesn't run concurrently with enable in practice — a fact nothing enforces.
-
-**Found by:** a test that used `waitForConditionNudged` (which issues a refresh) to observe
-the watcher's classification. The refresh's adopt beat the watcher and won.
-
-**If you touch this:** the useful move is probably not a fourth guard but making the
-decision one function that all three call.
+It takes the token by path, not by identity. The wrappers sample the token when an event
+arrives, so a second save landing any time between that and the consume — including while
+the handler waits behind an earlier event for the path, and during the create handler's
+baseline read — loses its token to the first event. The
+second save's change event then looks external and is reviewed instead of absorbed: a
+spurious hunk on the user's own typing, the safe direction. The wrappers already release by
+identity (`releaseSaveToken`); consuming should match the token the handler started with.
+Needs its own test and mutation.
 
 ---
 

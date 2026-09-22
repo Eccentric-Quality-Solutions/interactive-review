@@ -14,6 +14,7 @@ import { computeHunks, hunkId } from './diffEngine';
 import { findFileDocument } from './editorUtils';
 import { initLog, log } from './log';
 import { formatBuild, readBuildInfo } from './buildInfo';
+import { readTextFileSync } from './textFile';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
   initLog();
@@ -30,10 +31,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     baselineChangeEmitter,
     vscode.workspace.registerTextDocumentContentProvider('interactive-review-baseline', {
       onDidChange: baselineChangeEmitter.event,
-      provideTextDocumentContent(uri: vscode.Uri): string {
+      async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
         const filePath = uri.fsPath;
         const fileState = stateManager.getFile(filePath);
-        return fileState?.baseline ?? '';  // null baseline → '' for diff display
+        if (fileState) return fileState.baseline ?? '';  // null baseline → '' for diff display
+        // No entry means nothing is pending, so the original side must match the file. It
+        // used to be `''`, which painted the whole file as added whenever VS Code re-fetched
+        // a diff for a file that had left review (reopening a closed tab, say). Guarded by
+        // `diffEditor.test.ts` ("a file that has left review").
+        try {
+          return (await stateManager.readBaseline(filePath)) ?? readTextFileSync(filePath) ?? '';
+        } catch {
+          return '';  // deleted, or unreadable: nothing to show either way
+        }
       },
     }),
     // Empty modified side for a deleted file's diff. Using a content-provider doc
@@ -115,16 +125,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   context.subscriptions.push(stateManager, stateManager.onDidChangeBaseline(filePath => {
     // Do NOT invalidate the cached baseline for a file that has just *left* review.
     //
-    // This is the whole-file-turns-green flash on the last accept. `exitReviewing` drops
-    // the state entry, `dropState` fires this event, and the content provider answers a
-    // missing entry with `''` — so the diff's original side empties and the editor
-    // repaints every line of the file as added, while the async `closeStaleTabs` is still
-    // on its way to close the tab. It fires on the happy path of every completed file.
-    //
-    // Skipping the notification leaves VS Code holding the *previous* baseline instead of
-    // an empty one. That is stale for the few hundred milliseconds before the tab closes,
-    // and stale-but-plausible beats empty-and-alarming: at worst the tab still shows the
-    // hunk that was just accepted, rather than claiming the entire file is new.
+    // This was the whole-file-turns-green flash on the last accept: `exitReviewing` drops
+    // the state entry, `dropState` fires this event, and the content provider used to
+    // answer a missing entry with `''`, so the editor repainted every line as added while
+    // `closeStaleTabs` was on its way to close the tab. The provider now answers with the
+    // recorded baseline, so the flash no longer depends on this skip; it stays because the
+    // tab is closing anyway, and a re-fetch would cost a git read for nothing.
     //
     // It does not reintroduce the ADR-0011 defect, which was the *opposite* ordering
     // problem: re-entering review writes a fresh baseline through `writeState`, and that
