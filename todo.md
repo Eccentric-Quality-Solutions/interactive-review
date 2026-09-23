@@ -26,10 +26,36 @@ Discard then keeps it. Extension log:
 12:26:30.746Z onDiskCreate(new-discard.txt): enterReviewing
 ```
 
-To close: find what triggered the sync (a leftover `.gitignore` or settings event from the
-previous test is the likely source), then decide whether `syncIgnoreState` should skip files
-younger than the current session or whether the create handler should treat "baseline equals
-disk content, no witness" as a create. Needs a test that forces the interleaving.
+**Trigger identified 2026-09-23 — it is the settings watch, not `.gitignore`.** Reproduced 1
+run in 7 under `--grep "delete & restore"`, where no test touches `.gitignore` at all, which
+rules that guess out. `syncIgnore` has two callers: the `**/.gitignore` watcher, and
+`onSettingsChanged` ([extension.ts:467](src/extension.ts#L467)), driven by an `fs.watch` on
+the state dir plus an mtime poll fallback. `cleanWorkspace` deletes the state dir between
+tests and the next `enableReview` writes a fresh `settings.json`, so a new mtime fires
+`reloadIgnorePatterns() + syncIgnore()` at an arbitrary point inside the *following* test.
+That is the 50ms interleaving above.
+
+**Reachable in production but milder than a silent omission.** `settings.json` is written on
+every `beginReview` and the poll runs at 1s, so the spurious sync lands within ~1s of Begin —
+squarely in the window where an agent starts editing. The file is *not* lost: the sync
+baselines it, so the create takes the `f.baseline !== undefined` branch
+([diskEvent.ts:39](src/diskEvent.ts#L39)) and reviews it as an edit of itself. Baseline equals
+disk, so there are no hunks and `nullReason` is not `'created'` — an actionless queue entry
+that Discard will not remove. A nuisance, not data loss.
+
+**Fix the trigger, not the classifier.** The classifier is behaving correctly for the facts it
+is handed; the bug is that a sync runs at all on a session's own settings write. Seeding
+`lastSettingsMtimeMs` after the enable write is therefore the fix, not a band-aid. Resist the
+two options first written here — "skip files younger than the session" is an mtime heuristic
+(clock skew, copies preserve mtime) and "treat baseline-equals-disk-without-witness as a
+create" changes correct code to absorb a spurious event. Both are §4's disease: compensating
+downstream for something that should not have fired.
+
+To close: a test that forces the interleaving (Begin, then create a file inside the sync
+window) to confirm the production path before changing anything.
+
+Also note a second test fails alongside it in the same runs — "an externally deleted
+directory queues every baselined child" — not yet checked for a shared cause.
 
 ### 2. The ignored-rename branch has no integration coverage
 

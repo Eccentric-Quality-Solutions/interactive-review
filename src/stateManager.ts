@@ -2,13 +2,11 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FileState } from './types';
-import { BaselineGit, BaselineUnreadableError, Settings } from './baselineGit';
+import { BaselineGit, BaselineUnreadableError, DEFAULT_IGNORE_PATTERNS, Settings } from './baselineGit';
 import { hasReportableDiff } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 import { isBinaryFile, readTextFile } from './textFile';
-
-const DEFAULT_IGNORE_PATTERNS = process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'];
 
 /** Format a list of absolute paths for logging: show relative paths, max 20. */
 function logFileList(files: string[], rootPath: string | undefined): string {
@@ -316,6 +314,26 @@ export class StateManager {
   }
 
   /**
+   * `listTrackedFiles`, with the one distinction every caller must draw made for them.
+   *
+   * `BaselineUnreadableError` means the repo has baselines it cannot read, and the answer
+   * is `undefined`, never `[]`: an empty list reads as "every file on disk is new", and
+   * that turns a damaged repo into a workspace of deletable null-baseline entries. Each
+   * caller decides what to do about it (recover, or abort and leave memory alone), but none
+   * can mistake the two. Any other error propagates. Guarded by `stateManagerGit.test.ts`
+   * ("a tracked list that cannot be read").
+   */
+  private async tryListTracked(g: BaselineGit, label: string): Promise<string[] | undefined> {
+    try {
+      return await g.listTrackedFiles();
+    } catch (err) {
+      if (!(err instanceof BaselineUnreadableError)) throw err;
+      log(`${label}: baseline repo unreadable — ${err.message}`);
+      return undefined;
+    }
+  }
+
+  /**
    * Shared per-file scan of the git-tracked files, used by both `load()` and
    * `rebuildState()`. For each tracked file: skip if ignored, skip if it has no
    * baseline in the index, otherwise compare the baseline against current disk
@@ -537,12 +555,9 @@ export class StateManager {
       await this.recoverLostBaseline(g, 'baseline repo had to be re-initialized', shouldIgnore);
       return;
     }
-    let tracked: string[];
-    try {
-      tracked = await g.listTrackedFiles();
-    } catch (err) {
-      if (!(err instanceof BaselineUnreadableError)) throw err;
-      await this.recoverLostBaseline(g, `${err.message}`, shouldIgnore);
+    const tracked = await this.tryListTracked(g, 'load');
+    if (tracked === undefined) {
+      await this.recoverLostBaseline(g, 'baseline repo unreadable', shouldIgnore);
       return;
     }
     // Restore the previous window's classifications before anything is adopted. Without
@@ -603,12 +618,9 @@ export class StateManager {
     // intact (it is now the only surviving record of the session) rather than swap it
     // for a workspace-wide list of null-baseline "new" files.
     await g.initGit();
-    let tracked: string[];
-    try {
-      tracked = await g.listTrackedFiles();
-    } catch (err) {
-      if (!(err instanceof BaselineUnreadableError)) throw err;
-      log(`rebuildState: aborting, in-memory state left untouched — ${err.message}`);
+    const tracked = await this.tryListTracked(g, 'rebuildState');
+    if (tracked === undefined) {
+      log('rebuildState: aborting, in-memory state left untouched');
       return;
     }
     this.clearState();
@@ -814,15 +826,10 @@ export class StateManager {
     }
 
     this.enqueue('removePathAndChildren', async g => {
-      let tracked: string[];
-      try {
-        tracked = await g.listTrackedFiles();
-      } catch (err) {
-        // A damaged repo must not turn a delete into a workspace-wide reclassification;
-        // leave the index alone and let load()/rebuildState's recovery handle it.
-        log(`removePathAndChildren: skipping git removal — ${err}`);
-        return;
-      }
+      // A damaged repo must not turn a delete into a workspace-wide reclassification;
+      // leave the index alone and let load()/rebuildState's recovery handle it.
+      const tracked = await this.tryListTracked(g, 'removePathAndChildren');
+      if (tracked === undefined) return;
       const toRemove = tracked.filter(under);
       if (toRemove.length === 0) return;
       log(`removePathAndChildren: removing ${toRemove.length} baseline(s) under ${path.basename(dirPath)}`);
@@ -1139,20 +1146,13 @@ export class StateManager {
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
-    let allowedFiles: string[];
-    let trackedFiles: string[];
-    try {
-      [allowedFiles, trackedFiles] = await Promise.all([
-        this.collectWorkspaceFiles(shouldIgnore),
-        g.listTrackedFiles(),
-      ]);
-    } catch (err) {
-      if (!(err instanceof BaselineUnreadableError)) throw err;
-      // Without a readable tracked list every allowed file looks un-snapshotted, so
-      // proceeding would re-snapshot the entire workspace over a damaged repo.
-      log(`syncIgnoreState: aborting — ${err.message}`);
-      return;
-    }
+    const [allowedFiles, trackedFiles] = await Promise.all([
+      this.collectWorkspaceFiles(shouldIgnore),
+      this.tryListTracked(g, 'syncIgnoreState'),
+    ]);
+    // Without a readable tracked list every allowed file looks un-snapshotted, so
+    // proceeding would re-snapshot the entire workspace over a damaged repo.
+    if (trackedFiles === undefined) return;
 
     // Remove tracked files that are now ignored (from git and from in-memory state).
     //
@@ -1226,18 +1226,11 @@ export class StateManager {
     // Collect all current workspace files (respecting ignore rules).
     // Read before clearing, for the same reason as rebuildState: a damaged baseline
     // repo must not cost the caller its in-memory state on the way out.
-    let diskFiles: string[];
-    let trackedFiles: string[];
-    try {
-      [diskFiles, trackedFiles] = await Promise.all([
-        this.collectWorkspaceFiles(shouldIgnore),
-        g.listTrackedFiles(),
-      ]);
-    } catch (err) {
-      if (!(err instanceof BaselineUnreadableError)) throw err;
-      log(`clearHunksOnBranchSwitch: aborting — ${err.message}`);
-      return;
-    }
+    const [diskFiles, trackedFiles] = await Promise.all([
+      this.collectWorkspaceFiles(shouldIgnore),
+      this.tryListTracked(g, 'clearHunksOnBranchSwitch'),
+    ]);
+    if (trackedFiles === undefined) return;
 
     // Clear all in-memory state — fresh start
     this.clearState();

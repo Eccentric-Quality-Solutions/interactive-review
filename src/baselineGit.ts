@@ -66,8 +66,15 @@ async function mapWithLimit<T, R>(
   return results;
 }
 
+/**
+ * The ignore patterns a session starts with. `StateManager` seeds its in-memory copy from
+ * this same list, so a new default lands in both places at once.
+ */
+export const DEFAULT_IGNORE_PATTERNS: readonly string[] =
+  process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'];
+
 const DEFAULT_SETTINGS: Settings = {
-  ignorePatterns: process.platform === 'darwin' ? ['.git', '.DS_Store'] : ['.git'],
+  ignorePatterns: [...DEFAULT_IGNORE_PATTERNS],
   respectGitignore: true,
   clearOnBranchSwitch: false,
   quoteRotationInterval: 30,
@@ -381,6 +388,29 @@ export class BaselineGit {
   }
 
   /**
+   * The index entries under `rel` (one for a file, every descendant for a directory), as
+   * git reports them.
+   *
+   * `-z`, and NOT `.trim().split('\n')`. `ls-files --stage` C-quotes any name holding a
+   * `"`, a backslash or a control character *regardless* of `core.quotepath=false`, so the
+   * line-parsed form hands `"no\"te.txt"` back to `update-index`, which exits 0 and removes
+   * nothing; in `renameFile` the quoted form also fails the prefix arithmetic and re-stages
+   * the blob at a nonsense path. `-z` prints the real bytes. No `.trim()` either: it would
+   * eat the trailing space of a filename that ends in one. `[\s\S]` rather than `.` so a
+   * name containing a newline survives, which is the other thing `-z` buys. The `ls-tree`
+   * readers below make the same choice. Guarded by `baselineGitHardening.test.ts`.
+   */
+  private async stagedEntries(rel: string): Promise<{ mode: string; hash: string; entryRel: string }[]> {
+    const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);
+    const entries: { mode: string; hash: string; entryRel: string }[] = [];
+    for (const line of lsOut.split('\0')) {
+      const m = line.match(/^(\d+) ([0-9a-f]+) \d+\t([\s\S]+)$/);
+      if (m) entries.push({ mode: m[1], hash: m[2], entryRel: normalizePath(m[3]) });
+    }
+    return entries;
+  }
+
+  /**
    * Rename a file (or all files under a directory) in the git index and commit.
    * Reuses existing blob hashes — no content re-hashing needed.
    */
@@ -389,15 +419,9 @@ export class BaselineGit {
     const oldRel = normalizePath(path.relative(this.workTree, oldFilePath));
     const newRel = normalizePath(path.relative(this.workTree, newFilePath));
     try {
-      // ls-files returns all entries matching the path (a single file or all files under a
-      // directory). `-z` for the reason spelled out in `removeFile`, and here the damage
-      // compounds: a C-quoted form does not start with `oldRel`, so the suffix arithmetic
-      // below would re-stage the blob at a nonsense path and leave the real file with no
-      // baseline — which `handleDiskCreateTree` then enters as `nullReason: 'created'`, at
-      // which point Discard unlinks a file the user has had all along.
-      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', oldRel]);
-      const lines = lsOut.split('\0').filter(Boolean);
-      if (lines.length === 0) {
+      // A single file, or every entry under a directory — see `stagedEntries`.
+      const entries = await this.stagedEntries(oldRel);
+      if (entries.length === 0) {
         // No baseline to move, but the source still replaces the target: a baseline left
         // there would review the moved file as an edit of whatever the path held before.
         // A no-op when the target is untracked too. Guarded by `stateManagerGit.test.ts`
@@ -405,15 +429,6 @@ export class BaselineGit {
         await this.removeFile(newFilePath);
         return;
       }
-
-      // Parse all matching entries
-      const entries: { mode: string; hash: string; entryRel: string }[] = [];
-      for (const line of lines) {
-        const m = line.match(/^(\d+) ([0-9a-f]+) \d+\t([\s\S]+)$/);
-        if (!m) continue;
-        entries.push({ mode: m[1], hash: m[2], entryRel: normalizePath(m[3]) });
-      }
-      if (entries.length === 0) return;
 
       // Remove all old entries
       const oldPaths = entries.map(e => e.entryRel);
@@ -457,20 +472,7 @@ export class BaselineGit {
     await this.initGit();
     const rel = normalizePath(path.relative(this.workTree, filePath));
     try {
-      // `-z`, and NOT `.trim().split('\n')`. `ls-files --stage` C-quotes any name holding a
-      // `"`, a backslash or a control character *regardless* of `core.quotepath=false`, so
-      // the line-parsed form hands `"no\"te.txt"` back to `update-index`, which exits 0 and
-      // removes nothing. `-z` prints the real bytes. Every reader of git's path output in
-      // this file does the same — `renameFile`, `listTrackedFiles` and `listTrackedUnder`.
-      //
-      // No `.trim()` either: it would eat the trailing space of a filename that ends in one.
-      // `[\s\S]` rather than `.` so a name containing a newline survives, which is the other
-      // thing `-z` buys. Guarded by `baselineGitHardening.test.ts`.
-      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);
-      const tracked = lsOut.split('\0').filter(Boolean)
-        .map(entry => entry.match(/^\d+ [0-9a-f]+ \d+\t([\s\S]+)$/)?.[1])
-        .filter((p): p is string => p !== undefined)
-        .map(normalizePath);
+      const tracked = (await this.stagedEntries(rel)).map(e => e.entryRel);
       if (tracked.length === 0) return; // not tracked — nothing to remove
       const CHUNK = 200;
       for (let i = 0; i < tracked.length; i += CHUNK) {

@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { StateManager } from '../stateManager';
+import { BaselineUnreadableError } from '../baselineGit';
 
 declare const global: Record<string, unknown>;
 
@@ -553,5 +554,61 @@ describe('StateManager.renameFile onto a pending deletion', () => {
     await sm.rebuildState(ignore);
 
     assert.equal(sm.getFile(target)?.nullReason, 'unbaselined');
+  });
+});
+
+/**
+ * An unreadable tracked list must never read as an empty one.
+ *
+ * `BaselineUnreadableError` means the repo holds baselines it cannot walk (the classic
+ * shape is zero-length object files after an unclean shutdown). `[]` means a repo with no
+ * commits — a legitimately empty baseline. `StateManager.tryListTracked` is what keeps the
+ * two apart for its five callers, and answering `[]` for the damaged case is what turns one
+ * crashed VM into a workspace of null-baseline entries that Discard deletes from disk.
+ *
+ * `BaselineGit` throwing the error at all is pinned in `baselineGit.test.ts`; these pin what
+ * `StateManager` does with it, by making the read fail on the instance.
+ */
+describe('StateManager: a tracked list that cannot be read', () => {
+  const ignore = (fp: string) => fp.startsWith(path.join(root, '.vscode'));
+
+  /** Make every `listTrackedFiles` on this session's repo fail as an unreadable one. */
+  function breakTrackedList(): void {
+    sm.git!.listTrackedFiles = async () => {
+      throw new BaselineUnreadableError('listTrackedFiles', new Error('object file is empty'));
+    };
+  }
+
+  it('leaves in-memory state untouched on a Refresh', async () => {
+    const file = path.join(root, 'a.txt');
+    writeFile(file, 'edited\n');
+    sm.setFile(file, { status: 'reviewing', baseline: 'original\n' });
+    await sm.flush();
+    breakTrackedList();
+
+    await sm.rebuildState(ignore);
+
+    // Read as `[]`, the rebuild clears state and re-adopts every on-disk file as untracked,
+    // so this entry comes back with a null baseline — deletable, and with the user's
+    // original gone from memory, which is now its only surviving record.
+    assert.equal(sm.getFile(file)?.baseline, 'original\n',
+      'a damaged repo must not cost the session the baselines it still holds in memory');
+  });
+
+  it('does not re-snapshot the workspace over the damaged repo on an ignore sync', async () => {
+    const file = path.join(root, 'a.txt');
+    writeFile(file, 'original\n');
+    await sm.snapshotWorkspace(ignore);
+    fs.writeFileSync(file, 'edited since\n');
+    breakTrackedList();
+
+    await sm.syncIgnoreState(ignore);
+    await sm.flush();
+
+    // The file is tracked and has no in-memory entry, so read as `[]` it looks newly
+    // allowed and gets snapshotted at its current content — overwriting the baseline the
+    // user's pending change is measured against.
+    assert.equal(await sm.readBaseline(file), 'original\n',
+      'the baseline must survive a sync that could not read the tracked list');
   });
 });

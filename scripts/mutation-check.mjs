@@ -85,11 +85,11 @@ const MUTATIONS = [
     test: "hunkAtCursor.test.js",
   },
   {
-    desc: "renameFile parses ls-files without -z (C-quoted name re-staged at a nonsense path)",
+    desc: "stagedEntries parses ls-files without -z (C-quoted names: removeFile removes nothing, renameFile re-stages at a nonsense path)",
     file: "src/baselineGit.ts",
     edits: [
-      ["      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', oldRel]);\n      const lines = lsOut.split('\\0').filter(Boolean);",
-       "      const lsOut = await this.git(['ls-files', '--stage', '--', oldRel]);\n      const lines = lsOut.trim().split('\\n').filter(Boolean);"],
+      ["    const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);\n    const entries: { mode: string; hash: string; entryRel: string }[] = [];\n    for (const line of lsOut.split('\\0')) {\n      const m = line.match(/^(\\d+) ([0-9a-f]+) \\d+\\t([\\s\\S]+)$/);",
+       "    const lsOut = await this.git(['ls-files', '--stage', '--', rel]);\n    const entries: { mode: string; hash: string; entryRel: string }[] = [];\n    for (const line of lsOut.trim().split('\\n')) {\n      const m = line.match(/^(\\d+) ([0-9a-f]+) \\d+\\t(.+)$/);"],
     ],
     test: "baselineGitHardening.test.js",
   },
@@ -103,13 +103,13 @@ const MUTATIONS = [
     test: "baselineGitHardening.test.js",
   },
   {
-    desc: "removeFile parses ls-files without -z (C-quoted names silently not removed)",
-    file: "src/baselineGit.ts",
+    desc: "an unreadable tracked list reads as an empty one (damaged repo → workspace of deletable new files)",
+    file: "src/stateManager.ts",
     edits: [
-      ["      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);\n      const tracked = lsOut.split('\\0').filter(Boolean)\n        .map(entry => entry.match(/^\\d+ [0-9a-f]+ \\d+\\t([\\s\\S]+)$/)?.[1])",
-       "      const lsOut = await this.git(['ls-files', '--stage', '--', rel]);\n      const tracked = lsOut.trim().split('\\n').filter(Boolean)\n        .map(entry => entry.match(/^\\d+ [0-9a-f]+ \\d+\\t(.+)$/)?.[1])"],
+      ["      log(`${label}: baseline repo unreadable \u2014 ${err.message}`);\n      return undefined;",
+       "      log(`${label}: baseline repo unreadable \u2014 ${err.message}`);\n      return [];"],
     ],
-    test: "baselineGitHardening.test.js",
+    test: "stateManagerGit.test.js",
   },
   {
     desc: "removeFile force-removes the pathspec, so a directory silently loses nothing",
