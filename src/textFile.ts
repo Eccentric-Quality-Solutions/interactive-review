@@ -3,16 +3,12 @@ import * as fs from 'fs';
 /**
  * Binary detection for the baseline path.
  *
- * The reason this exists at all: `fs.readFile(path, 'utf-8')` **does not throw on binary
- * input**. It decodes what it can and substitutes U+FFFD for the rest, so a PNG read this
- * way yields a plausible-looking string. `readBatch` carried a comment asserting the
- * opposite ("binary files ... fail to read"), and every read site relied on it, so
- * binaries were being stored as replacement-character mush in the baseline repo.
- *
- * That is not merely untidy. A baseline is content the extension will *write back*:
- * `discardHunk` restores a file from its baseline lines. A mojibake baseline therefore
- * means a discard can overwrite a real binary with its own lossy decoding — the file is
- * destroyed, and nothing in the flow looks unusual while it happens.
+ * `fs.readFile(path, 'utf-8')` **does not throw on binary input**: it decodes what it can
+ * and substitutes U+FFFD for the rest, so a PNG read that way yields a plausible-looking
+ * string. A baseline is content the extension will *write back* — `discardHunk` restores a
+ * file from its baseline lines — so a mojibake baseline arms a later discard to overwrite
+ * the real bytes with their own lossy decoding, and nothing in the flow looks unusual while
+ * it happens.
  *
  * The rule this module enforces is narrow and sufficient: **binary content never becomes
  * a baseline.** A *new* binary may still enter review with a `null` baseline (a new
@@ -33,11 +29,12 @@ import * as fs from 'fs';
  * - Current text usually arrives from `doc.getText()`. VS Code strips the BOM on open,
  *   remembers it, and rewrites it on save, so the buffer text **never** has one.
  *
- * A BOM'd file therefore diffed as though its first line always differed: a phantom hunk
- * on line 1 that could not be resolved, since accepting it wrote a BOM-less first line
- * into the baseline while the file on disk kept its BOM. The same mismatch made every
- * hand-save of such a file fall through to review, because `consumeManualSave` compares
- * the saved buffer text against the bytes on disk.
+ * Unnormalized, a BOM'd file diffs as though its first line always differs — an
+ * unresolvable phantom hunk on line 1, since accepting it would write a BOM-less first line
+ * into the baseline while the file on disk kept its BOM — and every hand-save of one falls
+ * through to review, because `consumeManualSave` compares the saved buffer text against the
+ * bytes on disk. Guarded by `diffEngine.test.ts` ("reports no diff when only a leading BOM
+ * differs").
  *
  * Only position 0 is examined. A U+FEFF anywhere else is a zero-width no-break space —
  * real content, and not ours to remove.
@@ -69,9 +66,8 @@ export function withBomFrom(source: string, text: string): string {
  * `withBomFrom` carries the marker from an existing baseline, which covers every file that
  * has one. A file being reviewed with a `null` baseline has nothing to carry: there is no
  * prior text to inherit from, and `doc.getText()` never has a BOM regardless of what the
- * file holds. Accepting a hunk on a new BOM'd file therefore stored a BOM-less baseline
- * and lost the marker on the next restore — the same bug `withBomFrom` fixes elsewhere,
- * surviving in the one case it cannot see. Disk is the only remaining witness.
+ * file holds. Disk is the only remaining witness, so without this, accepting a hunk on a new
+ * BOM'd file would store a BOM-less baseline and lose the marker on the next restore.
  *
  * Three bytes, opened and closed per call. That is affordable on the accept path (one
  * file, one user action) and is why this is not folded into the whole-file reads.

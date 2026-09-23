@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
-// Shared editor/document lookups used by both commands.ts and reviewPanel.ts.
+// Shared lookups for the real on-disk document or editor behind a path — used by the
+// command paths, the panel, and the CodeLens staleness check.
 //
 // The `scheme === 'file'` filter in the finders below is LOAD-BEARING, not
 // cosmetic: when a review diff is open, its baseline side is a document with the

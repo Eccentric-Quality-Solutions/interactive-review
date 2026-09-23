@@ -221,6 +221,10 @@ skips when the test workspace has no `.git/HEAD` at activation). Fixes applied:
 > Zero drops, ~130ms latency — against a 15s wait floor. The full integration suite is also
 > green on that VM at stock limits (the probe itself self-skips unless `WATCHER_PROBE=1`).
 >
+> Scope: these are root-level creates. Files written into a brand-new directory were never
+> probed, and that case did lose events (VS Code registers the recursive watch on a new
+> directory asynchronously) until `handleDiskCreateTree` landed on 2026-09-22.
+>
 > **Both halves of the finding are wrong.** The platform claim is wrong: `createFileSystemWatcher`
 > delivers external create/delete reliably and fast. The proposed *mechanism* is also wrong —
 > the probe writes exactly the way the doc blamed ("from inside the extension-host process",

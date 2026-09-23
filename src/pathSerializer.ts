@@ -5,10 +5,10 @@
  * `FileWatcher` runs every disk-event handler through this, keyed by path. Each handler
  * reads state, awaits a disk read and a baseline read, then writes state from what it read
  * first. Run concurrently, two handlers for one file each decide against a state the other
- * is about to replace, and whichever finishes *last* wins. The case that mattered: writing
- * a new file fires a create and then a change. The change handler, finding no entry yet,
- * classified the file `'unbaselined'`, and when it finished second it overwrote the create
- * handler's `'created'`, so Discard left the agent's file on disk. In arrival order, the
+ * is about to replace, and whichever finishes *last* wins. Writing a new file is the
+ * everyday case: it fires a create and then a change, and out of order the change handler
+ * finds no entry yet, classifies the file `'unbaselined'`, and overwrites the create
+ * handler's `'created'` — so Discard leaves the agent's file on disk. In arrival order the
  * change handler finds the entry the create made and only recomputes its hunks.
  *
  * Kept free of `vscode` so the ordering is unit-tested (`pathSerializer.test.ts`) rather

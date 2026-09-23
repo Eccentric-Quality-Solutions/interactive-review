@@ -13,12 +13,10 @@
  * filenames on normalization-sensitive filesystems. Normalizing unconditionally
  * would conflate different paths into the same Map/Set key, so this function
  * is a no-op on non-macOS platforms.
+ *
+ * The platform split is the whole contract; guarded by `pathNormalize.test.ts`.
  */
 export function normalizePath(p: string): string {
-  // Only normalize on macOS where APFS is normalization-insensitive and
-  // git (core.precomposeUnicode=true) outputs NFC while fs.readdir may
-  // return NFD. On Linux, NFC and NFD can be distinct filenames —
-  // normalizing unconditionally would conflate different paths.
   if (process.platform === 'darwin') {
     return p.normalize('NFC');
   }

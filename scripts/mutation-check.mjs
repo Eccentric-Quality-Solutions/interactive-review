@@ -548,6 +548,47 @@ const MUTATIONS = [
     ],
     test: "hunkApply.test.js",
   },
+  {
+    // Inverting the test rather than deleting the branch, so it kills on either host.
+    // Off macOS the branch now runs: NFD is folded to NFC and the two forms collapse onto
+    // one Map key, against a suite asserting identity. On macOS the branch now never runs,
+    // against a suite asserting the fold. Deleting the branch outright would survive off
+    // macOS, where identity is the unmutated behaviour anyway.
+    desc: "path normalization applied off macOS (distinct NFC/NFD filenames collapse)",
+    file: "src/pathNormalize.ts",
+    edits: [
+      ["  if (process.platform === 'darwin') {",
+       "  if (process.platform !== 'darwin') {"],
+    ],
+    test: "pathNormalize.test.js",
+  },
+  {
+    desc: "findFileDocument unfiltered by scheme (returns the read-only baseline doc)",
+    file: "src/editorUtils.ts",
+    edits: [
+      ["    d => d.uri.scheme === 'file' && d.uri.fsPath === filePath",
+       "    d => d.uri.fsPath === filePath"],
+    ],
+    test: "editorUtils.test.js",
+  },
+  {
+    desc: "findFileEditor unfiltered by scheme (returns the baseline pane)",
+    file: "src/editorUtils.ts",
+    edits: [
+      ["    e => e.document.uri.scheme === 'file' && e.document.uri.fsPath === filePath",
+       "    e => e.document.uri.fsPath === filePath"],
+    ],
+    test: "editorUtils.test.js",
+  },
+  {
+    desc: "revealHunkPosition unclamped (a hunk at the top of the file reveals line -1)",
+    file: "src/editorUtils.ts",
+    edits: [
+      ["new vscode.Position(Math.max(0, newStart - 1), 0)",
+       "new vscode.Position(newStart - 1, 0)"],
+    ],
+    test: "editorUtils.test.js",
+  },
 ];
 
 // The file currently holding a mutation, so a signal or crash can put it back.

@@ -99,19 +99,16 @@ export class StateManager {
    * otherwise. So the baseline has two representations — this map and VS Code's
    * cache — and only this event keeps them equal.
    *
-   * It exists because the notification used to hang off the *accept* commands
-   * instead, which got the ordering exactly backwards on the path that matters:
-   * a final accept runs `exitReviewing` (entry deleted) and only *then* notified,
-   * so the provider re-ran against an absent entry and cached `''`. Re-entering
-   * reviewing after the next edit wrote a fresh baseline into the map and notified
-   * nobody, so the next `vscode.diff` was served the empty cache and painted the
-   * whole file as changed — while `computeHunks`, reading this map directly,
-   * reported the one real hunk. Rejecting to completion did the same thing and
-   * never notified at all.
+   * Fired from the mutation, never from the caller (ADR-0011). Hanging it off the
+   * accept/reject commands instead gets the ordering backwards on the path that
+   * matters: a final accept deletes the entry and only then notifies, so the
+   * provider caches `''`, and the *next* writer — re-entering reviewing after a
+   * further edit — is not a command and notifies nobody. The next `vscode.diff` is
+   * then served that empty cache and paints the whole file as changed, while
+   * `computeHunks` reads this map directly and reports the one real hunk.
    *
-   * Hence: fired from the mutation, not from the caller. `writeState`/`dropState`/
-   * `clearState` below are the only writers to `this.state` for that reason — a
-   * bare `this.state.set` anywhere else silently reintroduces the bug.
+   * `writeState`/`dropState`/`clearState` below are the only writers to `this.state`
+   * for that reason — a bare `this.state.set` anywhere else silently reopens the gap.
    */
   private readonly baselineChanged = new vscode.EventEmitter<string>();
   readonly onDidChangeBaseline = this.baselineChanged.event;
@@ -231,10 +228,9 @@ export class StateManager {
    * no witnessed create, which `adoptedNullReason` answers `'unbaselined'`: Discard keeps
    * it. Guarded by `stateManagerGit.test.ts` ("a file unreadable at Begin review").
    *
-   * The binary case needs an explicit test rather than the failed read this comment used
-   * to claim. `fs.readFile(path, 'utf-8')` does not throw on binary input — it returns
-   * replacement characters — so the old form baselined binaries as mush that a later
-   * discard would write back over the real file. See `textFile.ts`.
+   * The binary case needs an explicit check, not a failed read: `fs.readFile(path, 'utf-8')`
+   * does not throw on binary input, it returns replacement characters, and baselining those
+   * arms a later discard to write the mush back over the real file. See `textFile.ts`.
    */
   private async readBatch(filePaths: string[]): Promise<{ filePath: string; content: string }[]> {
     const batch: { filePath: string; content: string }[] = [];
@@ -391,7 +387,6 @@ export class StateManager {
       // A rescan sees only the *result* — on disk, no blob — which a genuinely new file
       // and one we failed to baseline produce identically. The discrimination therefore
       // happens in `collectUntrackedFiles` above, not here.
-      //
       this.writeState(filePath, { status: 'reviewing', baseline: null, nullReason: this.adoptedNullReason(filePath) });
     }
     return untracked;
@@ -401,15 +396,14 @@ export class StateManager {
    * The `nullReason` for a file adopted by a rescan: `'created'` only when the session
    * witnessed the create and has not classified the path `'unbaselined'` since.
    *
-   * No record reads as `'unbaselined'` — the value Discard keeps. This used to answer
-   * `'created'` on the argument that readable text with no blob is "overwhelmingly" a new
-   * file, and every way of losing the record then became a way of deleting a user's file:
-   * a file ignored at Begin review and un-ignored before a reload, the children of a renamed
-   * directory, a filename git reports C-quoted, a damaged record. Each was a separate bug
-   * with a separate fix. Requiring positive evidence closes them as a class. The cost runs
-   * the safe way: a new file whose witness was lost is kept on Discard, and the user
-   * deletes it by hand. Guarded by `stateManagerGit.test.ts` ("a file with no record is
-   * never adopted as deletable").
+   * No record reads as `'unbaselined'` — the value Discard keeps. Inferring `'created'`
+   * from "readable text with no blob" instead would make every way of losing the record a
+   * way of deleting a user's file: a file ignored at Begin review and un-ignored before a
+   * reload, the children of a renamed directory, a filename git reports C-quoted, a damaged
+   * record. Requiring positive evidence closes those as a class, and the cost runs the safe
+   * way — a new file whose witness was lost is kept on Discard, and the user deletes it by
+   * hand. Guarded by `stateManagerGit.test.ts` ("a file with no record is never adopted as
+   * deletable").
    *
    * Both sets are needed. `sessionCreated` is monotonic, so it still holds a witness for a
    * path discarded as 'created' and later restored by the user; `sessionUnbaselined` holds
@@ -474,9 +468,9 @@ export class StateManager {
    * re-snapshot the workspace exactly as `Begin review` would, which leaves current
    * disk content as the new baseline and the review queue empty.
    *
-   * The alternative — letting the caller fall through to adopting every untracked file
-   * — is what turned one crashed VM into a 3807-file queue of null-baseline entries,
-   * each of which `Discard` deletes from disk. A lost review session is a nuisance; a
+   * The alternative — letting the caller fall through to adopting every untracked file —
+   * turns one crashed VM into a workspace-sized queue of null-baseline entries, every one
+   * of which `Discard` deletes from disk. A lost review session is a nuisance; a
    * "Discard all" that unlinks the whole workspace is not.
    *
    * Surfaced to the user rather than logged only: the session silently emptying looks
@@ -795,17 +789,16 @@ export class StateManager {
    * Remove `dirPath` and everything beneath it, from memory and from the baseline repo.
    *
    * `removeFile` cannot do this job, and fails at it *silently*: it runs
-   * `git update-index --force-remove -- <dir>`, which **exits 0 having removed nothing**
-   * (confirmed against a scratch repo with two tracked files under one directory, both
-   * still present afterwards). Git's index has no directory entries to remove.
-   *
-   * The visible consequence was a folder deleted in the Explorer leaving every file under
-   * it still tracked with a baseline, so the next Refresh or window reload surfaced the
-   * whole folder as a queue of pending deletions the user had already carried out.
+   * `git update-index --force-remove -- <dir>`, which **exits 0 having removed nothing**,
+   * because git's index has no directory entries to remove. A folder deleted in the
+   * Explorer would then leave every file under it still tracked with a baseline, and the
+   * next Refresh or window reload would surface the whole folder as a queue of pending
+   * deletions the user had already carried out.
    *
    * The in-memory sweep alone is not enough either, which is why this reads the tracked
    * list: a file that was never edited has a baseline in git but no entry in `state`, and
-   * those are exactly the ones that came back as phantom deletions.
+   * those are exactly the phantom deletions. Guarded by `stateManagerGit.test.ts`
+   * ("removes every baseline under the directory, including files never edited").
    *
    * No rollback, deliberately. The directory is already gone from disk, so restoring the
    * entries would only re-desync state from the filesystem — the same reasoning
@@ -1040,11 +1033,10 @@ export class StateManager {
     let failure: unknown;
     if (batch.length > 0) {
       // Through `gitQueue`, not a bare await, matching every other `snapshotBatch` call
-      // site. The queue exists because concurrent git invocations contend on
-      // `.git/index.lock` and the loser throws — and every queue consumer swallows that
-      // error, so a collision costs a file its baseline silently. Running off-queue was
-      // survivable only while nothing else wrote git during enable; `handleDiskCreate`'s
-      // adopt-during-snapshot branch now does exactly that.
+      // site: concurrent git invocations contend on `.git/index.lock` and the loser throws,
+      // and every queue consumer swallows that error, so a collision costs a file its
+      // baseline silently. `handleDiskCreate`'s adopt-during-snapshot branch writes git
+      // during enable, so this call is not alone on the queue.
       //
       // The failure is captured and re-thrown. A snapshot that fails leaves the session
       // enabled over a repo with no baselines, which renders as an empty review queue —
@@ -1052,13 +1044,12 @@ export class StateManager {
       // surfaces as a whole-file "unbaselined" hunk. That is the one state where silence
       // actively misleads.
       //
-      // Re-thrown rather than reported from here, because the two callers must react
-      // differently and only they know how. `enableReview` tells the user and rejects, so an
-      // agent awaiting Begin review learns the baseline is not on disk instead of being told
-      // it succeeded. `recoverLostBaseline` needs it to reach its own failure branch: it
-      // sets `rebuilt = true` on the next line, so swallowing here made it announce "a fresh
-      // baseline has been taken" *alongside* the failure message — two notifications
-      // contradicting each other.
+      // Re-thrown rather than reported from here, because the two callers react differently
+      // and only they know how. `enableReview` tells the user and rejects, so an agent
+      // awaiting Begin review learns the baseline is not on disk. `recoverLostBaseline`
+      // needs it to reach its own failure branch, or it announces "a fresh baseline has been
+      // taken" alongside the failure message. Guarded by `stateManagerGit.test.ts`
+      // ("rejects when the baseline cannot be written").
       //
       // `enqueue`'s own `.catch` stays in play: the chain must remain usable for later
       // operations, so the failure is captured out through `onFailure` rather than thrown.
@@ -1168,10 +1159,10 @@ export class StateManager {
     // Test `shouldIgnore` directly rather than "missing from allowedFiles":
     // collectWorkspaceFiles only walks what exists on disk, so a *deleted* file
     // awaiting review is absent from it for a reason that has nothing to do with
-    // ignore rules. Removing on absence git-rm'd its baseline, which permanently
-    // dropped the pending deletion from review the moment any .gitignore changed.
-    // Deletions are the file watcher's and rebuildState's business, not this
-    // function's — it syncs ignore rules and nothing else.
+    // ignore rules. Removing on absence would git-rm its baseline and permanently drop
+    // the pending deletion from review the moment any .gitignore changed. Deletions are
+    // the file watcher's and rebuildState's business, not this function's — it syncs
+    // ignore rules and nothing else.
     const toRemove = trackedFiles.filter(fp => shouldIgnore(fp));
     // Also remove in-memory state entries that are ignored but have no git baseline (e.g. new files in reviewing)
     const removeSet = new Set(toRemove);

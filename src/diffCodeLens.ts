@@ -38,29 +38,16 @@ export class DiffCodeLensProvider implements vscode.CodeLensProvider {
     const lenses: vscode.CodeLens[] = [];
 
     for (const hunk of hunks) {
-      // Anchor on the hunk's FIRST line, not the line after its last.
-      //
-      // A CodeLens renders immediately above its anchor, so anchoring past the end of the
-      // hunk put the buttons *below* the block they act on — and therefore directly above
-      // whatever came next. With adjacent hunks that is actively misleading rather than
-      // merely odd: the reader's eye binds the buttons to the block beneath them, which
-      // belongs to a different hunk.
-      //
-      // It is worst exactly where it matters most. A hunk that deletes a large block
-      // occupies almost no space in the modified document — one real case from this repo
-      // removed 13 baseline lines while occupying a single modified line — yet the inline
-      // diff paints all 13 deleted rows on screen. So a big red block would be flanked by
-      // the Accept button of its one-line neighbour, and clicking it resolved the
-      // neighbour while the big block stayed put. That is the "I click Accept and it only
-      // removes one of them" report.
-      // `lensLineForHunk` is property-tested in diffEngine.test.ts: its anchor must resolve
-      // back to its own hunk, which the old line-after-the-hunk anchor did not.
+      // A CodeLens renders immediately *above* its anchor, so the anchor decides which
+      // block the buttons appear to belong to. `lensLineForHunk` answers with the hunk's
+      // first line and is property-tested in diffEngine.test.ts; anchoring anywhere past
+      // the hunk puts the buttons above the *next* block, which with adjacent hunks means
+      // clicking Accept resolves a hunk the user was not looking at.
       const line = lensLineForHunk(hunk, document.lineCount);
       const range = new vscode.Range(line, 0, line, 0);
       const id = hunkId(hunk);
-      // State the extent on the button. Every hunk's lens read an identical bare "Accept",
-      // so nothing on screen distinguished a one-line tweak from a thirteen-line deletion
-      // before committing to it. Mirrors the +/- wording the panel already uses.
+      // State the extent on the button, so a one-line tweak and a thirteen-line deletion
+      // are distinguishable before committing to either. Mirrors the panel's +/- wording.
       const extent = `+${hunk.newLines}/-${hunk.oldLines}`;
 
       lenses.push(

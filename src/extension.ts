@@ -35,10 +35,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
         const filePath = uri.fsPath;
         const fileState = stateManager.getFile(filePath);
         if (fileState) return fileState.baseline ?? '';  // null baseline → '' for diff display
-        // No entry means nothing is pending, so the original side must match the file. It
-        // used to be `''`, which painted the whole file as added whenever VS Code re-fetched
-        // a diff for a file that had left review (reopening a closed tab, say). Guarded by
-        // `diffEditor.test.ts` ("a file that has left review").
+        // No entry means nothing is pending, so the original side must match the file.
+        // Answering `''` here instead paints the whole file as added whenever VS Code
+        // re-fetches a diff for a file that has left review — reopening a closed tab, say.
+        // Guarded by `diffEditor.test.ts` ("a file that has left review").
         try {
           return (await stateManager.readBaseline(filePath)) ?? readTextFileSync(filePath) ?? '';
         } catch {
@@ -112,7 +112,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
    *
    * Driven off `onDidChangeBaseline` rather than called from the accept/reject
    * commands: the baseline is state's to own, and hanging the notification off the
-   * commands left every other writer (enter-reviewing, rollback, rename, clear) —
+   * commands leaves every other writer (enter-reviewing, rollback, rename, clear) —
    * and reject entirely — silently stale. See the event's doc comment.
    *
    * Still exported to `ReviewPanel` as a belt-and-braces refresh immediately before
@@ -125,14 +125,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   context.subscriptions.push(stateManager, stateManager.onDidChangeBaseline(filePath => {
     // Do NOT invalidate the cached baseline for a file that has just *left* review.
     //
-    // This was the whole-file-turns-green flash on the last accept: `exitReviewing` drops
-    // the state entry, `dropState` fires this event, and the content provider used to
-    // answer a missing entry with `''`, so the editor repainted every line as added while
-    // `closeStaleTabs` was on its way to close the tab. The provider now answers with the
-    // recorded baseline, so the flash no longer depends on this skip; it stays because the
-    // tab is closing anyway, and a re-fetch would cost a git read for nothing.
+    // `exitReviewing` drops the state entry and `dropState` fires this event, but the tab
+    // is closing anyway, so a re-fetch would cost a git read for nothing. (The provider
+    // answers a missing entry with the recorded baseline rather than `''`, so correctness
+    // does not rest on this skip — it is purely the saved read.)
     //
-    // It does not reintroduce the ADR-0011 defect, which was the *opposite* ordering
+    // It does not reintroduce the ADR-0011 defect, which is the *opposite* ordering
     // problem: re-entering review writes a fresh baseline through `writeState`, and that
     // still fires here (the entry is `reviewing` by then), so the cache is corrected
     // before the next diff opens. `ReviewPanel` also re-fires immediately before every
@@ -192,14 +190,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   }
 
   /**
-   * Rejection handler for the review commands, every one of which is fire-and-forget:
-   * `registerCommand` callbacks return void, so a rejected accept/reject promise has
-   * nowhere to surface. These operations write to disk and apply workspace edits, so
-   * they genuinely fail (read-only file, full volume, an edit VS Code declines) — and
-   * unhandled, the failure is invisible: the lens or keybinding appears to have worked
-   * while nothing changed. Log it and tell the user, who can then retry.
-   */
-  /**
    * Does this CodeLens click carry a hunk id that no longer resolves?
    *
    * Hunk ids are derived from position and content, so every accept or discard renumbers
@@ -227,6 +217,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
     return true;
   }
 
+  /**
+   * Rejection handler for the review commands, every one of which is fire-and-forget:
+   * `registerCommand` callbacks return void, so a rejected accept/reject promise has
+   * nowhere to surface. These operations write to disk and apply workspace edits, so
+   * they genuinely fail (read-only file, full volume, an edit VS Code declines) — and
+   * unhandled, the failure is invisible: the lens or keybinding appears to have worked
+   * while nothing changed. Log it and tell the user, who can then retry.
+   */
   function reportCommandFailure(label: string, filePath: string): (err: unknown) => void {
     return err => {
       const name = path.basename(filePath);
@@ -295,13 +293,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
 
   // Panel refresh on typing, debounced.
   //
-  // This was an undebounced `refresh()` on every keystroke in any file, and `refresh`
-  // rebuilds the whole panel: Myers over every reviewing file, reading the unopened ones
-  // from disk. With a sizeable queue that is felt as typing lag, and it is a plausible
-  // cause of the "Accept/Discard showing up much more slowly" report that was attributed
-  // to running on a VM. 150ms is long enough to coalesce a burst of typing and short
-  // enough that the panel still tracks the buffer; the watcher's own document listener
-  // debounces at 50ms for the heavier recompute.
+  // `refresh` rebuilds the whole panel — Myers over every reviewing file, reading the
+  // unopened ones from disk — so running it per keystroke is felt as typing lag once the
+  // queue is sizeable. 150ms is long enough to coalesce a burst of typing and short enough
+  // that the panel still tracks the buffer; the watcher's own document listener debounces
+  // at 50ms for the heavier recompute.
   let panelRefreshTimer: NodeJS.Timeout | undefined;
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(e => {

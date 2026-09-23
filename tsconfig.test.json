@@ -29,6 +29,7 @@
     "src/log.ts",
     "src/baselineGit.ts",
     "src/pathNormalize.ts",
+    "src/editorUtils.ts",
     "src/buildInfo.ts",
     "src/pathSerializer.ts"
   ],

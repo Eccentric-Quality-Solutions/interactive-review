@@ -124,10 +124,10 @@ export class BaselineGit {
       GIT_TERMINAL_PROMPT: '0',
       // Every path this class hands to git is a literal filename, never a pattern. Without
       // this git reads `[...]`, `*` and `?` in a pathspec as glob syntax, so a file named
-      // `x[1].txt` matched `x1.txt` as well — confirmed against a scratch repo, where
-      // renaming one file rewrote the other's baseline entry. Set on the environment rather
-      // than per-call so `ls-files`, `update-index --force-remove` and any future pathspec
-      // site are covered by construction.
+      // `x[1].txt` also matches `x1.txt` and renaming one rewrites the other's baseline
+      // entry. Set on the environment rather than per-call so `ls-files`,
+      // `update-index --force-remove` and any future pathspec site are covered by
+      // construction. Guarded by `baselineGitHardening.test.ts`.
       GIT_LITERAL_PATHSPECS: '1',
     };
   }
@@ -347,11 +347,8 @@ export class BaselineGit {
    * The `stdin` error listener is load-bearing rather than defensive tidiness: writing to
    * git's stdin emits EPIPE if git exits early, and with no listener Node rethrows it as
    * an uncaught exception that takes the extension host down — a try/catch around the
-   * await cannot see an unhandled stream `'error'` event.
-   *
-   * It lives here because it used to live in two places, `snapshot` and `snapshotBatch`,
-   * character for character. One copy of a host-crash fix is the entire point: the second
-   * copy is the one that eventually loses the listener.
+   * await cannot see an unhandled stream `'error'` event. Both `snapshot` and
+   * `snapshotBatch` hash through here so there is only one copy of that listener to lose.
    */
   private hashObject(content: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
@@ -393,14 +390,11 @@ export class BaselineGit {
     const newRel = normalizePath(path.relative(this.workTree, newFilePath));
     try {
       // ls-files returns all entries matching the path (a single file or all files under a
-      // directory). `-z` for the reason spelled out in `removeFile`: `ls-files --stage`
-      // C-quotes a name holding a `"`, a backslash or a control character even under
-      // `core.quotepath=false`, and here the damage compounds. The quoted form does not start
-      // with `oldRel`, so the suffix arithmetic below produced paths like `ed/no\"te.txt"` —
-      // the force-remove hit nothing and the blob was re-staged at nonsense, leaving the real
-      // file with no baseline at all. `handleDiskCreateTree` then walks the renamed directory,
-      // finds a child with no baseline, and enters it as `nullReason: 'created'` — at which
-      // point Discard unlinks a file the user has had all along.
+      // directory). `-z` for the reason spelled out in `removeFile`, and here the damage
+      // compounds: a C-quoted form does not start with `oldRel`, so the suffix arithmetic
+      // below would re-stage the blob at a nonsense path and leave the real file with no
+      // baseline — which `handleDiskCreateTree` then enters as `nullReason: 'created'`, at
+      // which point Discard unlinks a file the user has had all along.
       const lsOut = await this.git(['ls-files', '--stage', '-z', '--', oldRel]);
       const lines = lsOut.split('\0').filter(Boolean);
       if (lines.length === 0) {
@@ -450,11 +444,11 @@ export class BaselineGit {
    *
    * The directory case is why this removes the entries git *reports* rather than the
    * pathspec that found them. `update-index --force-remove -- <dir>` **exits 0 having
-   * removed nothing** — git's index has no directory entries — which is the same silent
-   * failure `StateManager.removePathAndChildren` was written to work around, reachable here
-   * through `renameFile`'s untracked-source fallback: renaming a directory onto another
-   * directory left every baseline under the target in place, so the next reload reviewed
-   * the moved files as edits of whatever used to occupy those paths.
+   * removed nothing** — git's index has no directory entries. Reached through `renameFile`'s
+   * untracked-source fallback, that silent no-op leaves every baseline under the target of a
+   * directory rename in place, so the next reload reviews the moved files as edits of
+   * whatever used to occupy those paths. `StateManager.removePathAndChildren` guards the
+   * same trap on the in-memory side.
    *
    * For the ordinary single-file call this is the same operation it always was: `ls-files`
    * reports one entry whose path is the one that was passed in.
@@ -466,14 +460,12 @@ export class BaselineGit {
       // `-z`, and NOT `.trim().split('\n')`. `ls-files --stage` C-quotes any name holding a
       // `"`, a backslash or a control character *regardless* of `core.quotepath=false`, so
       // the line-parsed form hands `"no\"te.txt"` back to `update-index`, which exits 0 and
-      // removes nothing — the exact silent no-op this method was just fixed to stop doing,
-      // reintroduced through the other door. `-z` prints the real bytes. Every reader of
-      // git's path output in this file now does the same — `renameFile`, `listTrackedFiles`
-      // and `listTrackedUnder` — because each was found wrong in turn.
+      // removes nothing. `-z` prints the real bytes. Every reader of git's path output in
+      // this file does the same — `renameFile`, `listTrackedFiles` and `listTrackedUnder`.
       //
       // No `.trim()` either: it would eat the trailing space of a filename that ends in one.
       // `[\s\S]` rather than `.` so a name containing a newline survives, which is the other
-      // thing `-z` buys.
+      // thing `-z` buys. Guarded by `baselineGitHardening.test.ts`.
       const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);
       const tracked = lsOut.split('\0').filter(Boolean)
         .map(entry => entry.match(/^\d+ [0-9a-f]+ \d+\t([\s\S]+)$/)?.[1])
@@ -499,15 +491,11 @@ export class BaselineGit {
     if (files.length === 0) return;
     await this.initGit();
     try {
-      // Hash blobs concurrently but BOUNDED. This was a bare `Promise.all` over every
-      // file, which spawns one `git hash-object` process per workspace file — a few
-      // thousand at once in a real repo, which fails as a group on EMFILE/EAGAIN.
-      //
-      // The failure mode was what made it serious rather than slow: the catch below
-      // swallowed it, so `Begin review` came up enabled with an *empty* baseline repo,
-      // which looks exactly like "nothing to review". Every subsequent edit then surfaced
-      // as a whole-file unbaselined hunk. `snapshotWorkspace` now reports the throw to the
-      // user; this cap is what stops it happening in the first place.
+      // Hash blobs concurrently but BOUNDED. An unbounded `Promise.all` spawns one
+      // `git hash-object` process per workspace file — a few thousand at once in a real
+      // repo — which fails as a group on EMFILE/EAGAIN, leaving `Begin review` enabled
+      // over an *empty* baseline repo that looks exactly like "nothing to review".
+      // `snapshotWorkspace` reports that throw to the user; this cap stops it arising.
       const entries = await mapWithLimit(files, HASH_CONCURRENCY, async ({ filePath, content }) => ({
         rel: normalizePath(path.relative(this.workTree, filePath)),
         hash: await this.hashObject(content),
@@ -573,26 +561,17 @@ export class BaselineGit {
       // tracked", and it relies on git FAILING for a path with no index entry. `git show`
       // does not reliably fail: when `:<path>` does not resolve as an object, show falls
       // back to reading the argument as a *pathspec*, and git accepts any argument
-      // containing glob characters as a pathspec without it having to match anything.
+      // containing glob characters as a pathspec without it having to match anything. So
+      // `git show :x[1].txt` exits 0 for an untracked `x[1].txt` and routes it down the
+      // tracked-file path. `cat-file` is plumbing that takes an object name and never falls
+      // back to a pathspec, and `blob` asserts the type.
       //
-      // So for an untracked `x[1].txt`, `git show :x[1].txt` exited 0. Before
-      // GIT_LITERAL_PATHSPECS it printed the HEAD commit — a commit header and diff
-      // returned as if it were the file's baseline. With literal pathspecs it printed
-      // nothing, which callers read as "tracked, and the file was empty". Both routed an
-      // untracked file down the tracked-file path. Plain names were never affected, which
-      // is why nothing caught it; the pathspec regression test exposed it.
+      // The explicit stage number is load-bearing for the same class of reason. `:<path>`
+      // is ambiguous: git reads `:<n>:<rest>` as "stage n of <rest>", so a root file named
+      // `1:notes.txt` is looked up as stage 1 of `notes.txt` and reported untracked.
+      // `:0:<path>` pins stage 0 — the only stage this repo ever writes.
       //
-      // `cat-file` is plumbing that takes an object name and never falls back to a
-      // pathspec, and `blob` asserts the type. It returns the raw bytes with no porcelain
-      // processing in between.
-      //
-      // The explicit stage number is load-bearing. `:<path>` is itself ambiguous: git reads
-      // `:<n>:<rest>` as "stage n of <rest>", so a root file named `1:notes.txt` was looked
-      // up as stage 1 of `notes.txt` and reported untracked. `:0:<path>` pins stage 0 — the
-      // only stage this repo ever writes — so the path is never reparsed. (An earlier
-      // version of this comment claimed `cat-file` could never reinterpret its argument;
-      // that was true of pathspecs and false of this. Pinned by
-      // baselineGitHardening.test.ts.)
+      // Both pinned by `baselineGitHardening.test.ts`; plain filenames exercise neither.
       return await this.git(['cat-file', 'blob', `:0:${rel}`]);
     } catch {
       return undefined;
@@ -620,7 +599,7 @@ export class BaselineGit {
       // `-z`, matching `listTrackedUnder`: `ls-tree --name-only` C-quotes the same names
       // `ls-files` does, and a quoted path joined to the work tree is a path that does not
       // exist — so `removePathAndChildren`, the branch-switch re-sync and `syncIgnoreState`
-      // all silently skipped those files. The per-line `.trim()` went with it: it ate the
+      // would all silently skip those files. No per-line `.trim()` either: it eats the
       // leading and trailing whitespace of names that legitimately carry it, which is the
       // other thing `-z` exists to preserve.
       const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r', '-z']);

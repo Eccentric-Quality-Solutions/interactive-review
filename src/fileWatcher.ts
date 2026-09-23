@@ -73,14 +73,15 @@ export class FileWatcher {
   private onIgnoreRulesChanged: (() => void) | undefined;
   /**
    * Called after a watcher-driven `exitReviewing`, to close the file's now-stale
-   * diff tab. The command paths (accept/reject) already do this via
-   * `walkAfterResolve`; these three sites are the ones that never did.
+   * diff tab. The command paths (accept/reject) do the same through `walkAfterResolve`;
+   * this callback is how the watcher paths reach it.
    *
-   * It became load-bearing when `StateManager` started firing `onDidChangeBaseline`
-   * on delete: the baseline document for a dropped entry now correctly re-renders as
-   * `''`, so an open diff tab repaints the whole file as added. Undo-to-baseline with
-   * the diff open is the reachable case. Closing the tab is the fix — suppressing the
-   * notification instead would restore the old behaviour only by pairing two errors.
+   * Load-bearing because such an exit leaves a review diff tab open over a file that is
+   * no longer in `state`: `DiffCodeLensProvider` returns no lenses for it, so the tab is
+   * an inert diff with no way to act on it — and on the delete paths its modified side is
+   * no longer on disk at all. Undoing an edit back to the baseline with the diff open is
+   * the everyday case. `closeStaleTabs` is the consumer, and it reopens a normal editor
+   * when the file still exists.
    *
    * Deliberately *not* driven off `onDidChangeBaseline` in `extension.ts`, which would
    * be the tidier seam: `clearState` fires once per path, so a teardown with N files
@@ -180,13 +181,12 @@ export class FileWatcher {
             // Moving a file into an ignored location takes it out of review, rather than
             // migrating its entry there.
             //
-            // The migration used to happen unconditionally, and `load()`/`rebuildState()`
-            // both skip ignored paths — so memory kept a `reviewing` entry at a path no
-            // rescan could ever produce, and for a witnessed create that entry still
-            // offered a Discard that *deletes*. Moving something into `dist/` or
-            // `node_modules/` is the everyday way to reach it. Found by the random walk in
-            // `reloadEqualsMemory.test.ts` once a file could be ignored at Begin review, and
-            // pinned there by "renaming into an ignored location".
+            // `load()`/`rebuildState()` both skip ignored paths, so migrating the entry
+            // instead would leave memory holding a `reviewing` entry at a path no rescan
+            // can produce — and for a witnessed create, one that still offers a Discard
+            // that *deletes*. Moving something into `dist/` or `node_modules/` is the
+            // everyday way to reach it. Guarded by `reloadEqualsMemory.test.ts`
+            // ("renaming into an ignored location").
             //
             // `removePathAndChildren`, not `removeFile`: the source may be a directory, for
             // which git removes nothing — see that method's note.
@@ -383,9 +383,9 @@ export class FileWatcher {
     this.pendingManualSaves.delete(filePath);
     // BOM-insensitive, and *only* BOM-insensitive. The token holds `doc.getText()`, which
     // VS Code has already stripped the BOM from, while `diskContent` is the raw bytes it
-    // just wrote — BOM included. Comparing them directly meant every hand-save of a BOM'd
-    // file failed to match and fell through to review, which is precisely the "your own
-    // typing enters the queue" outcome this mechanism exists to prevent.
+    // just wrote — BOM included. Comparing them directly would fail to match on every
+    // hand-save of a BOM'd file and fall through to review, which is precisely the "your
+    // own typing enters the queue" outcome this mechanism exists to prevent.
     //
     // This does not loosen the guarantee in ADR-0006. Equality still has to hold across
     // the entire file; the two strings simply have to agree about content rather than
@@ -453,8 +453,8 @@ export class FileWatcher {
    * text): the next external write of byte-identical content would match it and be
    * absorbed into the baseline instead of surfaced for review — the silent data loss
    * `consumeManualSave`'s exact comparison exists to prevent. Handlers return early on
-   * many paths (suppressed, ignored, not-enabled, read failure, already reviewing), and
-   * each one used to strand the token.
+   * many paths (suppressed, ignored, not-enabled, read failure, already reviewing), so
+   * releasing per-exit by hand is exactly what one of them will eventually forget.
    *
    * Discarding is always the safe direction: an unconsumed token costs at most a spurious
    * hunk on the user's own save, which they can accept in one keystroke.
@@ -483,8 +483,8 @@ export class FileWatcher {
         // a feature) produces no event at all — not a late one, none — and would stay
         // invisible until someone happened to press Refresh, with the panel meanwhile
         // reporting the review complete. The parent directory's own create DOES arrive,
-        // because its parent was already watched, so walk the subtree from here.
-        // Counterpart to the delete-side fix in `00ecbbb`.
+        // because its parent was already watched, so walk the subtree from here. The
+        // delete side has the mirror-image gap — see `onDiskDelete`'s child sweep.
         if (await isRealDirectory(filePath)) {
           await this.handleDiskCreateTree(filePath, arrival);
           return;
@@ -552,14 +552,10 @@ export class FileWatcher {
   /**
    * Is this event still worth acting on — same session, still enabled, not suppressed?
    *
-   * Three conditions that every handler needs and that were previously written out at each
-   * site, both in the opening guard and again after every await. The rewrite that merged
-   * them also *strengthened* the post-await checks, which used to compare the session
-   * alone: a branch switch suppresses the watcher and clears state without opening a new
-   * session, so a handler that woke up mid-switch passed the session check and wrote a
-   * false entry straight through the clear. `onDiskDelete`'s child loop had already found
-   * that the hard way and spelled the full condition out; this is that condition, applied
-   * everywhere it was always needed.
+   * All three are needed, in the opening guard and again after every await. The session
+   * alone is not enough: a branch switch suppresses the watcher and clears state *without*
+   * opening a new session, so a handler that wakes mid-switch would pass a session-only
+   * check and write a false entry straight through the clear.
    *
    * `session` must be the value sampled on *arrival* (see `arrival`), never re-read here.
    * Deliberately does not cover `shouldIgnore` or `selfEditFiles`: those differ per handler
@@ -762,11 +758,12 @@ export class FileWatcher {
       }
 
       // The sweep above only sees files already in `state`. A child never edited this
-      // session has a baseline but no entry, so only the baseline repo knows it was there.
-      // Without this pass its deletion stayed out of the queue until the next Refresh, and
-      // ending the review first threw its baseline away. Children are read one at a time:
+      // session has a baseline but no entry, so only the baseline repo knows it was there;
+      // without this pass its deletion stays out of the queue until the next Refresh, and
+      // ending the review first throws its baseline away. Children are read one at a time:
       // a deleted directory can be large, and this must not start a git process per file
-      // at once.
+      // at once. Guarded by `deleteRestore.test.ts` ("an externally deleted directory
+      // queues every baselined child, untouched ones too").
       let tracked: string[] = [];
       try {
         tracked = await this.stateManager.listTrackedUnder(filePath);

@@ -36,9 +36,34 @@ function store(): TestConfigStore {
     ?? __setTestConfig({ global: {}, defaults: {} });
 }
 
+/** The minimum of a `TextDocument` that `editorUtils` reads. */
+export interface TestDocument {
+  uri: { scheme: string; fsPath: string };
+}
+
+/** The minimum of a `TextEditor` that `editorUtils` reads. */
+export interface TestEditor {
+  document: TestDocument;
+  viewColumn: number | undefined;
+  selection?: unknown;
+}
+
+/**
+ * Seed `workspace.textDocuments` and `window.visibleTextEditors`.
+ *
+ * On `global` for the same reason as the settings store: the module under test loads its
+ * own copy of this mock, so only the global object is shared between them.
+ */
+export function __setTestEditors(docs: TestDocument[], editors: TestEditor[] = []): void {
+  global.__reviewTestDocuments = docs;
+  global.__reviewTestEditors = editors;
+}
+
 export const workspace = {
-  /** No open documents: code under test falls back to reading files from disk. */
-  textDocuments: [] as unknown[],
+  /** Empty unless a test seeds it, so code under test falls back to reading from disk. */
+  get textDocuments(): unknown[] {
+    return (global.__reviewTestDocuments as unknown[] | undefined) ?? [];
+  },
   get workspaceFolders() {
     const root = global.__reviewTestRoot as string | undefined;
     if (!root) return undefined;
@@ -109,7 +134,26 @@ export function __notifications(): TestNotification[] {
   return (global.__reviewTestNotifications ??= []) as TestNotification[];
 }
 export const window = {
+  get visibleTextEditors(): unknown[] {
+    return (global.__reviewTestEditors as unknown[] | undefined) ?? [];
+  },
   async showErrorMessage(message: string) { __notifications().push({ level: 'error', message }); return undefined; },
   async showWarningMessage(message: string) { __notifications().push({ level: 'warning', message }); return undefined; },
   async showInformationMessage(message: string) { __notifications().push({ level: 'info', message }); return undefined; },
 };
+
+/**
+ * Just enough of the editor geometry types for `revealHunkPosition`: it constructs a
+ * `Position`, assigns a `Selection`, and reveals a `Range`. Recording the arguments is the
+ * point — the contract under test is which line it lands on.
+ */
+export class Position {
+  constructor(public readonly line: number, public readonly character: number) {}
+}
+export class Selection {
+  constructor(public readonly anchor: Position, public readonly active: Position) {}
+}
+export class Range {
+  constructor(public readonly start: Position, public readonly end: Position) {}
+}
+export const TextEditorRevealType = { InCenter: 2 };

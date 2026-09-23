@@ -3,23 +3,16 @@ import { ParsedHunk } from './diffEngine';
 /**
  * The line arithmetic behind accept and discard, as pure functions over strings.
  *
- * This module exists because of a bug it now makes untestable-by-accident impossible.
- * `discardHunk` used to build a VS Code `Range` by hand and append `'\n'` to the
- * replacement text unconditionally. On a file with no trailing newline that re-added a
- * newline the file never had, so the discard *left a hunk behind* — and discarding again
- * reproduced it, permanently. Three shapes were reproduced (a modified last line, an
- * appended line, a removed last line); see §1.1 of the 2026-09-20 code review
- * (`git show 0e7c707:docs/code-review-2026-09-20.md`).
+ * **No range arithmetic anywhere.** Each function below answers "what should the whole text
+ * be afterwards?" by splicing arrays, which round-trips losslessly, and `minimalSplice` then
+ * derives the edit. Callers convert its offsets with `doc.positionAt`, so no code has to
+ * reason about where a newline belongs relative to a range boundary — the end-of-file cases
+ * (a file with no trailing newline, an edit through the last line) are what hand-built
+ * ranges get wrong, leaving a hunk that no number of discards can resolve.
  *
- * The fix is not better range arithmetic, it is not doing range arithmetic at all. Each
- * function below answers "what should the whole text be afterwards?" by splicing arrays,
- * which round-trips losslessly, and `minimalSplice` then derives the edit. Callers convert
- * its offsets with `doc.positionAt`, so no code anywhere has to reason about where a
- * newline belongs relative to a range boundary.
- *
- * Everything here is VS Code-free on purpose: it is the surface the property test in
- * `test/hunkApply.test.ts` drives, and that test asserts the invariant the essays used to
- * argue — that resolving every hunk converges to zero hunks, for every generated input.
+ * Everything here is VS Code-free on purpose: it is the surface the property tests in
+ * `test/hunkApply.test.ts` drive, and they assert the invariant — that resolving every hunk
+ * converges to zero hunks, for every generated input.
  *
  * **BOM is the caller's job.** These functions take text that has already been through
  * `stripBom` and return text in the same form; `commands.ts` re-attaches the marker with
@@ -61,22 +54,18 @@ export function minimalSplice(from: string, to: string): TextSplice {
 
 /**
  * Text split into lines *the way jsdiff counts them*, which is not the way `split('\n')`
- * does, and the difference is a bug the property test caught on its fifth input.
+ * does.
  *
  * `'a\nb\n'.split('\n')` is `['a', 'b', '']` — three elements for two lines — because a
  * terminating newline leaves an empty element behind. jsdiff tokenizes the same text as
  * two lines, and every index on a `ParsedHunk` is in *that* model. Splicing the
- * three-element array at hunk coordinates therefore leaves the phantom `''` stranded past
- * the end of the splice, which silently re-terminates a file that had no final newline.
- *
- * The failing pair was baseline `'delta\nbeta\n'` against document `'beta'`: the whole
- * file is one hunk, and both accept and discard produced text that still differed from
- * their target, so the next pass produced the same text again and the file could never
- * leave review. Note that this is a *second*, independent instance of the defect in
- * §1.1 of the review — the shipped `acceptHunk` carried it too, on the baseline side.
+ * three-element array at hunk coordinates leaves the phantom `''` stranded past the end of
+ * the splice, which silently re-terminates a file that had no final newline — and a file
+ * whose accept or discard never reaches its target can never leave review.
  *
  * So the terminator is tracked as a flag instead of as an array element. Round-tripping
- * `toLines`/`fromLines` is exact for every input including `''`.
+ * `toLines`/`fromLines` is exact for every input including `''`. Guarded by
+ * `hunkApply.test.ts` ("split-model phantom element").
  */
 interface Lines {
   lines: string[];
@@ -145,17 +134,13 @@ export function discardHunkText(baselineText: string, currentText: string, hunk:
  * - **An earlier added line** of the same hunk. It has no baseline counterpart, so keep the
  *   document's own final newline — exactly what a plain editor delete would do.
  *
- * This used to keep the document's final newline in both cases, which is wrong for the
- * first. Found by the partial-selection property: baseline `'delta\n\n'`, document
- * `'delta\ncafé'`, reject `café` — keeping the document's missing final newline produced
- * `'delta'`, which jsdiff reads as a different token from the baseline's `'delta\n'`, so
- * rejecting one added line *created* a removal. That defect predated `hunkApply`; the old
- * range arithmetic in `rejectSelection` behaved identically.
+ * Keeping the document's final newline in *both* cases is the tempting simplification and is
+ * wrong for the first: jsdiff reads `'delta'` and `'delta\n'` as different tokens, so
+ * rejecting one added line would *create* a removal.
  *
- * Measured across 14,755 generated selections: the old rule broke the invariant in 2,132,
- * this rule in none. It is not globally optimal — in 13 of those cases the other final
- * newline would have left one fewer pending line — but it never grows the change and never
- * creates a removal, which is the bar the property test enforces.
+ * The rule is not globally optimal — sometimes the other final newline would leave one fewer
+ * pending line — but it never grows the change and never creates a removal, which is the bar
+ * `hunkApply.test.ts` enforces ("property: rejecting a selection").
  */
 export function rejectLinesText(
   baselineText: string,
@@ -213,13 +198,11 @@ export function acceptLinesBaseline(
   // turns its neighbours into changes too.
   //
   // In the document, the accepted block is newline-terminated unless it includes the
-  // document's last line and the document has no final newline. This used to pass the
-  // document's terminator unconditionally, which is wrong whenever the accepted lines are
-  // *not* the document's last lines: accepting a middle line of a replace hunk at EOF made
-  // the pending change larger. That specific failure was introduced by the move into this
-  // module; the previous `split('\n')` code handled it by accident while failing the
-  // opposite case. Across 14,755 generated selections: old code 3,288 violations, the first
-  // version of this function 276, this rule 0.
+  // document's last line and the document has no final newline. Passing the document's
+  // terminator unconditionally is wrong whenever the accepted lines are *not* the document's
+  // last lines: accepting a middle line of a replace hunk at EOF then grows the pending
+  // change. Guarded by `hunkApply.test.ts` ("accepting a middle line of a replace hunk at
+  // EOF does not grow the change").
   const acceptedTerminator = acceptEndLine < current.lines.length - 1 || current.terminated;
   return spliceLines(baseline, insertAt, 0, acceptedLines, acceptedTerminator);
 }

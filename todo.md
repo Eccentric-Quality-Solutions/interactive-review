@@ -1,8 +1,7 @@
 # Known, unfixed
 
-Open items only, a few lines each: what is wrong, how to close it. Long-form reasoning for
-the parked items is in [docs/investigations-2026-09-22.md](docs/investigations-2026-09-22.md);
-the 2026-09-20 code review is at `git show 0e7c707:docs/code-review-2026-09-20.md`.
+Open items only, a few lines each: what is wrong, how to close it. The 2026-09-20 code
+review is at `git show 0e7c707:docs/code-review-2026-09-20.md`.
 
 Ordered by severity within each section.
 
@@ -72,7 +71,7 @@ Each is small and silent when it fails. Ordered by payoff.
 4. **Failures that are only logged.** A failed `syncIgnoreState` still reports Refresh
    success; `removeFileBatch` never re-throws. Surface both.
 
-Done since the review: `ls-files -z` everywhere (2026-09-22, uncommitted).
+Done since the review: `ls-files -z` everywhere (f968dcd).
 
 ---
 
@@ -104,12 +103,17 @@ auto-clear and do not flip the default.
 Log evidence 2026-09-22 (25 sessions): 852 hunk actions from CodeLens, 3 from the panel, 0
 from keybindings or selection commands. Reopen if the log starts showing them.
 
-- **C. Multi-hunk selection accept/reject.** Design and a fuzz-verified composition order
-  are written up in the investigations doc. Cheap interim: a visible "resolved 1 of 3
-  changes" message instead of the log-only overreach.
-- **D. Accept with a dirty buffer.** Refusal guard shipped. The proper fix (save first,
-  abort if the save changed the text or returned false) is designed in the investigations
-  doc. Cheap interim: a Save button on the refusal warning.
+- **C. Multi-hunk selection accept/reject.** Compose accept and reject bottom-up over
+  hunks computed once; top-down fails because each splice moves the anchors below it. This
+  was fuzz-verified on 2026-09-22 but the script is gone, so write the property in
+  `hunkApply.test.ts` before relying on it. Edge rule: a hunk whose added lines are all
+  selected resolves whole, edges included; only a hunk the selection cuts through stays
+  partial. Cheap interim: a visible "resolved 1 of 3 changes" message.
+- **D. Accept with a dirty buffer.** Refusal guard shipped. Proper fix: save first, then
+  look up the hunk; abort if `save()` returned false or changed the text (format-on-save
+  shifts selection line numbers). After a "newer on disk" abort VS Code's own dialog offers
+  Overwrite, which destroys the agent's newer write, so the abort message must warn against
+  it. Cheap interim: a Save button on the refusal warning.
 
 ### Dropped
 

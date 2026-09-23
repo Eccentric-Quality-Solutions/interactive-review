@@ -3,9 +3,9 @@
  * decision half of `FileWatcher.handleDiskCreate` and `handleDiskChange`, with the reads
  * done by the caller.
  *
- * Pure so that the answer to "is this file new" lives in one place. The two handlers used
- * to answer it separately, and `reloadEqualsMemory.test.ts` had to keep a hand copy of each
- * answer. It now calls this function, so the property tests the real decision.
+ * Pure so that the answer to "is this file new" lives in one place, and so the property
+ * walk in `reloadEqualsMemory.test.ts` can drive the real decision rather than a hand copy
+ * of it. Guarded directly by `diskEvent.test.ts`.
  *
  * The third answer is a rescan's (`StateManager.adoptedNullReason`). It is not here because
  * its evidence is different: a rescan sees only the end state plus the session's own record,

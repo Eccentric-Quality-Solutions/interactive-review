@@ -20,13 +20,13 @@ import { log } from './log';
  * Discarding the last hunk of an agent-created *new* file removes it from disk. That is
  * the only operation in the extension whose effect an undo cannot reach: accept and
  * reject both go through a `WorkspaceEdit` and live on the editor's undo stack, but an
- * unlinked file has no buffer left to undo into. One keystroke on a mis-aimed lens
- * therefore destroyed content the agent had just written, silently and for good.
+ * unlinked file has no buffer left to undo into, so one keystroke on a mis-aimed lens
+ * would otherwise destroy the agent's work for good.
  *
  * `useTrash` moves the decision from irreversible to recoverable at the cost of nothing: the
- * file still leaves the workspace and still leaves review. It used to fall back to a permanent
- * `unlink` when the trash was unavailable, which was the one place a *classification* bug
- * became permanent data loss. It no longer does.
+ * file still leaves the workspace and still leaves review. **There is deliberately no
+ * `unlink` fallback** when the trash is unavailable — that is the one path on which a
+ * misclassification would become permanent data loss.
  *
  * Returning false keeps the file on disk and in the queue, so the user can retry, accept, or
  * delete it themselves. That makes the unlink survivable, not the whole discard:
@@ -84,17 +84,14 @@ export function activeReviewTarget(stateManager: StateManager):
  * Pending hunk containing the cursor, else the first hunk at/after it. Undefined when the
  * cursor sits past every hunk.
  *
- * This used to wrap to `hunks[0]` in that last case, on the reasoning that cursor
- * navigation should always land somewhere. But the only callers are the accept and reject
- * *keybindings* — this resolves the target a keystroke is about to act on, and the reject
- * path rewrites the buffer. Wrapping therefore meant that pressing accept with the cursor
- * below the last hunk silently resolved a hunk scrolled off the top of the screen: the file
- * changed, and nothing the user could see explained why.
- *
- * Landing on nothing is the right answer here. It costs a keypress that does nothing when
- * there was nothing at the cursor to act on, which is what every other selection-driven
- * command in this file already does — see `hunkAtLine`'s note on the asymmetry. Navigation
- * (`neighbourHunk`) is a separate function and is free to wrap.
+ * Deliberately does not wrap to `hunks[0]`. The only callers are the accept and reject
+ * *keybindings*, so this resolves the target a keystroke is about to act on and the reject
+ * path rewrites the buffer: wrapping would let accept-with-the-cursor-below-the-last-hunk
+ * silently change a hunk scrolled off the top of the screen. Landing on nothing costs a
+ * keypress that does nothing, which is what every other selection-driven command here
+ * already does. Navigation (`neighbourHunk`) is separate and is free to wrap. Guarded by
+ * `hunkAtCursor.test.ts` ("does not wrap to the first hunk when the cursor is past every
+ * hunk").
  */
 export function hunkAtCursor(editor: vscode.TextEditor, fileState: FileState): ParsedHunk | undefined {
   const hunks = computeHunks(fileState.baseline, editor.document.getText());
@@ -167,10 +164,6 @@ let beginInFlight: Promise<void> | undefined;
  * Begin a review session: snapshot the working tree as the baseline and start tracking.
  * Backs the `interactiveReview.beginReview` command ("Begin review" in the palette).
  *
- * The ID was renamed from `interactiveReview.enable` — a deliberate breaking change, so
- * that the command id, the palette title, and the panel button all say the same thing.
- * Anything pinning the old id (user keybindings, external/agent callers) must be updated.
- *
  * This is the **agent-callable begin-review hook**, and that imposes a contract worth
  * keeping: it must stay non-interactive. No dialogs, no quick-picks, no dependence on the
  * panel being visible (`setLoading` no-ops when the view is unresolved), and the returned
@@ -192,11 +185,11 @@ export async function enableReview(
   //
   // This check must come FIRST, because `setEnabled` flips `enabled` synchronously before
   // its first await — so from the moment the first Begin starts, the guard below already
-  // sees an open session. Without this, a second Begin arriving mid-snapshot returned
-  // immediately, while no baseline was on disk yet. That breaks the contract this command
-  // exists to keep: an agent awaits Begin review and starts editing, and those edits land
-  // on files that were never baselined. Two agents, or an agent and the panel button, are
-  // enough to hit it.
+  // sees an open session. Ordered the other way, a second Begin arriving mid-snapshot
+  // returns immediately with no baseline on disk yet, breaking the contract this command
+  // exists to keep: an agent awaits Begin review, starts editing, and those edits land on
+  // files that were never baselined. Two agents, or an agent and the panel button, are
+  // enough to reach it.
   //
   // Awaiting the in-flight promise gives the second caller the same guarantee as the first,
   // including the same failure.
@@ -708,7 +701,7 @@ async function applyEditAndAdvance(
  * deleted the selected lines, which is the user's own content; and exiting review without a
  * baseline let the next Refresh queue it again. File-level Discard keeps the bytes and
  * records them. Guarded by `deleteRestore.test.ts` ("discarding the hunk of an unbaselined
- * file") and see `todo.md` item G.
+ * file").
  */
 async function keepsUnbaselinedFile(
   stateManager: StateManager,
@@ -754,10 +747,9 @@ export async function discardHunk(
   // BOM on save, so a carried one would land on disk as a second BOM.
   //
   // The edit is derived from the whole desired text rather than built out of hunk
-  // coordinates. Constructing the range by hand is what produced the defect this replaces:
-  // the replacement always ended in a newline and the range stopped short of the document's
-  // last line, so discarding a hunk at EOF in a file with no final newline *added* one —
-  // leaving a hunk that could never be resolved, no matter how many times it was discarded.
+  // coordinates — see `hunkApply`. Hand-built ranges are what get the end-of-file cases
+  // wrong: discarding a hunk at EOF in a file with no final newline *adds* one, leaving a
+  // hunk that no number of discards can resolve.
   const currentText = doc.getText();
   const desiredText = discardHunkText(stripBom(baselineStr), currentText, hunk);
   const splice = minimalSplice(currentText, desiredText);

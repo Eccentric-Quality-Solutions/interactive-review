@@ -57,10 +57,9 @@ function fnv1a(text: string): string {
  * cursor-driven (`hunkAtCursor`) and selection-driven (`acceptSelection`/`rejectSelection`)
  * commands. Every one of them treats "past every hunk" as a skip.
  *
- * `hunkAtCursor` used to wrap to `hunks[0]` on top of this, so that a cursor below the last
- * hunk still landed somewhere. That wrap is gone: its only callers are the accept and reject
- * keybindings, so it silently resolved a hunk scrolled off-screen and changed the file. A
- * caller that genuinely wants to wrap should be navigating (`neighbourHunk`), not mutating.
+ * Nothing built on this wraps past the last hunk: the mutating commands must never resolve a
+ * hunk the user cannot see. Wrapping belongs to navigation (`neighbourHunk`), not to accept
+ * or reject — see `hunkAtCursor`.
  */
 export function hunkAtLine(hunks: ParsedHunk[], line1Based: number): ParsedHunk | undefined {
   return hunks.find(h => line1Based >= h.newStart && line1Based < h.newStart + Math.max(1, h.newLines))
@@ -75,10 +74,10 @@ export function hunkAtLine(hunks: ParsedHunk[], line1Based: number): ParsedHunk 
  * directly above the block they act on.
  *
  * Pure and here rather than in `diffCodeLens.ts` so the property that matters can be tested
- * without an editor: **the anchor must resolve, via `hunkAtLine`, back to its own hunk.**
- * The previous anchor — the line *after* the hunk — failed that property for any hunk with
- * a neighbour, which is how a user clicking Accept on a 13-line deletion resolved a
- * different, one-line hunk instead.
+ * without an editor: **the anchor must resolve, via `hunkAtLine`, back to its own hunk, and
+ * no two hunks may share one.** Guarded by `diffEngine.test.ts` ("property: every anchor
+ * lies inside its own hunk", "property: no two hunks share an anchor line"). An anchor past
+ * the end of the hunk fails the first for any hunk with a neighbour.
  */
 export function lensLineForHunk(hunk: ParsedHunk, lineCount: number): number {
   return Math.min(Math.max(0, hunk.newStart - 1), Math.max(0, lineCount - 1));
@@ -153,9 +152,9 @@ export function hasReportableDiff(baseline: string | null, current: string): boo
  * of a CRLF file is part of every token: converting a file's line endings leaves no token
  * in the old sequence equal to any token in the new one, Myers finds a zero-length common
  * subsequence, and the loop below folds the resulting delete-all/insert-all into a SINGLE
- * hunk spanning the entire file. Measured on this repo: 696 of 697 lines of fileWatcher.ts
- * in one hunk, for a change no human would call a change — and it buries any real edit made
- * in the same write, which is the case that actually costs the user something.
+ * hunk spanning the entire file — for a change no human would call a change, and one that
+ * buries any real edit made in the same write, which is the case that actually costs the
+ * user something.
  *
  * VSCode's diff editor cannot show an EOL difference at all: its text model stores lines
  * plus one EOL setting, so mixed endings are not representable. Without this option the

@@ -45,7 +45,7 @@ interface PanelFile {
    * Null baseline, but *not* a witnessed create — a file that predates the session and
    * whose original was never captured. Distinct from `isNew` because the two have opposite
    * outcomes under Discard: a new file is deleted, an unbaselined one is left exactly as it
-   * is. Badging both "new" told the user the panel would delete something it will not.
+   * is. Badging both "new" would promise the user a deletion the panel will not perform.
    */
   isUnbaselined: boolean;
   isDeleted: boolean;
@@ -223,8 +223,8 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       const isDeleted = !fileExists && fileState.baseline !== null;
       // Show 0-hunk entries for null-baseline files (e.g. a new empty file) and deleted
       // files (file missing from disk) so accept/discard remain available. Keyed on
-      // `unbaselined` rather than `isNew`: narrowing it to witnessed creates would have
-      // dropped an empty pre-existing file out of the queue entirely.
+      // `unbaselined` rather than `isNew`: narrowing it to witnessed creates would drop an
+      // empty pre-existing file out of the queue entirely.
       if (pendingHunks.length === 0 && !unbaselined && !isDeleted) continue;
 
       const addedLines = pendingHunks.reduce((s, h) => s + h.newLines, 0);
