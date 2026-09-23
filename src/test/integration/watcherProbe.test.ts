@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import assert from 'assert';
 import {
   getWorkspaceRoot, sleep, writeFileExternally, cleanWorkspace,
-  getStateManager, enableReview, disableReview, waitForCondition, gitGetBaseline,
+  getStateManager, enableReview, disableReview, waitForCondition, gitGetBaseline, readSysctl,
 } from './helpers';
 
 /**
@@ -156,11 +156,3 @@ suite('watcher probe (diagnostic, WATCHER_PROBE=1)', function () {
     assert.strictEqual(outcomes.length, ROUNDS, 'probe should complete all rounds');
   });
 });
-
-function readSysctl(name: string): string {
-  try {
-    return fs.readFileSync(`/proc/sys/fs/inotify/${name}`, 'utf-8').trim();
-  } catch {
-    return 'unknown';
-  }
-}

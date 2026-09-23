@@ -300,6 +300,26 @@ export class StateManager {
   }
 
   /**
+   * Put a baseline-repo write on the serial queue — the only way this class may reach
+   * `BaselineGit`. Concurrent git invocations contend on `.git/index.lock` and the loser
+   * throws, and every consumer here swallows that into the log, so a bare
+   * `await g.snapshot(...)` costs a file its baseline silently. `onFailure` runs after the
+   * log, for the callers that roll an in-memory write back.
+   */
+  private enqueue(
+    label: string,
+    op: (g: BaselineGit) => Promise<void>,
+    onFailure?: (err: unknown) => void,
+  ): void {
+    const g = this._git;
+    if (!g) return;
+    this.gitQueue = this.gitQueue.then(() => op(g)).catch(err => {
+      log(`git queue error (${label}): ${err}`);
+      onFailure?.(err);
+    });
+  }
+
+  /**
    * Shared per-file scan of the git-tracked files, used by both `load()` and
    * `rebuildState()`. For each tracked file: skip if ignored, skip if it has no
    * baseline in the index, otherwise compare the baseline against current disk
@@ -551,7 +571,7 @@ export class StateManager {
     // Clean up stale ignored entries from the git repo
     if (ignored.length > 0) {
       log(`load: removing ${ignored.length} ignored file(s) from git: ${logFileList(ignored, this.workspaceRoot)}`);
-      this.gitQueue = this.gitQueue.then(() => g.removeFileBatch(ignored)).catch(err => { log(`git queue error: ${err}`); });
+      this.enqueue('load: remove ignored', g2 => g2.removeFileBatch(ignored));
     }
 
     // Detect files on disk not tracked in git — these are externally created new files
@@ -741,11 +761,9 @@ export class StateManager {
     // Latch review activity at the mutation point so reviewComplete works regardless
     // of whether the caller routes through the extension's onStateChanged funnel.
     if (state.status === 'reviewing') this._sawReviewingFiles = true;
-    if (!skipSnapshot && this._git && state.baseline !== null) {
-      const g = this._git;
+    if (!skipSnapshot && state.baseline !== null) {
       const baseline = state.baseline;
-      this.gitQueue = this.gitQueue.then(() => g.snapshot(filePath, baseline)).catch(err => {
-        log(`git queue error (setFile rollback): ${err}`);
+      this.enqueue('setFile', g => g.snapshot(filePath, baseline), () => {
         // Only rollback if this exact state object is still current (no newer operation has updated it)
         if (this.state.get(filePath) === state) {
           if (oldState) { this.writeState(filePath, oldState); } else { this.dropState(filePath); }
@@ -762,10 +780,8 @@ export class StateManager {
     this.dropState(filePath);
     // Skip git removal only when we know the file had a null baseline (never stored in git).
     // If oldState is undefined (idle file, not in map) or has a real baseline, queue the removal.
-    if (this._git && !(oldState !== undefined && oldState.baseline === null)) {
-      const g = this._git;
-      this.gitQueue = this.gitQueue.then(() => g.removeFile(filePath)).catch(err => {
-        log(`git queue error (removeFile rollback): ${err}`);
+    if (!(oldState !== undefined && oldState.baseline === null)) {
+      this.enqueue('removeFile', g => g.removeFile(filePath), () => {
         // Only rollback if no newer operation has re-added the entry
         if (!this.state.has(filePath) && oldState) {
           this.writeState(filePath, { ...oldState });
@@ -804,9 +820,7 @@ export class StateManager {
       if (under(fp)) this.dropState(fp);
     }
 
-    const g = this._git;
-    if (!g) return;
-    this.gitQueue = this.gitQueue.then(async () => {
+    this.enqueue('removePathAndChildren', async g => {
       let tracked: string[];
       try {
         tracked = await g.listTrackedFiles();
@@ -820,7 +834,7 @@ export class StateManager {
       if (toRemove.length === 0) return;
       log(`removePathAndChildren: removing ${toRemove.length} baseline(s) under ${path.basename(dirPath)}`);
       await g.removeFileBatch(toRemove);
-    }).catch(err => { log(`git queue error (removePathAndChildren): ${err}`); });
+    });
   }
 
   renameFile(oldFilePath: string, newFilePath: string): void {
@@ -873,21 +887,16 @@ export class StateManager {
     // Skip git rename only when we know it was a single file with null baseline (never stored in git).
     // For directories or idle files (not in map), always queue — git may have baselines.
     const skipGit = fileState && fileState.baseline === null && !hasDirChildren;
-    if (this._git && !skipGit) {
-      const g = this._git;
-      this.gitQueue = this.gitQueue.then(() => g.renameFile(oldFilePath, newFilePath)).catch(err => {
-        // Do not rollback in-memory path mapping: the file has already been renamed on disk,
-        // so reverting to oldFilePath would desync state/UI from the filesystem.
-        log(`git queue error (renameFile): ${err}`);
-      });
-    } else if (this._git) {
+    if (!skipGit) {
+      // No rollback of the in-memory path mapping, deliberately: the file has already been
+      // renamed on disk, so reverting to oldFilePath would desync state/UI from the
+      // filesystem.
+      this.enqueue('renameFile', g => g.renameFile(oldFilePath, newFilePath));
+    } else {
       // No baseline to move, but the target may still hold one: a deletion in review, or a
       // file the rename overwrote. The source wins, so remove it, or a reload would review
       // the moved file as an edit of the old one. A no-op when the target is untracked.
-      const g = this._git;
-      this.gitQueue = this.gitQueue.then(() => g.removeFile(newFilePath)).catch(err => {
-        log(`git queue error (renameFile, clearing target): ${err}`);
-      });
+      this.enqueue('renameFile: clearing target', g => g.removeFile(newFilePath));
     }
   }
 
@@ -896,10 +905,7 @@ export class StateManager {
    * Use this instead of calling git.snapshot() directly to avoid concurrent git ops.
    */
   snapshotFile(filePath: string, content: string): void {
-    if (this._git) {
-      const g = this._git;
-      this.gitQueue = this.gitQueue.then(() => g.snapshot(filePath, content)).catch(err => { log(`git queue error: ${err}`); });
-    }
+    this.enqueue('snapshotFile', g => g.snapshot(filePath, content));
   }
 
   /**
@@ -953,21 +959,17 @@ export class StateManager {
     const oldState = this.state.has(filePath) ? { ...this.state.get(filePath)! } : undefined;
     this.dropState(filePath);
     if (newBaseline !== undefined && newBaseline !== null) {
-      if (this._git) {
-        const g = this._git;
-        const baseline = newBaseline;
-        this.gitQueue = this.gitQueue.then(() => g.snapshot(filePath, baseline)).catch(err => {
-          log(`git queue error (exitReviewing rollback): ${err}`);
-          // Restore reviewing state so the user can retry rather than silently getting a stale baseline
-          if (!this.state.has(filePath) && oldState) {
-            this.writeState(filePath, { ...oldState });
-            this.onRollback?.();
-            void vscode.window.showErrorMessage(
-              `Failed to update review baseline for ${path.basename(filePath)}. The file has been kept in reviewing so you can retry.`
-            );
-          }
-        });
-      }
+      const baseline = newBaseline;
+      this.enqueue('exitReviewing', g => g.snapshot(filePath, baseline), () => {
+        // Restore reviewing state so the user can retry rather than silently getting a stale baseline
+        if (!this.state.has(filePath) && oldState) {
+          this.writeState(filePath, { ...oldState });
+          this.onRollback?.();
+          void vscode.window.showErrorMessage(
+            `Failed to update review baseline for ${path.basename(filePath)}. The file has been kept in reviewing so you can retry.`
+          );
+        }
+      });
     }
   }
 
@@ -1058,10 +1060,9 @@ export class StateManager {
       // baseline has been taken" *alongside* the failure message — two notifications
       // contradicting each other.
       //
-      // The queue's own `.catch` stays: the chain must remain usable for later operations.
-      this.gitQueue = this.gitQueue
-        .then(() => g.snapshotBatch(batch))
-        .catch(err => { failure = err; log(`git queue error: ${err}`); });
+      // `enqueue`'s own `.catch` stays in play: the chain must remain usable for later
+      // operations, so the failure is captured out through `onFailure` rather than thrown.
+      this.enqueue('snapshotWorkspace', g2 => g2.snapshotBatch(batch), err => { failure = err; });
     }
     await this.gitQueue;
     if (failure !== undefined) throw failure;
@@ -1186,7 +1187,7 @@ export class StateManager {
       this.dropState(fp);
     }
     if (toRemove.length > 0) {
-      this.gitQueue = this.gitQueue.then(() => g.removeFileBatch(toRemove)).catch(err => { log(`git queue error: ${err}`); });
+      this.enqueue('syncIgnoreState: remove', g2 => g2.removeFileBatch(toRemove));
     }
 
     // Add newly allowed files not yet tracked (check both git HEAD and in-memory state
@@ -1209,7 +1210,7 @@ export class StateManager {
     if (toAdd.length > 0) {
       const batch = await this.readBatch(toAdd);
       if (batch.length > 0) {
-        this.gitQueue = this.gitQueue.then(() => g.snapshotBatch(batch)).catch(err => { log(`git queue error: ${err}`); });
+        this.enqueue('syncIgnoreState: add', g2 => g2.snapshotBatch(batch));
       }
     }
 
@@ -1259,10 +1260,10 @@ export class StateManager {
     const toRemove = trackedFiles.filter(fp => !diskSet.has(fp));
 
     if (toRemove.length > 0) {
-      this.gitQueue = this.gitQueue.then(() => g.removeFileBatch(toRemove)).catch(err => { log(`git queue error: ${err}`); });
+      this.enqueue('branchSwitch: remove', g2 => g2.removeFileBatch(toRemove));
     }
     if (batch.length > 0) {
-      this.gitQueue = this.gitQueue.then(() => g.snapshotBatch(batch)).catch(err => { log(`git queue error: ${err}`); });
+      this.enqueue('branchSwitch: snapshot', g2 => g2.snapshotBatch(batch));
     }
 
     // Wait for all git ops to complete before returning

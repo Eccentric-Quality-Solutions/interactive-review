@@ -167,23 +167,95 @@ describe('BaselineGit: the user\'s global git config cannot break snapshots', ()
 });
 
 describe('BaselineGit: removing a directory path', () => {
-  // A characterization test of git, not of our code, and deliberately so. It pins the fact
-  // that made Explorer folder-deletes strand every child's baseline: `update-index
-  // --force-remove -- <dir>` exits 0 and removes nothing, because the index has no
-  // directory entries. Its job is to stop anyone "simplifying" a directory delete back to
-  // removeFile(dir). The fix itself (removePathAndChildren) is tested in
-  // stateManagerGit.test.ts.
-  it('removeFile on a directory succeeds but removes none of its children', async () => {
+  // This used to characterize git's behaviour instead: `update-index --force-remove --
+  // <dir>` exits 0 and removes nothing, because the index has no directory entries, and
+  // that fact is what made Explorer folder-deletes strand every child's baseline. The
+  // characterization was accurate, but pinning it meant `removeFile` was allowed to stay
+  // silently wrong for directories — and `renameFile`'s untracked-source fallback then
+  // reached it, so a directory renamed onto another directory left the target's baselines
+  // behind and the next reload reviewed the moved files as edits of the old ones.
+  //
+  // `removeFile` now removes the entries `ls-files` reports rather than the pathspec that
+  // found them, which is identical for a single file and correct for a directory. The git
+  // fact is unchanged; we just no longer rely on it holding. `removePathAndChildren` is
+  // still the right entry point from `StateManager` — it also sweeps in-memory state — and
+  // is tested in stateManagerGit.test.ts.
+  it('removeFile on a directory removes every baseline beneath it', async () => {
+    const { root, git } = await freshRepo();
+    await git.snapshotBatch([
+      { filePath: path.join(root, 'd', 'a.txt'), content: 'a\n' },
+      { filePath: path.join(root, 'd', 'b.txt'), content: 'b\n' },
+      { filePath: path.join(root, 'keep.txt'), content: 'keep\n' },
+    ]);
+
+    await git.removeFile(path.join(root, 'd'));
+
+    assert.deepEqual(await git.listTrackedFiles(), [path.join(root, 'keep.txt')],
+      'children of the directory go, everything outside it stays');
+  });
+
+  // `ls-files --stage` C-quotes a name holding a `"`, a backslash or a control character
+  // even under `core.quotepath=false`, so parsing its lines and handing the result back to
+  // `update-index` exits 0 and removes nothing. Verified against a scratch repo. `-z` is
+  // what makes the path come back as the real bytes.
+  it('removeFile removes a baseline whose name git would C-quote', async () => {
+    const { root, git } = await freshRepo();
+    const quoted = path.join(root, 'no"te.txt');
+    await git.snapshotBatch([
+      { filePath: quoted, content: 'q\n' },
+      { filePath: path.join(root, 'plain.txt'), content: 'p\n' },
+    ]);
+
+    await git.removeFile(quoted);
+
+    assert.deepEqual(await git.listTrackedFiles(), [path.join(root, 'plain.txt')]);
+  });
+
+  // Every reader of git's path output in `baselineGit.ts` has now been wrong about C-quoting
+  // in turn — `removeFile`, then `renameFile`, then `listTrackedFiles`. These pin the two
+  // that are not covered above.
+  it('renameFile moves a baseline whose name git would C-quote', async () => {
+    const { root, git } = await freshRepo();
+    const quoted = path.join(root, 'd', 'no"te.txt');
+    await git.snapshotBatch([
+      { filePath: quoted, content: 'q\n' },
+      { filePath: path.join(root, 'd', 'plain.txt'), content: 'p\n' },
+    ]);
+
+    await git.renameFile(path.join(root, 'd'), path.join(root, 'e'));
+
+    // The line-parsed form produced `ed/no\"te.txt"` and left the real file baseline-less,
+    // which `handleDiskCreateTree` then adopts as a deletable new file.
+    assert.deepEqual(await git.listTrackedFiles(), [
+      path.join(root, 'e', 'no"te.txt'),
+      path.join(root, 'e', 'plain.txt'),
+    ].sort());
+    assert.equal(await git.getBaseline(path.join(root, 'e', 'no"te.txt')), 'q\n');
+  });
+
+  it('listTrackedFiles reports names git would C-quote, and keeps edge whitespace', async () => {
+    const { root, git } = await freshRepo();
+    await git.snapshotBatch([
+      { filePath: path.join(root, 'no"te.txt'), content: 'q\n' },
+      { filePath: path.join(root, 'trail .txt'), content: 't\n' },
+    ]);
+
+    assert.deepEqual(await git.listTrackedFiles(), [
+      path.join(root, 'no"te.txt'),
+      path.join(root, 'trail .txt'),
+    ].sort());
+  });
+
+  it('removeFile on a single file still removes exactly that file', async () => {
     const { root, git } = await freshRepo();
     await git.snapshotBatch([
       { filePath: path.join(root, 'd', 'a.txt'), content: 'a\n' },
       { filePath: path.join(root, 'd', 'b.txt'), content: 'b\n' },
     ]);
 
-    await git.removeFile(path.join(root, 'd'));
+    await git.removeFile(path.join(root, 'd', 'a.txt'));
 
-    assert.equal((await git.listTrackedFiles()).length, 2,
-      'git removes nothing for a directory path — use StateManager.removePathAndChildren');
+    assert.deepEqual(await git.listTrackedFiles(), [path.join(root, 'd', 'b.txt')]);
   });
 });
 

@@ -66,4 +66,61 @@ describe('ReviewPanel badge wiring', () => {
     panel.refresh();
     assert.equal(view.badge, undefined);
   });
+
+  /**
+   * The panel's "new" badge is a promise about what Discard will do, so it has to use the
+   * same test Discard does — `nullReason === 'created'`, not "the baseline is null".
+   *
+   * A pre-existing binary, a file unreadable at Begin review, and one created inside the
+   * enable snapshot's sliver all carry a null baseline, and `discardDeletesFile` leaves
+   * every one of them on disk. Badging them "new" told the user the panel was about to
+   * delete a file it will in fact leave exactly as it is. See `FileState.nullReason`.
+   */
+  it('badges a witnessed create "new" and an unbaselined file as unbaselined', () => {
+    const created = path.join(root, 'created.txt');
+    const unbaselined = path.join(root, 'unbaselined.txt');
+    const edited = path.join(root, 'edited.txt');
+    fs.writeFileSync(created, 'fresh\n');
+    fs.writeFileSync(unbaselined, 'predates the session\n');
+    fs.writeFileSync(edited, 'changed\n');
+    const { panel } = panelWith(true, new Map<string, FileState>([
+      [created, { status: 'reviewing', baseline: null, nullReason: 'created' }],
+      [unbaselined, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }],
+      [edited, { status: 'reviewing', baseline: 'original\n' }],
+    ]));
+
+    const byPath = new Map(panel.panelStateForTest().files.map(f => [f.filePath, f]));
+
+    assert.deepEqual(
+      { isNew: byPath.get(created)?.isNew, isUnbaselined: byPath.get(created)?.isUnbaselined },
+      { isNew: true, isUnbaselined: false },
+    );
+    assert.deepEqual(
+      { isNew: byPath.get(unbaselined)?.isNew, isUnbaselined: byPath.get(unbaselined)?.isUnbaselined },
+      { isNew: false, isUnbaselined: true },
+      'a null baseline with no witnessed create is not a new file',
+    );
+    assert.deepEqual(
+      { isNew: byPath.get(edited)?.isNew, isUnbaselined: byPath.get(edited)?.isUnbaselined },
+      { isNew: false, isUnbaselined: false },
+    );
+  });
+
+  /**
+   * `isNew` narrowed, but the rule deciding which rows are *listed* did not: it keys on the
+   * null baseline, so a pre-existing empty file — 0 hunks, nothing to diff — still has a row
+   * to accept or discard from. Narrowing that too would have dropped it out of the queue
+   * with no way to resolve it.
+   */
+  it('still lists a 0-hunk unbaselined file', () => {
+    const empty = path.join(root, 'empty.txt');
+    fs.writeFileSync(empty, '');
+    const { panel } = panelWith(true, new Map<string, FileState>([
+      [empty, { status: 'reviewing', baseline: null, nullReason: 'unbaselined' }],
+    ]));
+
+    const listed = panel.panelStateForTest().files;
+    assert.equal(listed.length, 1, 'an empty unbaselined file keeps its row');
+    assert.equal(listed[0].pendingCount, 0);
+  });
 });

@@ -56,13 +56,23 @@ export async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Floor for all condition waits. Many call sites pass tight per-op timeouts (5s/8s)
-// inherited from hunkwise's macOS runs; on Linux, VS Code's file watcher fires late
-// under load, so those events arrive after the tight deadline even though they DO
-// arrive (a fully-green run proves they're late, not dropped). Enforcing a generous
-// floor centrally de-flakes every call site without touching 70+ of them. Harmless
-// for fast git-op waits — they resolve in <1s, well before the floor. Kept under the
-// mocha per-test timeout (see .vscode-test.mjs) so a genuinely-stuck condition still fails.
+// Floor for all condition waits: a generous ceiling a healthy run never reaches, not a
+// delay. Waits resolve as soon as their condition holds — in practice <1s — so the floor
+// costs wall-clock only when a test is already failing. It exists because many call sites
+// pass tight per-op timeouts (5s/8s) inherited from hunkwise's macOS runs, and raising
+// them centrally beats editing 70+ of them.
+//
+// It is NOT compensation for a slow platform watcher. That premise was retracted
+// 2026-08-10 (design.md §4c.1): a headless Linux host at stock inotify limits delivered
+// 30/30 onDidCreate at ~130ms, and the original failures were inotify starvation on a
+// saturated workstation. Lowering this number therefore buys no time on a green run and
+// only narrows the margin on a loaded box. Kept under the mocha per-test timeout
+// (see .vscode-test.mjs) so a genuinely-stuck condition still fails.
+//
+// Scope that 30/30 carefully before citing it: the probe created files at the workspace
+// ROOT. Creates into a brand-new directory were delivered 0/N — a real bug, found
+// 2026-09-22 and fixed in `fileWatcher.handleDiskCreateTree`. "The watcher is reliable"
+// is true of the cases that have actually been measured, and that is not all of them.
 const WAIT_FLOOR_MS = 15000;
 
 export async function waitForCondition(fn: () => boolean, timeoutMs = 10000, intervalMs = 100): Promise<void> {
@@ -126,6 +136,21 @@ export async function waitForReviewing(filePath: string, timeoutMs = 15000): Pro
  */
 export async function waitForWatcher(fn: () => boolean, timeoutMs = 15000): Promise<void> {
   await waitForCondition(fn, timeoutMs);
+}
+
+/**
+ * Read an fs.inotify sysctl, for failure diagnostics. It is there to let a reader rule the
+ * environment in *or out*: an exhausted instance limit means the failure is reporting the
+ * box (docs/test-strategy.md), and a healthy one means it is not — which is how the
+ * new-directory watcher bug was identified on 2026-09-22. Either way the number belongs in
+ * the failure message rather than in someone's memory of how the box was configured.
+ */
+export function readSysctl(name: string): string {
+  try {
+    return fs.readFileSync(`/proc/sys/fs/inotify/${name}`, 'utf-8').trim();
+  } catch {
+    return 'unknown';
+  }
 }
 
 let canaries = 0;

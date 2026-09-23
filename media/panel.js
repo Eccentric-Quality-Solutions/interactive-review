@@ -574,10 +574,12 @@ function renderReviewScreen(state) {
 }
 
 /**
- * @param {{ filePath: string, fileName: string, dirName: string, addedLines: number, removedLines: number, pendingCount: number, isNew: boolean, isDeleted: boolean, hunks: any[] }} file
+ * @param {{ filePath: string, fileName: string, dirName: string, addedLines: number, removedLines: number, pendingCount: number, isNew: boolean, isUnbaselined: boolean, isDeleted: boolean, hunks: any[] }} file
  */
 function renderFileGroup(file) {
-  const isSpecial = file.isNew || file.isDeleted;
+  // A null-baseline file has one whole-file hunk that there is nothing useful to walk, so
+  // unbaselined rows stay click-through like new and deleted ones.
+  const isSpecial = file.isNew || file.isUnbaselined || file.isDeleted;
   const isExpanded = !isSpecial && expandedFiles.has(file.filePath);
   const group = el("div", "file-group");
 
@@ -621,11 +623,16 @@ function renderFileGroup(file) {
       vscode.postMessage({ command: "openFile", filePath: file.filePath });
     });
   }
+  // "unbaselined" is its own badge rather than sharing "new": the two differ in exactly the
+  // way the user needs to know about before pressing Discard — a new file is deleted, an
+  // unbaselined one is left alone because there is no original to restore it to.
   const badge = file.isNew
     ? el("span", "file-status-badge file-status-new", "new")
-    : file.isDeleted
-      ? el("span", "file-status-badge file-status-deleted", "deleted")
-      : null;
+    : file.isUnbaselined
+      ? el("span", "file-status-badge file-status-unbaselined", "unbaselined")
+      : file.isDeleted
+        ? el("span", "file-status-badge file-status-deleted", "deleted")
+        : null;
   const dir = file.dirName ? el("span", "file-dir", file.dirName) : null;
 
   const right = el("div", "file-right");

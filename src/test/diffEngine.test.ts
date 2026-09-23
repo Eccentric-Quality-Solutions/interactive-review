@@ -404,9 +404,10 @@ describe('hunkAtLine', () => {
     assert.equal(hunkAtLine(hunks, 3)?.newStart, 5);
   });
 
-  it('returns undefined past every hunk — the asymmetry vs hunkAtCursor', () => {
+  it('returns undefined past every hunk', () => {
     const hunks = twoHunks();
-    // line 6 sits after the last hunk: no wrap to hunks[0], selection callers treat as skip
+    // line 6 sits after the last hunk: no wrap to hunks[0], every caller treats it as a skip.
+    // `hunkAtCursor` used to wrap on top of this and no longer does — see its doc comment.
     assert.equal(hunkAtLine(hunks, 6), undefined);
   });
 

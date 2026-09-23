@@ -169,6 +169,39 @@ export class FileWatcher {
           if (!this.stateManager.enabled) continue;
           log(`rename: ${path.basename(oldPath)} → ${path.basename(newPath)}`);
           this.pendingRenameOldPaths.add(oldPath);
+          // `isDirectory` matters: `shouldIgnore` appends the trailing slash the `ignore`
+          // library needs before a directory-only pattern can match, so without it a folder
+          // renamed onto `logs/` (or `dist/`, `build/`) answers *false* and its entries
+          // migrate into the ignored tree — the very case this branch exists to catch.
+          // Taken from the source, which still exists at `onWillRenameFiles` time; the
+          // target does not yet.
+          const isDir = isDirectorySync(oldPath);
+          if (this.shouldIgnore(newPath, isDir)) {
+            // Moving a file into an ignored location takes it out of review, rather than
+            // migrating its entry there.
+            //
+            // The migration used to happen unconditionally, and `load()`/`rebuildState()`
+            // both skip ignored paths — so memory kept a `reviewing` entry at a path no
+            // rescan could ever produce, and for a witnessed create that entry still
+            // offered a Discard that *deletes*. Moving something into `dist/` or
+            // `node_modules/` is the everyday way to reach it. Found by the random walk in
+            // `reloadEqualsMemory.test.ts` once a file could be ignored at Begin review, and
+            // pinned there by "renaming into an ignored location".
+            //
+            // `removePathAndChildren`, not `removeFile`: the source may be a directory, for
+            // which git removes nothing — see that method's note.
+            // Only announce when something actually left review — matching the
+            // explorer-delete branch in `onDiskDelete`, which guards the same pair. An
+            // unreviewed file moved into `dist/` should not sweep every tab group.
+            const had = !!this.stateManager.getFile(oldPath)
+              || Array.from(this.stateManager.getAllFiles().keys()).some(fp => fp.startsWith(oldPath + path.sep));
+            this.stateManager.removePathAndChildren(oldPath);
+            if (had) {
+              this.onFileLeftReview?.();
+              this.onStateChanged();
+            }
+            continue;
+          }
           this.selfEditFiles.add(newPath);
           this.stateManager.renameFile(oldPath, newPath);
         }
@@ -444,11 +477,59 @@ export class FileWatcher {
     const arrival = this.arrival();
     return this.perPath.run(filePath, async () => {
       try {
+        // A create event for a DIRECTORY carries its children implicitly. VSCode registers
+        // the recursive watch on a newly created directory asynchronously, so a file written
+        // into it in the same instant (`mkdir -p x && write x/f`, i.e. any agent scaffolding
+        // a feature) produces no event at all — not a late one, none — and would stay
+        // invisible until someone happened to press Refresh, with the panel meanwhile
+        // reporting the review complete. The parent directory's own create DOES arrive,
+        // because its parent was already watched, so walk the subtree from here.
+        // Counterpart to the delete-side fix in `00ecbbb`.
+        if (await isRealDirectory(filePath)) {
+          await this.handleDiskCreateTree(filePath, arrival);
+          return;
+        }
         await this.handleDiskCreate(filePath, arrival);
       } finally {
         this.releaseSaveToken(filePath, token);
       }
     });
+  }
+
+  /**
+   * Feed every file under `dir` through the normal create path, as if its event had arrived.
+   *
+   * `arrival` is the *directory's* arrival, deliberately: the children appeared inside the
+   * same window the directory did, so they must be classified against the snapshot flag and
+   * session that were current then — see `handleDiskCreate`. Each file takes its own
+   * `perPath` key, so this cannot deadlock against the directory's queue, and a child whose
+   * own create event does arrive is simply serialized behind (or ahead of) this one and
+   * skipped as already-known. Symlinked directories are not followed: `entry.isDirectory()`
+   * is false for them, which also rules out cycles.
+   */
+  private async handleDiskCreateTree(dir: string, arrival: EventArrival): Promise<void> {
+    if (!this.stillLive(arrival.session)) return;
+    if (this.shouldIgnore(dir, true)) return;  // don't descend into an ignored tree
+
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch { return; }  // vanished or unreadable between event and walk
+
+    for (const entry of entries) {
+      const full = normalizePath(path.join(dir, entry.name));
+      if (entry.isDirectory()) {
+        await this.handleDiskCreateTree(full, arrival);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        // Symlinks included: `isFile()` is false for them, and a symlink arriving as its own
+        // create event IS reviewed (its read follows the link), so skipping them here would
+        // make a file's treatment depend on whether its directory happened to be new.
+        // A symlink to a directory simply fails the read and is skipped. Deliberately not a
+        // blanket `else`: a FIFO or socket handed to `readFile` would block until a writer
+        // appears, and neither is reviewable anyway.
+        await this.perPath.run(full, () => this.handleDiskCreate(full, arrival));
+      }
+    }
   }
 
   private onDiskChange(uri: vscode.Uri): Promise<void> {
@@ -468,6 +549,29 @@ export class FileWatcher {
     return { duringSnapshot: this.snapshotCreates.active, session: this.stateManager.session };
   }
 
+  /**
+   * Is this event still worth acting on — same session, still enabled, not suppressed?
+   *
+   * Three conditions that every handler needs and that were previously written out at each
+   * site, both in the opening guard and again after every await. The rewrite that merged
+   * them also *strengthened* the post-await checks, which used to compare the session
+   * alone: a branch switch suppresses the watcher and clears state without opening a new
+   * session, so a handler that woke up mid-switch passed the session check and wrote a
+   * false entry straight through the clear. `onDiskDelete`'s child loop had already found
+   * that the hard way and spelled the full condition out; this is that condition, applied
+   * everywhere it was always needed.
+   *
+   * `session` must be the value sampled on *arrival* (see `arrival`), never re-read here.
+   * Deliberately does not cover `shouldIgnore` or `selfEditFiles`: those differ per handler
+   * (`handleDiskCreateTree` asks about a directory, the delete path orders them differently)
+   * and stay explicit at each site.
+   */
+  private stillLive(session: number): boolean {
+    return !this._suppressed
+      && this.stateManager.enabled
+      && this.stateManager.session === session;
+  }
+
   /** Drop `token` if it is still the entry for `filePath` — see the wrappers above. */
   private releaseSaveToken(filePath: string, token: SaveToken | undefined): void {
     if (token !== undefined && this.pendingManualSaves.get(filePath) === token) {
@@ -484,9 +588,7 @@ export class FileWatcher {
     // has since cleared, reinstating the exact false-new-file race the flag was added to
     // remove. Arrival time is the property being tested. Every write below comes after an
     // await, hence the `session` checks; see `StateManager.session`.
-    if (this._suppressed) return;
-    if (!this.stateManager.enabled) return;
-    if (this.stateManager.session !== session) return;  // changed while queued in `perPath`
+    if (!this.stillLive(session)) return;  // ended or suppressed while queued in `perPath`
     if (this.shouldIgnore(filePath)) return;
     if (this.selfEditFiles.has(filePath)) return;
 
@@ -501,7 +603,7 @@ export class FileWatcher {
         log(`onDiskCreate(${basename}): read failed while reviewing, skip`);
         return;
       }
-      if (this.stateManager.session !== session) return;
+      if (!this.stillLive(session)) return;
       log(`onDiskCreate(${basename}): reviewing, recompute hunks (baseline.len=${fileState.baseline?.length ?? 'null'}, disk.len=${diskContent.length})`);
       this.recomputeHunks(filePath, fileState.baseline, diskContent);
       return;
@@ -521,7 +623,7 @@ export class FileWatcher {
     }
 
     const gitBaseline = await this.stateManager.readBaseline(filePath);
-    if (this.stateManager.session !== session) { log(`onDiskCreate(${basename}): session changed while reading, skip`); return; }
+    if (!this.stillLive(session)) { log(`onDiskCreate(${basename}): session changed or watcher suppressed while reading, skip`); return; }
     log(`onDiskCreate(${basename}): gitBaseline=${gitBaseline !== undefined ? `'${gitBaseline.length} chars'` : 'undefined'}`);
 
     // A create during `snapshotWorkspace` is adopted because the file was on disk when Begin
@@ -568,9 +670,7 @@ export class FileWatcher {
   }
 
   private async onDiskDelete(uri: vscode.Uri, session: number): Promise<void> {
-    if (this._suppressed) return;
-    if (!this.stateManager.enabled) return;
-    if (this.stateManager.session !== session) return;  // changed while queued in `perPath`
+    if (!this.stillLive(session)) return;  // ended or suppressed while queued in `perPath`
     const filePath = normalizePath(uri.fsPath);
     const basename = path.basename(filePath);
     // `session` was sampled on arrival; the external-delete branch writes after an await.
@@ -624,7 +724,7 @@ export class FileWatcher {
     }
 
     const gitBaseline = fileState?.baseline ?? await this.stateManager.readBaseline(filePath);
-    if (this.stateManager.session !== session) { log(`onDiskDelete(${basename}): session changed while reading, skip`); return; }
+    if (!this.stillLive(session)) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while reading, skip`); return; }
     log(`onDiskDelete(${basename}): external delete, gitBaseline=${gitBaseline !== undefined ? `'${gitBaseline.length} chars'` : 'undefined'}`);
     if (gitBaseline === undefined) {
       // Not tracked at all — nothing to show
@@ -678,10 +778,10 @@ export class FileWatcher {
       // it as a false deletion. Checked after every await, since each child is one.
       let idleSurfaced = 0;
       for (const childPath of tracked) {
-        if (this.stateManager.session !== session || this._suppressed || !this.stateManager.enabled) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while surfacing children, stop`); return; }
+        if (!this.stillLive(session)) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while surfacing children, stop`); return; }
         if (this.stateManager.getFile(childPath) || this.shouldIgnore(childPath) || fs.existsSync(childPath)) continue;
         const childBaseline = await this.stateManager.readBaseline(childPath);
-        if (this.stateManager.session !== session || this._suppressed || !this.stateManager.enabled) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while surfacing children, stop`); return; }
+        if (!this.stillLive(session)) { log(`onDiskDelete(${basename}): session changed or watcher suppressed while surfacing children, stop`); return; }
         // Re-checked after the await: another handler may have queued or recreated it.
         if (childBaseline === undefined || this.stateManager.getFile(childPath) || fs.existsSync(childPath)) continue;
         this.enterReviewing(childPath, childBaseline, '');
@@ -698,9 +798,7 @@ export class FileWatcher {
 
   private async handleDiskChange(filePath: string, { duringSnapshot, session }: EventArrival): Promise<void> {
     const basename = path.basename(filePath);
-    if (this._suppressed) return;
-    if (!this.stateManager.enabled) return;
-    if (this.stateManager.session !== session) return;  // changed while queued in `perPath`
+    if (!this.stillLive(session)) return;  // ended or suppressed while queued in `perPath`
 
     // `duringSnapshot` and `session` were sampled on arrival, in the wrapper, for the same
     // reason as in `handleDiskCreate`: arrival time is the property being tested. This
@@ -725,7 +823,7 @@ export class FileWatcher {
       return;
     }
     // Before the save-absorb and reviewing branches, which write without a further await.
-    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }
+    if (!this.stillLive(session)) { log(`onDiskChange(${basename}): session changed or watcher suppressed while reading, skip`); return; }
 
     // Resolve the save token here, while the disk content needed to compare it is in
     // hand; the branches below only read the boolean. Reclamation itself is guaranteed
@@ -756,7 +854,7 @@ export class FileWatcher {
     // baseline, and without the drain the second reads the pre-save baseline, finds a diff,
     // and puts the user's own typing in the queue. Hence `readBaseline`.
     const gitBaseline = wasManualSave ? undefined : await this.stateManager.readBaseline(filePath);
-    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }
+    if (!this.stillLive(session)) { log(`onDiskChange(${basename}): session changed or watcher suppressed while reading, skip`); return; }
 
     // With no baseline, two populations reach the classifier and want opposite handling
     // (ADR-0012, superseding ADR-0008's blanket absorb): a file the enable snapshot or an
@@ -878,5 +976,27 @@ export class FileWatcher {
     this.pendingUserDeletes.clear();
     this.pendingRenameOldPaths.clear();
     this.disposables.forEach(d => d.dispose());
+  }
+}
+
+/** Synchronous `isRealDirectory`, for `onWillRenameFiles` — which cannot await. */
+function isDirectorySync(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isDirectory();
+  } catch {
+    return false;  // gone already, or unreadable — treat as a file
+  }
+}
+
+/**
+ * True only for a real directory. `lstat`, not `stat`: a symlink pointing at a directory
+ * must not be walked as one, or a link into a large tree (or back up into this one) would
+ * be enumerated as if freshly created.
+ */
+async function isRealDirectory(p: string): Promise<boolean> {
+  try {
+    return (await fs.promises.lstat(p)).isDirectory();
+  } catch {
+    return false;  // vanished between the event and this check
   }
 }

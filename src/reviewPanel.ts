@@ -41,6 +41,13 @@ interface PanelFile {
   removedLines: number;
   pendingCount: number;
   isNew: boolean;
+  /**
+   * Null baseline, but *not* a witnessed create — a file that predates the session and
+   * whose original was never captured. Distinct from `isNew` because the two have opposite
+   * outcomes under Discard: a new file is deleted, an unbaselined one is left exactly as it
+   * is. Badging both "new" told the user the panel would delete something it will not.
+   */
+  isUnbaselined: boolean;
   isDeleted: boolean;
   hunks: PanelHunk[];
 }
@@ -202,14 +209,23 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       }
 
       const pendingHunks = computeHunks(fileState.baseline, currentContent);
-      const isNew = fileState.baseline === null;
+      const unbaselined = fileState.baseline === null;
+      // The same test `discardDeletesFile` applies before Discard unlinks anything: only a
+      // create this session *witnessed* is a new file. A null baseline alone is not enough —
+      // a pre-existing binary, a file unreadable at Begin review, and one created inside the
+      // enable snapshot's sliver all carry one, and Discard leaves every one of them on disk.
+      // See `FileState.nullReason`.
+      const isNew = unbaselined && fileState.nullReason === 'created';
+      const isUnbaselined = unbaselined && !isNew;
       // Same predicate as StateManager.isDeleted, but reusing the `fileExists` stat
       // taken above rather than re-stat'ing: one filesystem read per file per refresh,
       // so `currentContent` and `isDeleted` can't describe two different moments.
       const isDeleted = !fileExists && fileState.baseline !== null;
-      // Show 0-hunk entries for new files (null baseline, e.g. new empty file)
-      // and deleted files (file missing from disk) so accept/discard remain available.
-      if (pendingHunks.length === 0 && !isNew && !isDeleted) continue;
+      // Show 0-hunk entries for null-baseline files (e.g. a new empty file) and deleted
+      // files (file missing from disk) so accept/discard remain available. Keyed on
+      // `unbaselined` rather than `isNew`: narrowing it to witnessed creates would have
+      // dropped an empty pre-existing file out of the queue entirely.
+      if (pendingHunks.length === 0 && !unbaselined && !isDeleted) continue;
 
       const addedLines = pendingHunks.reduce((s, h) => s + h.newLines, 0);
       const removedLines = pendingHunks.reduce((s, h) => s + h.oldLines, 0);
@@ -230,6 +246,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         removedLines,
         pendingCount: pendingHunks.length,
         isNew,
+        isUnbaselined,
         isDeleted,
         hunks: pendingHunks.map(h => ({
           id: hunkId(h),

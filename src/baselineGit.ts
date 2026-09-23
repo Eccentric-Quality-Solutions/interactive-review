@@ -342,6 +342,31 @@ export class BaselineGit {
   // ── snapshot / remove ─────────────────────────────────────────────────────
 
   /**
+   * Write `content` into the object database and return its blob hash.
+   *
+   * The `stdin` error listener is load-bearing rather than defensive tidiness: writing to
+   * git's stdin emits EPIPE if git exits early, and with no listener Node rethrows it as
+   * an uncaught exception that takes the extension host down — a try/catch around the
+   * await cannot see an unhandled stream `'error'` event.
+   *
+   * It lives here because it used to live in two places, `snapshot` and `snapshotBatch`,
+   * character for character. One copy of a host-crash fix is the entire point: the second
+   * copy is the one that eventually loses the listener.
+   */
+  private hashObject(content: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const child = execFile(
+        'git',
+        ['hash-object', '-w', '--stdin'],
+        { env: this.env },
+        (err, stdout) => (err ? reject(err) : resolve(stdout.trim()))
+      );
+      child.stdin!.on('error', reject);
+      child.stdin!.end(content, 'utf-8');
+    });
+  }
+
+  /**
    * Write content into the git index for filePath (no commit).
    * Use commit() to persist.
    */
@@ -349,19 +374,7 @@ export class BaselineGit {
     await this.initGit();
     const rel = normalizePath(path.relative(this.workTree, filePath));
     try {
-      const hash = await new Promise<string>((resolve, reject) => {
-        const child = execFile(
-          'git',
-          ['hash-object', '-w', '--stdin'],
-          { env: this.env },
-          (err, stdout) => (err ? reject(err) : resolve(stdout.trim()))
-        );
-        // Writing to git's stdin can emit EPIPE if git exits early. Without this
-        // listener Node rethrows it as an uncaught exception and crashes the host
-        // (the try/catch below can't see an unhandled stream 'error' event).
-        child.stdin!.on('error', reject);
-        child.stdin!.end(content, 'utf-8');
-      });
+      const hash = await this.hashObject(content);
       await this.git(['update-index', '--add', '--cacheinfo', `100644,${hash},${rel}`]);
       await this.commit();
     } catch (err) {
@@ -379,9 +392,17 @@ export class BaselineGit {
     const oldRel = normalizePath(path.relative(this.workTree, oldFilePath));
     const newRel = normalizePath(path.relative(this.workTree, newFilePath));
     try {
-      // ls-files returns all entries matching the path (a single file or all files under a directory)
-      const lsOut = await this.git(['ls-files', '--stage', '--', oldRel]);
-      const lines = lsOut.trim().split('\n').filter(Boolean);
+      // ls-files returns all entries matching the path (a single file or all files under a
+      // directory). `-z` for the reason spelled out in `removeFile`: `ls-files --stage`
+      // C-quotes a name holding a `"`, a backslash or a control character even under
+      // `core.quotepath=false`, and here the damage compounds. The quoted form does not start
+      // with `oldRel`, so the suffix arithmetic below produced paths like `ed/no\"te.txt"` —
+      // the force-remove hit nothing and the blob was re-staged at nonsense, leaving the real
+      // file with no baseline at all. `handleDiskCreateTree` then walks the renamed directory,
+      // finds a child with no baseline, and enters it as `nullReason: 'created'` — at which
+      // point Discard unlinks a file the user has had all along.
+      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', oldRel]);
+      const lines = lsOut.split('\0').filter(Boolean);
       if (lines.length === 0) {
         // No baseline to move, but the source still replaces the target: a baseline left
         // there would review the moved file as an edit of whatever the path held before.
@@ -394,7 +415,7 @@ export class BaselineGit {
       // Parse all matching entries
       const entries: { mode: string; hash: string; entryRel: string }[] = [];
       for (const line of lines) {
-        const m = line.match(/^(\d+) ([0-9a-f]+) \d+\t(.+)$/);
+        const m = line.match(/^(\d+) ([0-9a-f]+) \d+\t([\s\S]+)$/);
         if (!m) continue;
         entries.push({ mode: m[1], hash: m[2], entryRel: normalizePath(m[3]) });
       }
@@ -424,15 +445,45 @@ export class BaselineGit {
   }
 
   /**
-   * Remove a file's baseline from the git index and commit.
+   * Remove a path's baseline from the git index and commit. When the path is a directory,
+   * every baseline beneath it goes too.
+   *
+   * The directory case is why this removes the entries git *reports* rather than the
+   * pathspec that found them. `update-index --force-remove -- <dir>` **exits 0 having
+   * removed nothing** — git's index has no directory entries — which is the same silent
+   * failure `StateManager.removePathAndChildren` was written to work around, reachable here
+   * through `renameFile`'s untracked-source fallback: renaming a directory onto another
+   * directory left every baseline under the target in place, so the next reload reviewed
+   * the moved files as edits of whatever used to occupy those paths.
+   *
+   * For the ordinary single-file call this is the same operation it always was: `ls-files`
+   * reports one entry whose path is the one that was passed in.
    */
   async removeFile(filePath: string): Promise<void> {
     await this.initGit();
     const rel = normalizePath(path.relative(this.workTree, filePath));
     try {
-      const lsOut = await this.git(['ls-files', '--stage', '--', rel]);
-      if (!lsOut.trim()) return; // not tracked — nothing to remove
-      await this.git(['update-index', '--force-remove', '--', rel]);
+      // `-z`, and NOT `.trim().split('\n')`. `ls-files --stage` C-quotes any name holding a
+      // `"`, a backslash or a control character *regardless* of `core.quotepath=false`, so
+      // the line-parsed form hands `"no\"te.txt"` back to `update-index`, which exits 0 and
+      // removes nothing — the exact silent no-op this method was just fixed to stop doing,
+      // reintroduced through the other door. `-z` prints the real bytes. Every reader of
+      // git's path output in this file now does the same — `renameFile`, `listTrackedFiles`
+      // and `listTrackedUnder` — because each was found wrong in turn.
+      //
+      // No `.trim()` either: it would eat the trailing space of a filename that ends in one.
+      // `[\s\S]` rather than `.` so a name containing a newline survives, which is the other
+      // thing `-z` buys.
+      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);
+      const tracked = lsOut.split('\0').filter(Boolean)
+        .map(entry => entry.match(/^\d+ [0-9a-f]+ \d+\t([\s\S]+)$/)?.[1])
+        .filter((p): p is string => p !== undefined)
+        .map(normalizePath);
+      if (tracked.length === 0) return; // not tracked — nothing to remove
+      const CHUNK = 200;
+      for (let i = 0; i < tracked.length; i += CHUNK) {
+        await this.git(['update-index', '--force-remove', '--', ...tracked.slice(i, i + CHUNK)]);
+      }
       await this.commit();
     } catch (err) {
       this.log(`removeFile failed for ${rel}: ${err}`);
@@ -457,21 +508,10 @@ export class BaselineGit {
       // which looks exactly like "nothing to review". Every subsequent edit then surfaced
       // as a whole-file unbaselined hunk. `snapshotWorkspace` now reports the throw to the
       // user; this cap is what stops it happening in the first place.
-      const entries = await mapWithLimit(files, HASH_CONCURRENCY, ({ filePath, content }) =>
-        new Promise<{ rel: string; hash: string }>((resolve, reject) => {
-          const rel = normalizePath(path.relative(this.workTree, filePath));
-          const child = execFile(
-            'git',
-            ['hash-object', '-w', '--stdin'],
-            { env: this.env },
-            (err, stdout) => (err ? reject(err) : resolve({ rel, hash: stdout.trim() }))
-          );
-          // Guard against an uncaught EPIPE crashing the host if git exits early;
-          // routes the stream error into the promise so the try/catch handles it.
-          child.stdin!.on('error', reject);
-          child.stdin!.end(content, 'utf-8');
-        })
-      );
+      const entries = await mapWithLimit(files, HASH_CONCURRENCY, async ({ filePath, content }) => ({
+        rel: normalizePath(path.relative(this.workTree, filePath)),
+        hash: await this.hashObject(content),
+      }));
       // Stage all entries, chunked to avoid OS argument length limits
       const CHUNK = 100;
       for (let i = 0; i < entries.length; i += CHUNK) {
@@ -577,10 +617,15 @@ export class BaselineGit {
     await this.initGit();
     if (!(await this.hasHead())) return [];
     try {
-      const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r']);
+      // `-z`, matching `listTrackedUnder`: `ls-tree --name-only` C-quotes the same names
+      // `ls-files` does, and a quoted path joined to the work tree is a path that does not
+      // exist — so `removePathAndChildren`, the branch-switch re-sync and `syncIgnoreState`
+      // all silently skipped those files. The per-line `.trim()` went with it: it ate the
+      // leading and trailing whitespace of names that legitimately carry it, which is the
+      // other thing `-z` exists to preserve.
+      const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r', '-z']);
       return out
-        .split('\n')
-        .map(l => l.trim())
+        .split('\0')
         .filter(Boolean)
         .map(rel => normalizePath(path.join(this.workTree, rel)));
     } catch (err) {

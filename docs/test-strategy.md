@@ -231,7 +231,7 @@ The file-watcher integration tests flake here, and the pattern is diagnostic. Ac
 repeated runs of identical code, *which* tests fail changes from run to run, and some runs
 pass all eleven. A deterministic regression fails the same tests every time. The cause is
 inotify starvation: this workstation runs at roughly 121 of 128 inotify instances. See the
-`integration-suite-inotify` note and `todo.md` item 4.
+`integration-suite-inotify` note and [docs/investigations-2026-09-22.md](investigations-2026-09-22.md) (the test-scaffolding section).
 
 The watcher tests are honest, so they flake here *more* than dishonest ones would. On
 2026-09-21, at 129–130 instances against the 128 limit, runs of identical code passed 11/11

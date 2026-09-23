@@ -21,10 +21,12 @@ const BOM = '\uFEFF';
  * comparing the open editor buffer against disk — which VSCode's silent reload of a
  * clean open buffer defeats. These tests exercise the classification directly.
  *
- * Determinism: we invoke the private onDiskChange handler through the getFileWatcher()
- * seam instead of waiting on the headless-host FileSystemWatcher, whose external-write
- * events are dropped/delayed on Linux (see helpers.waitForConditionNudged). This tests
- * the exact classification logic without racing the flaky watcher.
+ * Scope: we invoke the private onDiskChange handler through the getFileWatcher() seam
+ * rather than writing to disk, so these tests cover classification alone and cannot fail
+ * for a delivery reason. (The seam predates the 2026-08-10 retraction of the "headless
+ * Linux drops external events" premise — design.md §4c.1 — but isolating classification
+ * is worth keeping on its own merits.) Live watcher delivery of the same path is covered
+ * end-to-end, without a seam or a rescan fallback, in liveSaveEvent.test.ts.
  */
 suite('interactive-review save-vs-external-edit classification', function () {
   this.timeout(30000);
@@ -138,6 +140,20 @@ suite('interactive-review save-vs-external-edit classification', function () {
       sm.getFile(filePath)?.status, 'reviewing',
       'A user save must not enter the review queue',
     );
+
+    // Not-reviewing on its own is a weak claim: `FileStatus` is 'idle' | 'reviewing', so
+    // `?.status` on a file that was dropped from tracking is undefined and passes too.
+    // Absorb has a positive signal — fileWatcher.ts:747 folds the save into the baseline
+    // with no hunk — so pin the baseline advancing. The write is queued, hence the wait.
+    const absorbed = 'original\ntyped by user\n';
+    try {
+      await waitForCondition(() => gitGetBaseline(root, rel) === absorbed);
+    } catch {
+      throw new Error('user save was not absorbed into the baseline: '
+        + `baselineInGit=${JSON.stringify(gitGetBaseline(root, rel))} `
+        + `expected=${JSON.stringify(absorbed)} `
+        + `state=${JSON.stringify(sm.getFile(filePath))}`);
+    }
   });
 
   test('external change with no baseline is reviewed as a new file (former Cause B)', async () => {

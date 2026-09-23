@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import assert from 'assert';
 import {
-  getWorkspaceRoot, gitGetBaseline, sleep, waitForCondition, waitForReviewing,
+  getWorkspaceRoot, gitGetBaseline, waitForCondition, waitForWatcher, settle, readSysctl,
   enableReview, disableReview, writeFileExternally, cleanWorkspace,
   getStateManager, openDocInEditor, findOpenDoc,
 } from './helpers';
@@ -13,11 +14,15 @@ import {
  * path a user hits: an external process writes a file that is open+clean, VSCode silently
  * reloads the buffer, and the extension must still surface the edit for review.
  *
- * Note: the headless host's watcher is unreliable for external raw-fs writes (see
- * helpers.waitForConditionNudged), so each test reports whether the live watcher surfaced
- * the change on its own, and falls back to the production refresh path otherwise. Either
- * way the assertions prove the fix's net effect: external edit → reviewing + baseline kept;
- * user save → absorbed.
+ * These tests depend on real watcher delivery and must fail if it breaks. They used to
+ * fall back to the refresh path when the watcher stayed quiet, on the belief that the
+ * headless host dropped external raw-fs events — retracted 2026-08-10 (design.md §4c.1).
+ * The fallback made the suite's only live-watcher coverage unfalsifiable: with the watcher
+ * disconnected, the rescan reached the same end state and the test still passed. Waits here
+ * are therefore `waitForWatcher` (no nudge) and negative assertions are gated on `settle`.
+ * If one flakes, check inotify starvation first (docs/test-strategy.md), then treat it as a
+ * watcher bug. Assertions prove the fix's net effect: external edit → reviewing + baseline
+ * kept; user save → absorbed.
  */
 suite('interactive-review LIVE save-event classification', function () {
   this.timeout(60000);
@@ -52,29 +57,33 @@ suite('interactive-review LIVE save-event classification', function () {
     const edited = 'original\nedit from terminal\n';
     writeFileExternally(filePath, edited);
 
-    // VSCode silently reloads the clean buffer to match disk — the exact state that
-    // fooled the old heuristic. Confirm it actually happens live.
-    let reloaded = false;
+    // VSCode silently reloads the clean buffer to match disk — the exact state that fooled
+    // the old heuristic, and the ONLY thing separating this test from the filewatch ones
+    // (none of which open an editor). Asserted, not logged: when it was merely logged, a
+    // run where the reload did not happen still passed green while testing nothing this
+    // file is for.
     try {
-      await waitForCondition(() => findOpenDoc(filePath)?.getText() === edited, 5000);
-      reloaded = true;
-    } catch { /* reload not observed within window */ }
-    console.log(`LIVE: buffer reloaded to match disk = ${reloaded}`);
-
-    // Give the REAL watcher a chance to surface it on its own — no nudge, no seam.
-    const sm = getStateManager();
-    let surfacedByWatcher = false;
-    for (let i = 0; i < 40; i++) { // up to ~10s
-      if (sm.getFile(filePath)?.status === 'reviewing') { surfacedByWatcher = true; break; }
-      await sleep(250);
+      await waitForCondition(() => findOpenDoc(filePath)?.getText() === edited);
+    } catch {
+      throw new Error('precondition lost: VSCode did not silently reload the clean open buffer '
+        + `to match disk. buffer=${JSON.stringify(findOpenDoc(filePath)?.getText())} `
+        + `disk=${JSON.stringify(fs.readFileSync(filePath, 'utf-8'))}`);
     }
-    console.log(`LIVE: surfaced by real watcher (no nudge) = ${surfacedByWatcher}`);
 
-    if (!surfacedByWatcher) {
-      // Headless watcher dropped the event — fall back to the production refresh path
-      // (what a user's reliable watcher, or the refresh button, would do).
-      await waitForReviewing(filePath);
-      console.log('LIVE: surfaced via production refresh fallback');
+    // The REAL watcher must surface it on its own — no nudge, no seam. That is this
+    // test's entire subject, so there is deliberately no rescan fallback here.
+    // On timeout, report what actually happened: this is the test most likely to fail on
+    // a starved box, and a bare "condition not met" cannot tell undelivered-event apart
+    // from delivered-but-misclassified. (Same reason as deletedLens.setupDeletedFile.)
+    const sm = getStateManager();
+    try {
+      await waitForWatcher(() => sm.getFile(filePath)?.status === 'reviewing');
+    } catch {
+      throw new Error('live watcher never surfaced the external edit: '
+        + `state=${JSON.stringify(sm.getFile(filePath))} `
+        + `onDisk=${JSON.stringify(fs.readFileSync(filePath, 'utf-8'))} `
+        + `baselineInGit=${JSON.stringify(gitGetBaseline(root, rel))} `
+        + `inotifyMaxInstances=${readSysctl('max_user_instances')}`);
     }
 
     assert.strictEqual(sm.getFile(filePath)?.status, 'reviewing',
@@ -97,15 +106,30 @@ suite('interactive-review LIVE save-event classification', function () {
     const saved = await editor.document.save(); // real save → real onDidSaveTextDocument
     assert.ok(saved, 'save should succeed');
 
-    // Give the real watcher time to (wrongly) surface it if the fix regressed.
+    // Negative assertion: a fixed sleep here would pass whenever the event is merely
+    // late, i.e. on broken code. Canary-settle instead — it proves the watcher has
+    // delivered everything written before it, so "not reviewing" means absorbed.
     const sm = getStateManager();
-    for (let i = 0; i < 20; i++) { // ~5s
-      if (sm.getFile(filePath)?.status === 'reviewing') break;
-      await sleep(250);
-    }
+    await settle({ canary: true });
 
     assert.notStrictEqual(sm.getFile(filePath)?.status, 'reviewing',
       'a user save must not enter the review queue');
-    console.log('LIVE: user save correctly absorbed (not reviewing)');
+
+    // "Not reviewing" alone is also true of a file that was dropped from tracking or never
+    // seen — `FileStatus` is only 'idle' | 'reviewing', so `?.status` on an absent file is
+    // undefined and passes. Absorb has a positive signal: fileWatcher.ts:747 folds the save
+    // into the baseline with no hunk, so the baseline must ADVANCE to the saved content.
+    // That is the exact mirror of the first test's "baseline preserved", and it is what
+    // distinguishes absorbed from never-delivered. The write is queued, hence the wait.
+    const absorbed = 'original\ntyped by user\n';
+    try {
+      await waitForCondition(() => gitGetBaseline(root, rel) === absorbed);
+    } catch {
+      throw new Error('user save was not absorbed into the baseline: '
+        + `baselineInGit=${JSON.stringify(gitGetBaseline(root, rel))} `
+        + `expected=${JSON.stringify(absorbed)} `
+        + `onDisk=${JSON.stringify(fs.readFileSync(filePath, 'utf-8'))} `
+        + `state=${JSON.stringify(sm.getFile(filePath))}`);
+    }
   });
 });

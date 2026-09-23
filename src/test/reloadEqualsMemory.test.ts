@@ -74,8 +74,23 @@ afterEach(async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-/** Mirrors `FileWatcher.shouldIgnore` for the only path it matters for here: our own state. */
-const ignore = (fp: string) => fp === path.join(root, '.vscode') || fp.startsWith(path.join(root, '.vscode') + path.sep);
+/**
+ * Paths the review is currently ignoring, on top of our own state directory.
+ *
+ * Mutable because a *fixed* ignore rule cannot reach the population every delete-licence bug
+ * has lived in: a file that was on disk at Begin review and yet has **no baseline**. Anything
+ * the snapshot walks gets one, so with a constant `ignore` the walk only ever produced
+ * unbaselined files it had *itself created* — which are legitimately deletable, so the safety
+ * assertion below could never fire. Ignoring a file at Begin review and un-ignoring it later
+ * is the real mechanism (`0af3a53`), and it is one set plus one op.
+ */
+let extraIgnored = new Set<string>();
+
+/** Mirrors `FileWatcher.shouldIgnore`: our own state directory, plus the ignore rules. */
+const ignore = (fp: string) => inStateDir(fp)
+  || [...extraIgnored].some(p => fp === p || fp.startsWith(p + path.sep));
+
+const inStateDir = (fp: string) => fp === path.join(root, '.vscode') || fp.startsWith(path.join(root, '.vscode') + path.sep);
 
 const abs = (rel: string) => path.join(root, rel);
 
@@ -94,13 +109,19 @@ function readDisk(fp: string): string | undefined {
   try { return fs.readFileSync(fp, 'utf-8'); } catch { return undefined; }
 }
 
-/** Every regular file under the workspace, excluding our state directory. */
+/**
+ * Every regular file under the workspace, excluding our state directory.
+ *
+ * Deliberately NOT filtered by `ignore`: an ignored file is still on disk and still the
+ * user's, and the ops may still edit it — which is what a real editor does to a gitignored
+ * file.
+ */
 function diskFiles(): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, e.name);
-      if (ignore(full)) continue;
+      if (inStateDir(full)) continue;
       if (e.isDirectory()) walk(full); else if (e.isFile()) out.push(full);
     }
   };
@@ -135,6 +156,7 @@ function apply(fp: string, content: string, decision: DiskEventDecision): void {
 
 /** `FileWatcher.handleDiskChange`, outside any snapshot or ignore-sync window. */
 async function onDiskChange(fp: string, manualSave: boolean): Promise<void> {
+  if (ignore(fp)) return;  // FileWatcher.handleDiskChange's shouldIgnore guard
   const content = readDisk(fp);
   if (content === undefined) return;
   const st = sm.getFile(fp);
@@ -147,6 +169,7 @@ async function onDiskChange(fp: string, manualSave: boolean): Promise<void> {
 
 /** `FileWatcher.handleDiskCreate`, outside any snapshot window. */
 async function onDiskCreate(fp: string): Promise<void> {
+  if (ignore(fp)) return;  // FileWatcher.handleDiskCreate's shouldIgnore guard
   const content = readDisk(fp);
   if (content === undefined) return;
   const st = sm.getFile(fp);
@@ -160,6 +183,7 @@ async function onDiskCreate(fp: string): Promise<void> {
 
 /** `FileWatcher.onDiskDelete` for an external (non-Explorer) delete of a single file. */
 async function onExternalDelete(fp: string): Promise<void> {
+  if (ignore(fp)) return;  // FileWatcher.onDiskDelete's shouldIgnore guard
   const st = sm.getFile(fp);
   if (st?.baseline === null) { sm.exitReviewing(fp); return; }
   const gb = st?.baseline ?? await sm.readBaseline(fp);
@@ -193,6 +217,13 @@ function acceptOneHunk(fp: string, rnd: () => number): void {
  * `discardFileByPath`. The disk writes are the extension's own, so the watcher ignores them
  * (`markSelfEdit`) and no event handler runs.
  */
+function renameViaExplorer(from: string, to: string): void {
+  // `FileWatcher.onWillRenameFiles`: a target under an ignored path takes the file out of
+  // review instead of migrating the entry there — see that handler for why.
+  if (ignore(to)) sm.removePathAndChildren(from);
+  else sm.renameFile(from, to);
+}
+
 function discardFile(fp: string): void {
   const st = sm.getFile(fp);
   if (!st) return;
@@ -299,11 +330,11 @@ function pickOp(rnd: () => number): Op {
   }
   if (r < 0.53 && existing) {
     // Explorer delete: FileWatcher.onDiskDelete's pendingUserDeletes branch.
-    return { name: `explorer-delete ${rel(existing)}`, run: async () => { fs.rmSync(existing); sm.removePathAndChildren(existing); } };
+    return { name: `explorer-delete ${rel(existing)}`, run: async () => { fs.rmSync(existing); if (!ignore(existing)) sm.removePathAndChildren(existing); } };
   }
   if (r < 0.57 && fs.existsSync(abs('d'))) {
     // Explorer delete of a whole folder — the directory is gone before the event arrives.
-    return { name: 'explorer-delete d/', run: async () => { fs.rmSync(abs('d'), { recursive: true }); sm.removePathAndChildren(abs('d')); } };
+    return { name: 'explorer-delete d/', run: async () => { fs.rmSync(abs('d'), { recursive: true }); if (!ignore(abs('d'))) sm.removePathAndChildren(abs('d')); } };
   }
   if (r < 0.64 && existing) {
     const target = abs(FILES[Math.floor(rnd() * FILES.length)]);
@@ -314,12 +345,29 @@ function pickOp(rnd: () => number): Op {
       return {
         name: `rename ${rel(existing)} → ${rel(target)}`,
         run: async () => {
-          sm.renameFile(existing, target);
+          renameViaExplorer(existing, target);
           fs.mkdirSync(path.dirname(target), { recursive: true });
           fs.renameSync(existing, target);
         },
       };
     }
+  }
+  if (r < 0.70 && extraIgnored.size > 0) {
+    // Un-ignore a file that was on disk — and therefore skipped — at Begin review, exactly as
+    // the settings/.gitignore watchers do: relax the rule, then run `syncIgnoreState`.
+    //
+    // A variant that relaxed the rule WITHOUT syncing was tried and removed. It reached the
+    // population the safety assertion wants (pre-existing, no baseline) but it is not a state
+    // production sustains: every ignore-rule change is wired to `onIgnoreRulesChanged` →
+    // `syncIgnoreState`, so "rule changed, no sync, then a reload in the same session" cannot
+    // happen. It produced six reload-disagrees-with-memory failures at 80×25 that were
+    // entirely the model's fault. Do not re-add it without also modelling the sync the real
+    // watchers guarantee.
+    const [freed] = [...extraIgnored];
+    return {
+      name: `un-ignore ${rel(freed)}`,
+      run: async () => { extraIgnored.delete(freed); await sm.syncIgnoreState(ignore); },
+    };
   }
   if (r < 0.74 && inQueue) return { name: `accept-file ${rel(inQueue)}`, run: async () => acceptFile(inQueue) };
   if (r < 0.84 && inQueue) return { name: `accept-hunk ${rel(inQueue)}`, run: async () => acceptOneHunk(inQueue, rnd) };
@@ -348,11 +396,44 @@ function pickOp(rnd: () => number): Op {
   return { name: 'window reload', run: async () => { sm = await assertReloadEqualsMemory('at a window reload'); } };
 }
 
+describe('renaming into an ignored location', () => {
+  /**
+   * Found by the random walk once a file could be ignored at Begin review (seed 17, 80x25).
+   *
+   * `onWillRenameFiles` migrates the entry to the new path without asking `shouldIgnore`,
+   * but `load()` and `rebuildState()` both skip ignored paths — so memory keeps a reviewing
+   * entry at a path a rescan will never produce. Renaming a file under review into `dist/`
+   * or `node_modules/` is the everyday version.
+   */
+  it('does not leave a reviewing entry at a path a reload cannot see', async () => {
+    extraIgnored = new Set();
+    writeDisk(abs('a.txt'), 'original\n');
+    extraIgnored.add(abs('d'));           // the whole `d/` tree is ignored
+    await beginReview();
+
+    writeDisk(abs('g.txt'), 'brand new\n');
+    await onDiskCreate(abs('g.txt'));     // witnessed create -> nullReason 'created'
+    assert.equal(sm.getFile(abs('g.txt'))?.nullReason, 'created', 'precondition');
+
+    renameViaExplorer(abs('g.txt'), abs('d/c.txt'));
+    fs.mkdirSync(abs('d'), { recursive: true });
+    fs.renameSync(abs('g.txt'), abs('d/c.txt'));
+
+    await assertReloadEqualsMemory('after renaming a new file into an ignored directory');
+  });
+});
+
 describe('reload equals memory', () => {
   for (let seed = 1; seed <= SEEDS; seed++) {
     it(`seed ${seed}: a fresh load() reproduces the live review queue`, async () => {
       const rnd = makeRng(seed * 7919);
+      extraIgnored = new Set();
       for (const f of FILES) if (rnd() < 0.8) writeDisk(abs(f), randomText(rnd));
+      // Half the seeds open with one on-disk file ignored, so Begin review skips it and it
+      // enters the session pre-existing but unbaselined — a population a constant ignore rule
+      // cannot produce. This is what surfaced the rename-into-ignored defect.
+      const hidden = FILES.map(abs).filter(fs.existsSync);
+      if (hidden.length > 0 && rnd() < 0.5) extraIgnored.add(hidden[Math.floor(rnd() * hidden.length)]);
       await beginReview();
 
       const trail: string[] = [];
@@ -544,21 +625,38 @@ describe('FileWatcher source guards', () => {
 
   // A handler that decided against one session and writes after the baseline read would put
   // a file into the queue after End review cleared it — see `StateManager.session`.
+  //
+  // The guard used to be spelled `this.stateManager.session !== session` at each site and is
+  // now `FileWatcher.stillLive(session)`, which asserts the same thing and two more: still
+  // enabled, and not suppressed. That is strictly stronger — a branch switch suppresses the
+  // watcher and clears state *without* opening a new session, so the session comparison
+  // alone let a handler waking up mid-switch write a false entry straight through the clear.
   it('re-checks the session straight after every baseline read', () => {
     const unguarded = lines.map((line, i) => ({ line, n: i + 1 }))
       .filter(({ line, n }) => code(line) && line.includes('await this.stateManager.readBaseline(')
-        && !lines[n].includes('this.stateManager.session !== session'));
+        && !lines[n].includes('this.stillLive(session)'));
     assert.deepEqual(unguarded, []);
   });
 
   // Create, change and delete handlers for one path must run in arrival order, or the
   // change handler for a new file can overwrite the create's 'created' — see PathSerializer.
   it('dispatches create, change and delete events through the per-path serializer', () => {
+    // Comment lines are dropped first so the window below measures *code* distance. With
+    // them in, the paragraph of rationale above a dispatch pushed its own `perPath.run(`
+    // out of view and the guard failed on correct code.
+    const codeLines = lines.filter(code);
     for (const handler of ['this.handleDiskCreate(', 'this.handleDiskChange(', 'this.onDiskDelete(']) {
-      const at = lines.findIndex(l => code(l) && l.includes(handler) && !l.startsWith('private'));
-      assert.ok(at >= 0, `${handler} is called`);
-      const window = lines.slice(Math.max(0, at - 3), at + 1).join('\n');
-      assert.match(window, /this\.perPath\.run\(/, `${handler} runs inside perPath.run`);
+      const sites = codeLines
+        .map((line, i) => ({ line, i }))
+        .filter(({ line }) => line.includes(handler) && !line.startsWith('private'));
+      assert.ok(sites.length > 0, `${handler} is called`);
+      // EVERY call site, not just the first. `handleDiskCreateTree` added a second dispatch
+      // — the children of a newly created directory — and a guard that stopped at the first
+      // match would have gone on passing whichever of the two was left unserialized.
+      for (const { i } of sites) {
+        const window = codeLines.slice(Math.max(0, i - 8), i + 1).join('\n');
+        assert.match(window, /this\.perPath\.run\(/, `${handler} at code line ${i + 1} runs inside perPath.run`);
+      }
     }
   });
 });

@@ -76,6 +76,60 @@ const MUTATIONS = [
     test: "baselineGitHardening.test.js",
   },
   {
+    desc: "cursor accept/reject wraps to the first hunk when the cursor is past every hunk",
+    file: "src/commands.ts",
+    edits: [
+      ["  return hunkAtLine(hunks, line);",
+       "  return hunkAtLine(hunks, line) ?? hunks[0];"],
+    ],
+    test: "hunkAtCursor.test.js",
+  },
+  {
+    desc: "renameFile parses ls-files without -z (C-quoted name re-staged at a nonsense path)",
+    file: "src/baselineGit.ts",
+    edits: [
+      ["      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', oldRel]);\n      const lines = lsOut.split('\\0').filter(Boolean);",
+       "      const lsOut = await this.git(['ls-files', '--stage', '--', oldRel]);\n      const lines = lsOut.trim().split('\\n').filter(Boolean);"],
+    ],
+    test: "baselineGitHardening.test.js",
+  },
+  {
+    desc: "listTrackedFiles parses ls-tree without -z (C-quoted names missed everywhere)",
+    file: "src/baselineGit.ts",
+    edits: [
+      ["      const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r', '-z']);\n      return out\n        .split('\\0')\n        .filter(Boolean)",
+       "      const out = await this.git(['ls-tree', 'HEAD', '--name-only', '-r']);\n      return out\n        .split('\\n')\n        .map(l => l.trim())\n        .filter(Boolean)"],
+    ],
+    test: "baselineGitHardening.test.js",
+  },
+  {
+    desc: "removeFile parses ls-files without -z (C-quoted names silently not removed)",
+    file: "src/baselineGit.ts",
+    edits: [
+      ["      const lsOut = await this.git(['ls-files', '--stage', '-z', '--', rel]);\n      const tracked = lsOut.split('\\0').filter(Boolean)\n        .map(entry => entry.match(/^\\d+ [0-9a-f]+ \\d+\\t([\\s\\S]+)$/)?.[1])",
+       "      const lsOut = await this.git(['ls-files', '--stage', '--', rel]);\n      const tracked = lsOut.trim().split('\\n').filter(Boolean)\n        .map(entry => entry.match(/^\\d+ [0-9a-f]+ \\d+\\t(.+)$/)?.[1])"],
+    ],
+    test: "baselineGitHardening.test.js",
+  },
+  {
+    desc: "removeFile force-removes the pathspec, so a directory silently loses nothing",
+    file: "src/baselineGit.ts",
+    edits: [
+      ["      if (tracked.length === 0) return; // not tracked — nothing to remove",
+       "      if (tracked.length === 0) return; tracked.length = 0; tracked.push(rel);"],
+    ],
+    test: "baselineGitHardening.test.js",
+  },
+  {
+    desc: "panel badges any null baseline as a new file, ignoring nullReason",
+    file: "src/reviewPanel.ts",
+    edits: [
+      ["      const isNew = unbaselined && fileState.nullReason === 'created';",
+       "      const isNew = unbaselined;"],
+    ],
+    test: "panelBadge.test.js",
+  },
+  {
     desc: "unbounded git hash-object fan-out",
     file: "src/baselineGit.ts",
     edits: [
@@ -151,8 +205,8 @@ const MUTATIONS = [
     desc: "FileWatcher reads a baseline straight from git, bypassing the queue",
     file: "src/fileWatcher.ts",
     edits: [
-      ["const gitBaseline = await this.stateManager.readBaseline(filePath);\n    if (this.stateManager.session !== session) { log(`onDiskCreate(",
-       "const gitBaseline = await git.getBaseline(filePath);\n    if (this.stateManager.session !== session) { log(`onDiskCreate("],
+      ["const gitBaseline = await this.stateManager.readBaseline(filePath);\n    if (!this.stillLive(session)) { log(`onDiskCreate(",
+       "const gitBaseline = await git.getBaseline(filePath);\n    if (!this.stillLive(session)) { log(`onDiskCreate("],
     ],
     test: "reloadEqualsMemory.test.js",
   },
@@ -205,7 +259,7 @@ const MUTATIONS = [
     desc: "disk-event handler writes after a baseline read across a session change",
     file: "src/fileWatcher.ts",
     edits: [
-      ["    if (this.stateManager.session !== session) { log(`onDiskChange(${basename}): session changed while reading, skip`); return; }\n\n    // With no baseline",
+      ["    if (!this.stillLive(session)) { log(`onDiskChange(${basename}): session changed or watcher suppressed while reading, skip`); return; }\n\n    // With no baseline",
        "\n    // With no baseline"],
     ],
     test: "reloadEqualsMemory.test.js",
@@ -403,8 +457,8 @@ const MUTATIONS = [
     desc: "renaming a new file leaves the target's old baseline in git",
     file: "src/stateManager.ts",
     edits: [
-      ["      this.gitQueue = this.gitQueue.then(() => g.removeFile(newFilePath)).catch(err => {",
-       "      this.gitQueue = this.gitQueue.then(() => undefined).catch(err => {"],
+      ["      this.enqueue('renameFile: clearing target', g => g.removeFile(newFilePath));",
+       "      this.enqueue('renameFile: clearing target', async () => undefined);"],
     ],
     test: "reloadEqualsMemory.test.js",
   },
@@ -468,8 +522,11 @@ const MUTATIONS = [
     edits: [
       ["'-r', '-z', '--name-only'",
        "'-r', '--name-only'"],
-      [".split('\\0')",
-       ".split('\\n')"],
+      // Anchored on the `filter` that follows, because `removeFile` and `listTrackedFiles`
+      // now have their own `return out` / `split('\\0')` pairs. Every path reader in this
+      // file went `-z` in turn, so bare anchors here match several sites.
+      ["        .split('\\0')\n        .filter(entry => entry.startsWith(prefix))",
+       "        .split('\\n')\n        .filter(entry => entry.startsWith(prefix))"],
     ],
     test: "baselineGit.test.js",
   },

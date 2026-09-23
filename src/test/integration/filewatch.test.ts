@@ -4,7 +4,8 @@ import * as path from 'path';
 import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
-  sleep, waitForCondition, waitForConditionNudged, waitForWatcher, enableReview, disableReview,
+  sleep, waitForCondition, waitForConditionNudged, waitForWatcher, readSysctl,
+  enableReview, disableReview,
   writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher,
 } from './helpers';
 
@@ -218,12 +219,30 @@ suite('interactive-review file watcher integration', function () {
     }
 
     // New files have null baseline → tracked in memory, not in git.
-    // Watcher only. This was rescan-nudged on the belief that the headless watcher drops
-    // burst creates; that premise was retracted (docs/design.md §4c.1), and a burst is
-    // precisely what this test exists to prove the watcher delivers.
-    await waitForWatcher(() => files.every(f => {
-      return sm.getFile(path.join(root, f))?.status === 'reviewing';
-    }));
+    //
+    // Watcher only, no nudge. Note what the 2026-08-10 retraction (docs/design.md §4c.1)
+    // did and did not cover: root-level creates are delivered fine, which is what it
+    // measured. `dir/f4.txt` and `dir/sub/f5.txt` are not root-level, and when this test
+    // was de-nudged on 2026-09-21 they failed every run — VSCode registers the recursive
+    // watch on a NEW directory asynchronously, so files written into it in the same instant
+    // produced no event at all. That was a real product bug, fixed 2026-09-22 in
+    // `fileWatcher.handleDiskCreateTree`. Those two paths are the regression coverage:
+    // do not "simplify" them to root-level files.
+    const tracked = (f: string) => sm.getFile(path.join(root, f))?.status === 'reviewing';
+    try {
+      await waitForWatcher(() => files.every(tracked));
+    } catch {
+      // Name the missing files. Whether the misses are the plain ones or the ones needing
+      // a NEW directory (dir/f4.txt, dir/sub/f5.txt) is the whole diagnosis: a watch on a
+      // just-created directory is registered only after its create event is handled, so a
+      // file written into it microseconds later can be missed outright. See docs/design.md
+      // §4c.1 — this is not the retracted starvation premise, it is an ordering race.
+      const missing = files.filter(f => !tracked(f));
+      throw new Error(`burst create not fully tracked: missing=${JSON.stringify(missing)} `
+        + `present=${JSON.stringify(files.filter(tracked))} `
+        + `onDisk=${JSON.stringify(files.filter(f => fs.existsSync(path.join(root, f))))} `
+        + `inotifyMaxInstances=${readSysctl('max_user_instances')}`);
+    }
 
     for (const f of files) {
       const state = sm.getFile(path.join(root, f));

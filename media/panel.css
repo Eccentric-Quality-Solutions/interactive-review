@@ -630,6 +630,12 @@ body {
   background: rgba(248, 81, 73, 0.15);
   color: #f85149;
 }
+/* Muted amber, deliberately not the green of "new": this file is in the queue but the
+   extension has no original for it, so Discard will leave it untouched. */
+.file-status-unbaselined {
+  background: rgba(210, 153, 34, 0.18);
+  color: #d29922;
+}
 
 /* ── Disable button on idle screen ── */
 .btn-disable {

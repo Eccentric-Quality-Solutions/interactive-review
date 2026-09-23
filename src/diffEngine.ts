@@ -55,9 +55,12 @@ function fnv1a(text: string): string {
  *
  * The single source of truth for "which hunk does this line resolve to", shared by the
  * cursor-driven (`hunkAtCursor`) and selection-driven (`acceptSelection`/`rejectSelection`)
- * commands. Callers that must always land on a hunk fall back to `hunks[0]` themselves —
- * that fallback is intentionally *not* baked in here, since selection commands treat
- * "past every hunk" as a skip rather than wrapping to the first hunk.
+ * commands. Every one of them treats "past every hunk" as a skip.
+ *
+ * `hunkAtCursor` used to wrap to `hunks[0]` on top of this, so that a cursor below the last
+ * hunk still landed somewhere. That wrap is gone: its only callers are the accept and reject
+ * keybindings, so it silently resolved a hunk scrolled off-screen and changed the file. A
+ * caller that genuinely wants to wrap should be navigating (`neighbourHunk`), not mutating.
  */
 export function hunkAtLine(hunks: ParsedHunk[], line1Based: number): ParsedHunk | undefined {
   return hunks.find(h => line1Based >= h.newStart && line1Based < h.newStart + Math.max(1, h.newLines))

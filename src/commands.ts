@@ -23,24 +23,29 @@ import { log } from './log';
  * unlinked file has no buffer left to undo into. One keystroke on a mis-aimed lens
  * therefore destroyed content the agent had just written, silently and for good.
  *
- * `useTrash` moves the decision from irreversible to recoverable at the cost of nothing:
- * the file still leaves the workspace and still leaves review. Where a trash is
- * unavailable (some remote/container filesystems) VS Code rejects the request, so the
- * caller falls back to a permanent delete rather than leaving the file stranded in the
- * queue — the outcome is then no worse than before this existed.
+ * `useTrash` moves the decision from irreversible to recoverable at the cost of nothing: the
+ * file still leaves the workspace and still leaves review. It used to fall back to a permanent
+ * `unlink` when the trash was unavailable, which was the one place a *classification* bug
+ * became permanent data loss. It no longer does.
+ *
+ * Returning false keeps the file on disk and in the queue, so the user can retry, accept, or
+ * delete it themselves. That makes the unlink survivable, not the whole discard:
+ * `applyEditAndAdvance` has already applied and saved the edit — emptying a null-baseline
+ * file — before it asks. What survives there is the file and its undo stack.
  */
-async function deleteDiscardedFile(filePath: string, label: string): Promise<void> {
-  const uri = vscode.Uri.file(filePath);
+async function deleteDiscardedFile(filePath: string, label: string): Promise<boolean> {
+  const basename = path.basename(filePath);
   try {
-    await vscode.workspace.fs.delete(uri, { useTrash: true });
-    log(`${label}(${path.basename(filePath)}): discarded new file moved to trash`);
+    await vscode.workspace.fs.delete(vscode.Uri.file(filePath), { useTrash: true });
+    log(`${label}(${basename}): discarded new file moved to trash`);
+    return true;
   } catch (err) {
-    log(`${label}(${path.basename(filePath)}): trash delete failed (${err}), falling back to unlink`);
-    try {
-      await vscode.workspace.fs.delete(uri, { useTrash: false });
-    } catch (err2) {
-      log(`${label}(${path.basename(filePath)}): delete failed: ${err2}`);
-    }
+    log(`${label}(${basename}): trash delete failed (${err}), keeping the file and the review entry`);
+    void vscode.window.showWarningMessage(
+      `Interactive Review: ${basename} could not be moved to the trash, so it has been left on ` +
+      `disk and kept in the review. Discard it again to retry, or delete it yourself. (${err})`
+    );
+    return false;
   }
 }
 
@@ -75,14 +80,27 @@ export function activeReviewTarget(stateManager: StateManager):
   return { editor, filePath, fileState };
 }
 
-/** Pending hunk containing the cursor, else the first hunk at/after it, else the first. */
+/**
+ * Pending hunk containing the cursor, else the first hunk at/after it. Undefined when the
+ * cursor sits past every hunk.
+ *
+ * This used to wrap to `hunks[0]` in that last case, on the reasoning that cursor
+ * navigation should always land somewhere. But the only callers are the accept and reject
+ * *keybindings* — this resolves the target a keystroke is about to act on, and the reject
+ * path rewrites the buffer. Wrapping therefore meant that pressing accept with the cursor
+ * below the last hunk silently resolved a hunk scrolled off the top of the screen: the file
+ * changed, and nothing the user could see explained why.
+ *
+ * Landing on nothing is the right answer here. It costs a keypress that does nothing when
+ * there was nothing at the cursor to act on, which is what every other selection-driven
+ * command in this file already does — see `hunkAtLine`'s note on the asymmetry. Navigation
+ * (`neighbourHunk`) is a separate function and is free to wrap.
+ */
 export function hunkAtCursor(editor: vscode.TextEditor, fileState: FileState): ParsedHunk | undefined {
   const hunks = computeHunks(fileState.baseline, editor.document.getText());
   if (hunks.length === 0) return undefined;
   const line = editor.selection.active.line + 1; // computeHunks newStart is 1-based
-  // Cursor navigation always lands on a hunk, so wrap to the first when the cursor sits
-  // past every hunk — the `?? hunks[0]` that selection commands deliberately omit.
-  return hunkAtLine(hunks, line) ?? hunks[0];
+  return hunkAtLine(hunks, line);
 }
 
 /** Neighbouring pending hunk for keyboard navigation (dir 1 = next, -1 = previous). */
@@ -462,12 +480,16 @@ export async function discardFileByPath(
   const fileState = stateManager.getFile(filePath);
   if (!fileState) return;
 
+  // A delete that could not be made recoverable does not happen at all, and the entry then
+  // has to stay: dropping it would leave the file on disk with nothing in the queue to act
+  // on it. See `deleteDiscardedFile`.
+  let kept = false;
   fileWatcher.markSelfEdit(filePath);
   try {
     if (discardDeletesFile(fileState)) {
       // New file (didn't exist before) — delete it, recoverably.
       if (fs.existsSync(filePath)) {
-        await deleteDiscardedFile(filePath, 'discardFileByPath');
+        kept = !(await deleteDiscardedFile(filePath, 'discardFileByPath'));
       }
     } else if (fileState.baseline === null) {
       // Null baseline but the file predates the session — nothing to restore to and
@@ -486,8 +508,9 @@ export async function discardFileByPath(
     fileWatcher.clearSelfEdit(filePath);
   }
   if (discardDeletesFile(fileState)) {
-    // Discarding a new file means it was deleted — remove from tracking
-    stateManager.removeFile(filePath);
+    // Discarding a new file means it was deleted — remove from tracking. Unless it wasn't:
+    // a file still on disk keeps its entry so the user can retry.
+    if (!kept) stateManager.removeFile(filePath);
   } else if (fileState.baseline === null) {
     // The file stays as it is, which is what accepting it does — including taking its
     // content as the baseline. Only removing the entry left nothing a rescan could read, so
@@ -655,7 +678,14 @@ async function applyEditAndAdvance(
         // New file (didn't exist before) fully discarded — remove from disk, recoverably.
         // An unbaselined file never gets here: see `keepsUnbaselinedFile`.
         log(`${label}(${basename}): new file fully discarded, deleting`);
-        await deleteDiscardedFile(filePath, label);
+        if (!await deleteDiscardedFile(filePath, label)) {
+          // Still on disk, so it stays in review — `deleteDiscardedFile` has told the user.
+          // Its hunks are resolved, which a null baseline renders as a 0-hunk entry the
+          // panel still lists, so file-level Discard is there to retry with.
+          log(`${label}(${basename}): delete refused, keeping the file in review`);
+          onStateChanged();
+          return;
+        }
       }
       log(`${label}(${basename}): no hunks left, exitReviewing`);
       stateManager.exitReviewing(filePath);
