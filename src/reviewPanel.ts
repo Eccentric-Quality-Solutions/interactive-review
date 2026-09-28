@@ -8,10 +8,12 @@ import { applyInlineDiffSettings } from './diffSettings';
 import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
 import { log } from './log';
 import { formatBuild, readBuildInfo } from './buildInfo';
+import { undoHistory } from './undoHistory';
 
 import {
-  acceptAllFiles,
+  confirmAndAcceptAll,
   confirmAndDiscardAll,
+  confirmAndUndo,
   acceptFileByPath,
   discardFileByPath,
   acceptHunk,
@@ -31,6 +33,8 @@ interface PanelState {
   files: PanelFile[];
   /** Which build is running — see scripts/build-stamp.js. */
   build: string;
+  /** The newest undoable action, shown on the Undo button; absent when there is none. */
+  lastAction?: string;
 }
 
 interface PanelFile {
@@ -278,6 +282,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
       reviewComplete: this.stateManager.reviewComplete,
       files,
       build: this.build,
+      lastAction: undoHistory.list(this.stateManager).at(-1)?.label,
     };
   }
 
@@ -323,10 +328,13 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         break;
       }
       case 'acceptAll':
-        await acceptAllFiles(this.stateManager, this.onStateChanged);
+        await confirmAndAcceptAll(this.stateManager, this.onStateChanged);
         break;
       case 'discardAll':
         await confirmAndDiscardAll(this.stateManager, this.fileWatcher, this.onStateChanged);
+        break;
+      case 'undo':
+        await confirmAndUndo(this.stateManager, this.onStateChanged);
         break;
       case 'acceptFile':
         if (msg.filePath) {

@@ -5,6 +5,8 @@
 // an extension can write. Code that confuses the two breaks exactly when a workspace
 // setting shadows the key, so the mock has to be able to express that.
 
+import * as fs from 'fs';
+
 declare const global: Record<string, unknown>;
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
@@ -59,7 +61,19 @@ export function __setTestEditors(docs: TestDocument[], editors: TestEditor[] = [
   global.__reviewTestEditors = editors;
 }
 
+export const Uri = { file: (fsPath: string) => ({ scheme: 'file', fsPath }) };
+
 export const workspace = {
+  /** VS Code's file service, as undo's editor io writes through it: straight to disk. */
+  fs: {
+    async writeFile(uri: { fsPath: string }, bytes: Uint8Array): Promise<void> {
+      fs.writeFileSync(uri.fsPath, bytes);
+    },
+    /** Discard moves a new file to the trash; here it is just removed. */
+    async delete(uri: { fsPath: string }): Promise<void> {
+      fs.rmSync(uri.fsPath);
+    },
+  },
   /** Empty unless a test seeds it, so code under test falls back to reading from disk. */
   get textDocuments(): unknown[] {
     return (global.__reviewTestDocuments as unknown[] | undefined) ?? [];
@@ -140,6 +154,8 @@ export const window = {
   async showErrorMessage(message: string) { __notifications().push({ level: 'error', message }); return undefined; },
   async showWarningMessage(message: string) { __notifications().push({ level: 'warning', message }); return undefined; },
   async showInformationMessage(message: string) { __notifications().push({ level: 'info', message }); return undefined; },
+  /** Discard opens a file it restored; nothing to show here. */
+  async showTextDocument() { return undefined; },
 };
 
 /**

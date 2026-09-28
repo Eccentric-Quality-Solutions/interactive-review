@@ -18,3 +18,13 @@ schema: spec-driven
 #       - Always include a "Non-goals" section
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
+
+rules:
+  proposal:
+    - Always include a Non-goals section; review findings about non-goals are dropped.
+    - Keep proposals under 500 words.
+  specs:
+    - A new requirement must not break a requirement in an existing spec under openspec/specs/; name any it touches.
+  tasks:
+    - Every bug-fix task starts by reproducing the bug with a failing test, and ends with a mutation in scripts/mutation-check.mjs.
+    - Include a final task for end-to-end verification (integration test or Dave trying it in his window) and one review pass reporting only correctness bugs against the spec.

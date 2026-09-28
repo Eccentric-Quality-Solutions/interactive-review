@@ -437,9 +437,6 @@ body {
 .file-row:hover {
   background: var(--vscode-list-hoverBackground);
 }
-.file-row:hover .btn-action {
-  opacity: 0.6;
-}
 
 .file-chevron {
   font-size: 7px;
@@ -524,11 +521,7 @@ body {
   line-height: 22px;
   height: 22px;
   cursor: pointer;
-  opacity: 0;
-}
-.file-row:hover .btn-action,
-.hunk-row:hover .btn-action {
-  opacity: 0.55;
+  opacity: 0.7;
 }
 .btn-action:hover {
   opacity: 1 !important;
@@ -582,7 +575,8 @@ body {
 
 /* ── Review header action buttons (Accept / Discard) ── */
 .btn-review-accept,
-.btn-review-discard {
+.btn-review-discard,
+.btn-review-undo {
   border-radius: 3px;
   cursor: pointer;
   font-size: 11px;
@@ -609,6 +603,21 @@ body {
 }
 .btn-review-discard:hover {
   background: #8f2c29;
+}
+
+/* Undo is not a verdict on the changes, so it takes a neutral slate rather than green or
+   red. A solid fill like its neighbours: the theme's secondary-button colour is close to
+   transparent in many themes, and the button then reads as plain text. */
+.btn-review-undo {
+  background: #4a5566;
+  color: #e3e8ef;
+  border: 1px solid rgba(160, 175, 195, 0.3);
+}
+.btn-review-undo:hover {
+  background: #3f4957;
+}
+.splash-screen .btn-review-undo {
+  margin-top: 8px;
 }
 
 /* ── File status badges ── */

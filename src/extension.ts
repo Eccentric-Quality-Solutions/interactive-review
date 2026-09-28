@@ -566,6 +566,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
               lastHead = currentHead;
               log(`branch switched → suppressing file watcher and clearing hunks`);
               fileWatcher.suppressAll();
+              stateManager.markQueueClearing();
               branchSwitchPending++;
               branchSwitchChain = branchSwitchChain
                 .then(() => stateManager.clearHunksOnBranchSwitch(

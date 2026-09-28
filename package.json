@@ -3,7 +3,7 @@
   "publisher": "eccentricqualitysolutions",
   "displayName": "Interactive Review",
   "description": "Walk a queue of pending AI edits — per-hunk accept/reject review flow (stable API, forked from molon/hunkwise).",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "MIT",
   "repository": {
     "type": "git",

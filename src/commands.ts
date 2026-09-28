@@ -13,6 +13,7 @@ import { FileState } from './types';
 import { findFileDocument, findFileEditor, revealHunkPosition } from './editorUtils';
 import { bomFromFile, readTextFileSync, stripBom, withBomFrom } from './textFile';
 import { log } from './log';
+import { BulkFiles, recordUndo, undoHistory, UndoEntry, UndoIO, UndoResult } from './undoHistory';
 
 /**
  * Delete a file the user is discarding, to the OS trash rather than permanently.
@@ -33,7 +34,15 @@ import { log } from './log';
  * `applyEditAndAdvance` has already applied and saved the edit — emptying a null-baseline
  * file — before it asks. What survives there is the file and its undo stack.
  */
-async function deleteDiscardedFile(filePath: string, label: string): Promise<boolean> {
+async function deleteDiscardedFile(
+  filePath: string,
+  label: string,
+  /**
+   * Leave the message to the caller, whose situation it describes (undo does). Guarded by
+   * `undoHistory.test.ts` ("could not trash"), through undo's own report.
+   */
+  opts: { quiet?: boolean } = {},
+): Promise<boolean> {
   const basename = path.basename(filePath);
   try {
     await vscode.workspace.fs.delete(vscode.Uri.file(filePath), { useTrash: true });
@@ -41,6 +50,7 @@ async function deleteDiscardedFile(filePath: string, label: string): Promise<boo
     return true;
   } catch (err) {
     log(`${label}(${basename}): trash delete failed (${err}), keeping the file and the review entry`);
+    if (opts.quiet) return false;
     void vscode.window.showWarningMessage(
       `Interactive Review: ${basename} could not be moved to the trash, so it has been left on ` +
       `disk and kept in the review. Discard it again to retry, or delete it yourself. (${err})`
@@ -122,6 +132,7 @@ export function registerCommands(
   reviewPanel: ReviewPanel,
   onStateChanged: () => void
 ): void {
+  undoHistory.io = editorUndoIO(fileWatcher);
   context.subscriptions.push(
     vscode.commands.registerCommand('interactiveReview.beginReview', () =>
       enableReview(stateManager, fileWatcher, reviewPanel, onStateChanged)
@@ -145,12 +156,35 @@ export function registerCommands(
       stateManager.setClearOnBranchSwitch(value);
     }),
     vscode.commands.registerCommand('interactiveReview.clearHunks', async () => {
-      await stateManager.clearHunksOnBranchSwitch(
-        (fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)
-      );
+      await clearReviewQueue(stateManager, fileWatcher);
       onStateChanged();
     }),
   );
+}
+
+/**
+ * Backs `interactiveReview.clearHunks`: take the working tree as the new baseline. The undo
+ * history goes with the old queue (see `StateManager.clearCount`).
+ */
+export async function clearReviewQueue(stateManager: StateManager, fileWatcher: FileWatcher): Promise<void> {
+  await stateManager.clearHunksOnBranchSwitch((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
+}
+
+/**
+ * Undo's editor-side effects (see `UndoIO`). Bytes go back through VS Code's file service,
+ * not an editor save: they land exactly as recorded, with no save participants (format on
+ * save, whitespace trimming) or re-encoding. The write goes straight to disk from the
+ * extension host, so an open editor shows it only once VS Code's file watcher reports it.
+ * Guarded by the integration test `undo.test.ts`.
+ */
+export function editorUndoIO(fileWatcher: FileWatcher): UndoIO {
+  return {
+    hasUnsavedEdits: fp => !!findFileDocument(fp)?.isDirty,
+    deleteFile: fp => deleteDiscardedFile(fp, 'undo', { quiet: true }),
+    writeFile: (fp, bytes) => Promise.resolve(vscode.workspace.fs.writeFile(vscode.Uri.file(fp), bytes)),
+    markSelfEdit: fp => fileWatcher.markSelfEdit(fp),
+    clearSelfEdit: fp => fileWatcher.clearSelfEdit(fp),
+  };
 }
 
 /**
@@ -331,14 +365,51 @@ async function disableReview(
   onStateChanged();
 }
 
-export async function acceptAllFiles(
+async function acceptAllFilesImpl(
   stateManager: StateManager,
-  onStateChanged: () => void
+  onStateChanged: () => void,
+  /** Restrict to these files; defaults to the whole queue. Entries resolved since are skipped. */
+  only?: readonly string[],
 ): Promise<void> {
-  for (const filePath of Array.from(stateManager.getAllFiles().keys())) {
-    acceptFileByPath(stateManager, filePath, () => {});
+  for (const filePath of only ?? Array.from(stateManager.getAllFiles().keys())) {
+    acceptFileByPathImpl(stateManager, filePath, () => {});
   }
   onStateChanged();
+}
+
+/**
+ * The question Accept All asks before it runs, or undefined when there is nothing to
+ * accept. Counts only files under review. Guarded by `acceptAllConfirm.test.ts`.
+ */
+export function acceptAllPrompt(files: Iterable<[string, FileState]>): string | undefined {
+  let pending = 0;
+  for (const [, f] of files) if (f.status === 'reviewing') pending++;
+  if (pending === 0) return undefined;
+  const them = pending === 1 ? 'it' : 'them';
+  return `Accept all pending changes? This will keep ${pending} file${pending === 1 ? '' : 's'} as ` +
+    `${pending === 1 ? 'it is' : 'they are'} on disk and stop reviewing ${them}.`;
+}
+
+/**
+ * Accept All from the panel button: ask, then accept exactly the files the question
+ * counted, snapshotted before the modal opens for the same reason as
+ * `confirmAndDiscardAll`. Returns whether anything was accepted. Guarded by
+ * `acceptAllConfirm.test.ts`.
+ */
+export async function confirmAndAcceptAll(
+  stateManager: StateManager,
+  onStateChanged: () => void,
+): Promise<boolean> {
+  const entries = Array.from(stateManager.getAllFiles().entries());
+  const prompt = acceptAllPrompt(entries);
+  if (!prompt) return false;
+  const choice = await vscode.window.showWarningMessage(prompt, { modal: true }, 'Accept All');
+  if (choice !== 'Accept All') {
+    log('acceptAll: not confirmed, skipping');
+    return false;
+  }
+  await acceptAllFiles(stateManager, onStateChanged, entries.map(([fp]) => fp));
+  return true;
 }
 
 /**
@@ -402,22 +473,141 @@ export async function confirmAndDiscardAll(
   return true;
 }
 
-export async function discardAllFiles(
+/** One button in the Undo dialog: how many of the newest history entries it undoes. */
+export interface UndoChoice {
+  button: string;
+  count: number;
+}
+
+/**
+ * What the Undo dialog offers for this history (oldest first), or undefined when there is
+ * nothing to undo. Always the last action; also back through the last Accept All or
+ * Discard All, and everything, when those undo more than the choice before them.
+ * Guarded by `undoHistory.test.ts` ("undoChoices").
+ */
+export function undoChoices(
+  entries: readonly UndoEntry[],
+  /** Older entries were dropped from the history, so "everything" is not the whole session. */
+  dropped = false,
+): { message: string; detail: string; choices: UndoChoice[] } | undefined {
+  const n = entries.length;
+  if (n === 0) return undefined;
+  const plural = (k: number) => `${k} action${k === 1 ? '' : 's'}`;
+  const choices: UndoChoice[] = [{ button: 'Undo Last', count: 1 }];
+  const lines = [`Undo Last: ${entries[n - 1].label}.`];
+  let bulkAt = -1;
+  for (let i = n - 1; i >= 0; i--) if (entries[i].bulk) { bulkAt = i; break; }
+  if (bulkAt >= 0 && bulkAt < n - 1) {
+    const bulk = entries[bulkAt];
+    choices.push({ button: `Undo Through ${bulk.bulk}`, count: n - bulkAt });
+    lines.push(`Undo Through ${bulk.bulk}: the last ${plural(n - bulkAt)}, back through ${bulk.label}.`);
+  }
+  if (n > 1 && bulkAt !== 0) {
+    choices.push({ button: 'Undo Everything', count: n });
+    lines.push(dropped ? `Undo Everything: the last ${plural(n)}.` : `Undo Everything: all ${plural(n)} this session.`);
+  }
+  lines.push('A file changed since is left as it is on disk and goes back into review.');
+  return { message: 'Undo review actions?', detail: lines.join('\n'), choices };
+}
+
+/**
+ * What to tell the user after an undo. Says only what holds whether or not a file ended up
+ * back in review: one that already equals its baseline has nothing left to review, and
+ * undo resolves it. Guarded by `undoHistory.test.ts` ("undoReport").
+ */
+export function undoReport(result: UndoResult): { level: 'info' | 'warning' | 'error'; text: string }[] {
+  const names = (fps: string[]) => fps.map(fp => path.basename(fp)).join(', ');
+  const out: { level: 'info' | 'warning' | 'error'; text: string }[] = [];
+  if (result.keptOnDisk.length > 0) {
+    const one = result.keptOnDisk.length === 1;
+    out.push({ level: 'info', text:
+      `${names(result.keptOnDisk)} had unsaved changes when the action ran, or ${one ? 'has' : 'have'} ` +
+      `changed since, so undo left ${one ? 'it' : 'them'} as ${one ? 'it is' : 'they are'} on disk.` });
+  }
+  if (result.notDeleted.length > 0) {
+    const one = result.notDeleted.length === 1;
+    out.push({ level: 'warning', text:
+      `undo could not move ${names(result.notDeleted)} to the trash, so ${one ? 'it is' : 'they are'} ` +
+      `still on disk. Delete ${one ? 'it' : 'them'} yourself to finish the undo.` });
+  }
+  if (result.baselineFailed.length > 0) {
+    out.push({ level: 'error', text:
+      `undo could not save the review baseline for ${names(result.baselineFailed)}. ` +
+      'A reload may show the review differently.' });
+  }
+  if (result.interrupted) {
+    out.push({ level: 'warning', text:
+      'the review ended or its queue was cleared during the undo, so the rest was not undone.' });
+  }
+  return out;
+}
+
+/**
+ * Undo from the panel button: offer the choices, then undo what the chosen one named. If
+ * another action lands while the dialog is open, nothing is undone. Returns how many
+ * entries were undone. Guarded by `undoHistory.test.ts` ("confirmAndUndo").
+ */
+export async function confirmAndUndo(
+  stateManager: StateManager,
+  onStateChanged: () => void,
+): Promise<number> {
+  const entries = undoHistory.list(stateManager);
+  const offer = undoChoices(entries, undoHistory.dropped);
+  if (!offer) return 0;
+  const top = entries[entries.length - 1];
+  const picked = await vscode.window.showWarningMessage(
+    offer.message, { modal: true, detail: offer.detail }, ...offer.choices.map(c => c.button));
+  const choice = offer.choices.find(c => c.button === picked);
+  if (!choice) {
+    log('undo: not confirmed, skipping');
+    return 0;
+  }
+  let result;
+  try {
+    result = await undoHistory.undo(stateManager, choice.count, top);
+  } catch (err) {
+    log(`undo: stopped (${err})`);
+    onStateChanged();
+    void vscode.window.showErrorMessage(
+      `Interactive Review: undo stopped partway (${err}). What was undone stays undone; the rest ` +
+      'is still in the Undo history.');
+    return 0;
+  }
+  onStateChanged();
+  if (!result) {
+    void vscode.window.showWarningMessage(
+      'Interactive Review: the review changed while the Undo dialog was open, so nothing was undone.');
+    return 0;
+  }
+  for (const m of undoReport(result)) {
+    const text = `Interactive Review: ${m.text}`;
+    if (m.level === 'error') void vscode.window.showErrorMessage(text);
+    else if (m.level === 'warning') void vscode.window.showWarningMessage(text);
+    else void vscode.window.showInformationMessage(text);
+  }
+  return result.undone;
+}
+
+async function discardAllFilesImpl(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
   onStateChanged: () => void,
   /** Restrict to these files; defaults to the whole queue. Entries resolved since are skipped. */
   only?: readonly string[],
+  /** Called around each file's discard; see `recordUndo`. */
+  files: BulkFiles = { start: () => {}, done: () => {} },
 ): Promise<void> {
   for (const filePath of only ?? Array.from(stateManager.getAllFiles().keys())) {
+    files.start(filePath);
     try {
-      await discardFileByPath(stateManager, fileWatcher, filePath, () => {});
+      await discardFileByPathImpl(stateManager, fileWatcher, filePath, () => {});
     } catch (err) { log(`discardAllFiles: failed to restore ${filePath}: ${err}`); }
+    files.done(filePath);
   }
   onStateChanged();
 }
 
-export function acceptFileByPath(
+function acceptFileByPathImpl(
   stateManager: StateManager,
   filePath: string,
   onStateChanged: () => void
@@ -464,7 +654,7 @@ async function replaceEntireDocument(uri: vscode.Uri, content: string): Promise<
   await doc.save();
 }
 
-export async function discardFileByPath(
+async function discardFileByPathImpl(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
   filePath: string,
@@ -510,7 +700,7 @@ export async function discardFileByPath(
     // a Refresh or a window reload put the file back in the queue. Guarded by
     // `reloadEqualsMemory.test.ts` ("discarding an unbaselined file").
     try {
-      acceptFileByPath(stateManager, filePath, () => {});
+      acceptFileByPathImpl(stateManager, filePath, () => {});
     } catch (err) {
       // Unreadable now (permissions, or deleted since the check). Drop the entry as before
       // rather than throw: `discardAllFiles` would stop at this file and leave the rest.
@@ -524,7 +714,7 @@ export async function discardFileByPath(
 }
 
 
-export function acceptHunk(
+function acceptHunkImpl(
   stateManager: StateManager,
   filePath: string,
   id: string,
@@ -713,11 +903,11 @@ async function keepsUnbaselinedFile(
 ): Promise<boolean> {
   if (fileState.baseline !== null || discardDeletesFile(fileState)) return false;
   log(`${label}(${path.basename(filePath)}): unbaselined file, nothing to restore — keeping it as a file-level discard`);
-  await discardFileByPath(stateManager, fileWatcher, filePath, onStateChanged);
+  await discardFileByPathImpl(stateManager, fileWatcher, filePath, onStateChanged);
   return true;
 }
 
-export async function discardHunk(
+async function discardHunkImpl(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
   filePath: string,
@@ -825,7 +1015,7 @@ async function resolveSelectionHunk(
  *
  * `selStartLine` / `selEndLine` are 0-based document line numbers (editor selection).
  */
-export async function rejectSelection(
+async function rejectSelectionImpl(
   stateManager: StateManager,
   fileWatcher: FileWatcher,
   filePath: string,
@@ -847,7 +1037,7 @@ export async function rejectSelection(
   if (!split.hasAddedInRange) {
     if (hunk.newLines === 0) {
       log(`rejectSelection(${basename}): pure-removal hunk, falling back to whole-hunk reject`);
-      await discardHunk(stateManager, fileWatcher, filePath, hunkId(hunk), onStateChanged, source);
+      await discardHunkImpl(stateManager, fileWatcher, filePath, hunkId(hunk), onStateChanged, source);
     } else {
       log(`rejectSelection(${basename}): no added lines in range, no-op`);
     }
@@ -888,7 +1078,7 @@ export async function rejectSelection(
  *
  * `selStartLine` / `selEndLine` are 0-based document line numbers (editor selection).
  */
-export async function acceptSelection(
+async function acceptSelectionImpl(
   stateManager: StateManager,
   filePath: string,
   selStartLine: number,
@@ -908,7 +1098,7 @@ export async function acceptSelection(
   if (!split.hasAddedInRange) {
     if (hunk.newLines === 0) {
       log(`acceptSelection(${basename}): pure-removal hunk, falling back to whole-hunk accept`);
-      acceptHunk(stateManager, filePath, hunkId(hunk), onStateChanged, source);
+      acceptHunkImpl(stateManager, filePath, hunkId(hunk), onStateChanged, source);
     } else {
       log(`acceptSelection(${basename}): no added lines in range, no-op`);
     }
@@ -934,3 +1124,95 @@ export async function acceptSelection(
   finishBaselineAdvance(stateManager, filePath, newBaseline, doc, originalNewStart, onStateChanged, 'acceptSelection');
 }
 
+// ── Undoable entry points ───────────────────────────────────────────────────
+//
+// Each accept and discard the user can reach is recorded as one entry in the session's
+// undo history (see `undoHistory.ts`). The `*Impl` functions above do the work unrecorded,
+// so an action built from others (Discard All, a selection that falls back to its hunk) is
+// still a single entry. Guarded by `undoHistory.test.ts`.
+
+export async function acceptAllFiles(
+  stateManager: StateManager,
+  onStateChanged: () => void,
+  /** Restrict to these files; defaults to the whole queue. Entries resolved since are skipped. */
+  only?: readonly string[],
+): Promise<void> {
+  const paths = only ?? Array.from(stateManager.getAllFiles().keys());
+  await recordUndo(stateManager, 'Accept All', paths, onStateChanged,
+    changed => acceptAllFilesImpl(stateManager, changed, paths), 'Accept All');
+}
+
+export async function discardAllFiles(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  onStateChanged: () => void,
+  /** Restrict to these files; defaults to the whole queue. Entries resolved since are skipped. */
+  only?: readonly string[],
+): Promise<void> {
+  const paths = only ?? Array.from(stateManager.getAllFiles().keys());
+  await recordUndo(stateManager, 'Discard All', paths, onStateChanged,
+    (changed, files) => discardAllFilesImpl(stateManager, fileWatcher, changed, paths, files), 'Discard All');
+}
+
+export function acceptFileByPath(stateManager: StateManager, filePath: string, onStateChanged: () => void): void {
+  recordUndo(stateManager, `Accept ${path.basename(filePath)}`, [filePath], onStateChanged,
+    changed => acceptFileByPathImpl(stateManager, filePath, changed));
+}
+
+export async function discardFileByPath(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  filePath: string,
+  onStateChanged: () => void,
+): Promise<void> {
+  await recordUndo(stateManager, `Discard ${path.basename(filePath)}`, [filePath], onStateChanged,
+    changed => discardFileByPathImpl(stateManager, fileWatcher, filePath, changed));
+}
+
+export function acceptHunk(
+  stateManager: StateManager,
+  filePath: string,
+  id: string,
+  onStateChanged: () => void,
+  source: string = 'unknown',
+): void {
+  recordUndo(stateManager, `Accept hunk in ${path.basename(filePath)}`, [filePath], onStateChanged,
+    changed => acceptHunkImpl(stateManager, filePath, id, changed, source));
+}
+
+export async function discardHunk(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  filePath: string,
+  id: string,
+  onStateChanged: () => void,
+  source: string = 'unknown',
+): Promise<void> {
+  await recordUndo(stateManager, `Discard hunk in ${path.basename(filePath)}`, [filePath], onStateChanged,
+    changed => discardHunkImpl(stateManager, fileWatcher, filePath, id, changed, source));
+}
+
+export async function rejectSelection(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  filePath: string,
+  selStartLine: number,
+  selEndLine: number,
+  onStateChanged: () => void,
+  source: string = 'unknown',
+): Promise<void> {
+  await recordUndo(stateManager, `Discard selected lines in ${path.basename(filePath)}`, [filePath], onStateChanged,
+    changed => rejectSelectionImpl(stateManager, fileWatcher, filePath, selStartLine, selEndLine, changed, source));
+}
+
+export async function acceptSelection(
+  stateManager: StateManager,
+  filePath: string,
+  selStartLine: number,
+  selEndLine: number,
+  onStateChanged: () => void,
+  source: string = 'unknown',
+): Promise<void> {
+  await recordUndo(stateManager, `Accept selected lines in ${path.basename(filePath)}`, [filePath], onStateChanged,
+    changed => acceptSelectionImpl(stateManager, filePath, selStartLine, selEndLine, changed, source));
+}

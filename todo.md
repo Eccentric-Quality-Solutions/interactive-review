@@ -99,6 +99,29 @@ Each is small and silent when it fails. Ordered by payoff.
 
 Done since the review: `ls-files -z` everywhere (f968dcd).
 
+### 6. Undo history is not serialised with actions or renames
+
+**Severity: low, timing-dependent.** An accept/discard that finishes while Accept All or
+Discard All is running is recorded inside the bulk entry too, and a rename leaves entries
+at the old path, so undo restores a stale path ([undoHistory.ts](src/undoHistory.ts)). To
+close: run actions and undo through one promise chain, and clear the history on a rename of
+a reviewed file.
+
+### 7. The self-edit mark cannot suppress a synchronous write's watcher event
+
+**Severity: low, harmless today.** Discard and undo clear the mark in the same tick as the
+write, so the watcher sees their writes as external. To close: hold the mark until the
+event for that write arrives, or match on content.
+
+### 8. An open buffer can stay stale after undo
+
+**Severity: medium.** Undo writes with `workspace.fs.writeFile` ([commands.ts](src/commands.ts)
+`editorUndoIO`), so an open editor waits on the file watcher. In the test instance it stayed
+stale for 15 s or more in about 1 undo in 20, with or without a pause before the undo or a
+formatter; always the first undo in a fresh instance in a 2026-09-27 probe, but the cause is
+unknown. A hunk command on the stale text folds the wrong baseline in. To close: reload the
+open document explicitly after undo (a separate OpenSpec change).
+
 ---
 
 ## Review UI

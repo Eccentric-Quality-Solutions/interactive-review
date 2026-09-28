@@ -136,6 +136,20 @@ export class StateManager {
   get session(): number { return this._session; }
 
   /**
+   * Bumped when a branch switch is seen (`markQueueClearing`), when a queue clear starts
+   * (`clearHunksOnBranchSwitch`, from a branch switch or the clearHunks command), and again
+   * when that clear empties the queue, so an action recorded during its awaits goes too.
+   * The undo history treats a change like a new session: its entries describe the queue
+   * being cleared, and an undo in flight stops. Guarded by `undoHistory.test.ts`
+   * ("cleared", "queue clear is running", "branch switch is seen").
+   */
+  get clearCount(): number { return this._clearCount; }
+  private _clearCount = 0;
+
+  /** A queue clear is coming (a branch switch was seen); see `clearCount`. */
+  markQueueClearing(): void { this._clearCount++; }
+
+  /**
    * Is a `syncIgnoreState` pass in flight?
    *
    * Read by `FileWatcher.handleDiskChange` to tell its two no-baseline cases apart: while
@@ -779,6 +793,29 @@ export class StateManager {
     }
   }
 
+  /**
+   * Put an entry back exactly as `state` describes it, in memory and in the baseline repo,
+   * for undo. Unlike `setFile`, a null baseline also clears the repo: the action being
+   * undone may have stored one (accepting a new file records its content), and a reload
+   * would then review the file against that instead of as new. Guarded by
+   * `undoHistory.test.ts` ("undoing an accept of a new file").
+   *
+   * No rollback when the repo write fails. Undo has already put the file's bytes back, so
+   * the restored entry is the one that matches the disk, and rolling back would hide an
+   * unreviewed change. `onFailure` reports it instead, and a reload rebuilds from the repo.
+   * Guarded by `undoHistory.test.ts` ("a failed baseline write").
+   */
+  restoreFile(filePath: string, state: FileState, onFailure: (err: unknown) => void): void {
+    filePath = normalizePath(filePath);
+    this.writeState(filePath, { ...state });
+    if (state.status === 'reviewing') this._sawReviewingFiles = true;
+    const baseline = state.baseline;
+    this.enqueue('restoreFile', baseline === null
+      ? g => g.removeFile(filePath)
+      : g => g.snapshot(filePath, baseline),
+    onFailure);
+  }
+
   removeFile(filePath: string): void {
     filePath = normalizePath(filePath);
     // Clone old state so the rollback has an independent snapshot
@@ -1217,6 +1254,7 @@ export class StateManager {
    * git-checkout-induced file changes don't race with the clear.
    */
   async clearHunksOnBranchSwitch(shouldIgnore?: (filePath: string, isDirectory?: boolean) => boolean): Promise<void> {
+    this._clearCount++;
     const g = this._git;
     if (!g || !this.workspaceRoot) return;
 
@@ -1233,6 +1271,7 @@ export class StateManager {
     if (trackedFiles === undefined) return;
 
     // Clear all in-memory state — fresh start
+    this._clearCount++;
     this.clearState();
     this.forgetClassifications();
 

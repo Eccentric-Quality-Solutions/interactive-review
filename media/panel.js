@@ -18,6 +18,7 @@ const app = document.getElementById("app");
  * @property {any[]} files
  * @property {boolean} reviewComplete
  * @property {string} build
+ * @property {string} [lastAction]
  */
 
 /** @type {PanelState | null} */
@@ -220,7 +221,7 @@ function render(state) {
     // Terminal closure state: the session had pending changes and drained them all.
     // Distinct from the idle splash (enabled but nothing was ever pending).
     if (state.reviewComplete) {
-      renderCompleteScreen();
+      renderCompleteScreen(state);
     } else {
       renderIdleScreen(state.quoteRotationInterval);
     }
@@ -246,7 +247,23 @@ function appendBuildStamp(state) {
   host.appendChild(el("p", "build-stamp", state.build));
 }
 
-function renderCompleteScreen() {
+/**
+ * The ↶ Undo button, when there is an action to undo. The extension asks which kind of
+ * undo in a modal, so the button itself only names the newest action in its tooltip.
+ * @param {HTMLElement} parent
+ * @param {PanelState} state
+ */
+function appendUndoButton(parent, state) {
+  if (!state.lastAction) return;
+  const undo = btn("↶ Undo", "btn-review-undo", () =>
+    vscode.postMessage({ command: "undo" }),
+  );
+  undo.title = `Last: ${state.lastAction}`;
+  parent.appendChild(undo);
+}
+
+/** @param {PanelState} state */
+function renderCompleteScreen(state) {
   if (!app) return;
   const screen = el("div", "splash-screen");
   const badge = el("div", "complete-badge");
@@ -254,6 +271,7 @@ function renderCompleteScreen() {
   screen.appendChild(badge);
   screen.appendChild(el("p", "splash-tagline", "Review complete"));
   screen.appendChild(el("p", "complete-subtitle", "All changes reviewed."));
+  appendUndoButton(screen, state);
   app.appendChild(screen);
 }
 
@@ -537,7 +555,7 @@ function fileIconBadge(fileName) {
 }
 
 /**
- * @param {{ enabled: boolean, ignorePatterns: string[], totalFiles: number, totalAdded: number, totalRemoved: number, files: any[] }} state
+ * @param {PanelState} state
  */
 function renderReviewScreen(state) {
   if (!app) return;
@@ -555,15 +573,16 @@ function renderReviewScreen(state) {
   summary.appendChild(el("span", "stat-removed", `-${state.totalRemoved}`));
   const actions = el("div", "review-actions");
   actions.appendChild(
-    btn("✓ Accept", "btn-review-accept", () =>
+    btn("✓ Accept All", "btn-review-accept", () =>
       vscode.postMessage({ command: "acceptAll" }),
     ),
   );
   actions.appendChild(
-    btn("↺ Discard", "btn-review-discard", () =>
+    btn("↺ Discard All", "btn-review-discard", () =>
       vscode.postMessage({ command: "discardAll" }),
     ),
   );
+  appendUndoButton(actions, state);
   header.appendChild(summary);
   header.appendChild(actions);
   app.appendChild(header);

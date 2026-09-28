@@ -230,8 +230,7 @@ baseline rather than `''`, so the whole-file flash no longer depends on VS Code'
 The file-watcher integration tests flake here, and the pattern is diagnostic. Across
 repeated runs of identical code, *which* tests fail changes from run to run, and some runs
 pass all eleven. A deterministic regression fails the same tests every time. The cause is
-inotify starvation: this workstation runs at roughly 121 of 128 inotify instances. See the
-`integration-suite-inotify` note.
+inotify starvation.
 
 The watcher tests are honest, so they flake here *more* than dishonest ones would. On
 2026-09-21, at 129–130 instances against the 128 limit, runs of identical code passed 11/11
@@ -246,3 +245,33 @@ starvation. Never call a failure environmental without that evidence.
 The first CI run did find one real test defect: a fixed 300 ms sleep before an assertion,
 which the runner took 1.8 s to satisfy. That is the fixed-sleep problem under "Waiting in
 integration tests", failing loudly instead of silently.
+
+**Before trusting a run, check the log for starvation.** `EMFILE` in the run's output is
+the direct evidence. A count of inotify file descriptors under `/proc` is not: child
+processes inherit their parent's descriptors, so it runs far above the real instance count
+(it read over 600 against a limit of 128 on a run that passed). Kill leftover
+`.vscode-test/vscode-linux-x64` processes between runs; repeated runs leak them. To read the
+extension's log from a test run, set `INTERACTIVE_REVIEW_LOG_FILE=/path/to.log` (see
+`src/log.ts`); the output channel is not readable from the test host.
+
+**The three limits fail differently.** `max_user_watches` gives `ENOSPC` (already 524288
+here via `/etc/sysctl.d/40-max_user_watches.conf`, not the problem). `max_user_instances`
+gives `EMFILE`. `max_queued_events` overflowing gives no error at all, only missing events.
+A raise with `sysctl -w` (e.g. 1024 instances, 65536 queued events) lasts until reboot, so
+expect stock values again; a `/etc/sysctl.d/` drop-in makes it permanent. The Lima VM
+(`limactl list`, `agent`) is a separate machine with its own limits and its own clone.
+
+**The discriminator works both ways.** Many failures across unrelated suites, with the set
+moving between runs, is starvation. One test failing the same way every time, with no
+`EMFILE` in the log, is a real bug: on 2026-09-22, "multiple files created simultaneously"
+was exactly that (VS Code registers the recursive watch on a new directory asynchronously),
+fixed in `fileWatcher.handleDiskCreateTree`. To run a suspect suite three times in isolation
+and compare the failing sets, build first, since `vscode-test` alone runs whatever was last
+compiled:
+
+```sh
+npm run compile && npx tsc -p tsconfig.integration.json
+npx vscode-test --grep "file watcher integration"
+```
+
+Confirm a suspected regression with a stash-and-rerun A/B under the same load.
