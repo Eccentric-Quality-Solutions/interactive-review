@@ -155,19 +155,7 @@ export function registerCommands(
     vscode.commands.registerCommand('interactiveReview.setClearOnBranchSwitch', (value: boolean) => {
       stateManager.setClearOnBranchSwitch(value);
     }),
-    vscode.commands.registerCommand('interactiveReview.clearHunks', async () => {
-      await clearReviewQueue(stateManager, fileWatcher);
-      onStateChanged();
-    }),
   );
-}
-
-/**
- * Backs `interactiveReview.clearHunks`: take the working tree as the new baseline. The undo
- * history goes with the old queue (see `StateManager.clearCount`).
- */
-export async function clearReviewQueue(stateManager: StateManager, fileWatcher: FileWatcher): Promise<void> {
-  await stateManager.clearHunksOnBranchSwitch((fp, isDir) => fileWatcher.shouldIgnore(fp, isDir));
 }
 
 /**

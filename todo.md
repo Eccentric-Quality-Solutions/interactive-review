@@ -97,8 +97,6 @@ Each is small and silent when it fails. Ordered by payoff.
 4. **Failures that are only logged.** A failed `syncIgnoreState` still reports Refresh
    success; `removeFileBatch` never re-throws. Surface both.
 
-Done since the review: `ls-files -z` everywhere (f968dcd).
-
 ### 6. Undo history is not serialised with actions or renames
 
 **Severity: low, timing-dependent.** An accept/discard that finishes while Accept All or
@@ -120,7 +118,22 @@ event for that write arrives, or match on content.
 stale for 15 s or more in about 1 undo in 20, with or without a pause before the undo or a
 formatter; always the first undo in a fresh instance in a 2026-09-27 probe, but the cause is
 unknown. A hunk command on the stale text folds the wrong baseline in. To close: reload the
-open document explicitly after undo (a separate OpenSpec change).
+open document explicitly after undo (a separate OpenSpec change). Before scheduling
+`openspec/changes/undo-reload-open-editor`, try a dozen discard-then-undo cycles on an open
+file in a real window; if it never reproduces there, park it with that note.
+
+### 9. Restoring a deleted file drops its executable bit
+
+**Severity: low.** The baseline repo stores every file as `100644` and
+`discardFileByPathImpl` writes with default permissions. To close: record the mode at
+snapshot and `chmod` after the restore write.
+
+### 10. The binary-on-rescan skip has no test
+
+**Severity: low.** `collectUntrackedFiles` skips an unwitnessed binary
+([stateManager.ts](src/stateManager.ts)); no test writes a NUL-bearing file, and no mutation
+names the branch. To close: a `stateManagerGit.test.ts` case plus a mutation, next time
+`stateManager.ts` is touched.
 
 ---
 
@@ -179,9 +192,6 @@ from keybindings or selection commands. Reopen if the log starts showing them.
 
 ## User notes
 
-- ~~confirm accept/discard big buttons that do all files at once~~ done 2026-09-22 for
-  Discard All; Accept All deliberately unconfirmed (never changes file contents)
 - it seems like sometimes it is grabbing bigger chunks of code (item I)
 - Accept/Discard showing up much more slowly, possibly because the repo is on a VM (item H)
 - if edits overlap each other, we should have an option to show a single edit at a time
-- ~~panel doesn't show the number of files like Problems or Ports do~~ done 2026-09-22

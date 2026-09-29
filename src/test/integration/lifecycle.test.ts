@@ -134,30 +134,6 @@ suite('interactive-review lifecycle integration', function () {
     assert.strictEqual(settings.clearOnBranchSwitch, true);
   });
 
-  test('clearHunks command clears reviewing files and updates baselines', async () => {
-    const root = getWorkspaceRoot();
-
-    // Create a file, enable interactive-review (snapshots baseline), then modify externally
-    writeFileExternally(path.join(root, 'hello.txt'), 'original\n');
-    await enableReview();
-    await waitForCondition(() => gitListTracked(root).includes('hello.txt'));
-
-    // Modify externally to enter reviewing state
-    writeFileExternally(path.join(root, 'hello.txt'), 'modified\n');
-    await sleep(1000); // wait for file watcher to detect change and enter reviewing
-
-    // Verify baseline is still original
-    assert.strictEqual(gitGetBaseline(root, 'hello.txt'), 'original\n');
-
-    // Now clear hunks (simulates branch switch)
-    await vscode.commands.executeCommand('interactiveReview.clearHunks');
-    await sleep(500);
-
-    // Verify: baseline updated to current disk content
-    const baseline = gitGetBaseline(root, 'hello.txt');
-    assert.strictEqual(baseline, 'modified\n', 'baseline should be updated to current disk content');
-  });
-
   test('default ignorePatterns exclude .git files from tracking', async () => {
     const root = getWorkspaceRoot();
 

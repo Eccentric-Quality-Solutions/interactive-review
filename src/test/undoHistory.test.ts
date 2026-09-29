@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { StateManager } from '../stateManager';
 import * as vscode from 'vscode';
-import { acceptAllFiles, acceptFileByPath, clearReviewQueue, discardAllFiles, confirmAndUndo, editorUndoIO, undoChoices, undoReport } from '../commands';
+import { acceptAllFiles, acceptFileByPath, discardAllFiles, confirmAndUndo, editorUndoIO, undoChoices, undoReport } from '../commands';
 import { __setTestEditors, TestDocument } from './__mocks__/vscode';
 import type { FileWatcher } from '../fileWatcher';
 import { recordUndo, undoHistory, UNDO_LIMIT, UndoEntry, UndoIO } from '../undoHistory';
@@ -378,7 +378,7 @@ describe('undo history', () => {
     acceptFileByPath(sm, abs('a.txt'), () => {});
     assert.equal(undoHistory.list(sm).length, 1);
 
-    await clearReviewQueue(sm, { shouldIgnore: inStateDir } as unknown as FileWatcher);
+    await sm.clearHunksOnBranchSwitch(inStateDir);
     assert.deepEqual(undoHistory.list(sm), []);
   });
 

@@ -17,7 +17,7 @@
  * Adding a regression test? Add its mutation here too. That is the check that the test works.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -846,6 +846,14 @@ function run(args) {
 }
 
 async function main() {
+  // `node --test` on a missing file exits non-zero, which the loop below would count as a
+  // kill. A renamed guarding test must stop the run instead.
+  const missing = [...new Set(MUTATIONS.map(m => m.test))]
+    .filter(test => !existsSync(join(ROOT, 'out-test', 'test', test)));
+  if (missing.length > 0) {
+    console.log(`  ERROR   guarding test not found in out-test/test/: ${missing.join(', ')} — update this script`);
+    return 2;
+  }
   const survived = [];
   for (const { desc, file, edits, test } of MUTATIONS) {
     const path = join(ROOT, file);

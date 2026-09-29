@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeHunks, hasReportableDiff, hunkAtLine, hunkId, lensLineForHunk, splitHunkByRange } from '../diffEngine';
 import { cases } from './generators';
+import { acceptHunkBaseline } from '../hunkApply';
 
 /** UTF-8 byte-order mark, spelled out — it is invisible in source otherwise. */
 const BOM = '\uFEFF';
@@ -320,20 +321,13 @@ describe('computeHunks', () => {
 
   it('keeps acceptHunk line arithmetic valid across an EOL conversion', () => {
     // Guards the reason this option is safe: hunks are computed on EOL-normalized text but
-    // `acceptHunk` splices the RAW baseline and document lines by index. Normalization
-    // cannot change line counts, so the indices must still line up — replicated here
-    // verbatim from commands.ts so a change to that arithmetic trips this test.
+    // `acceptHunkBaseline` splices the RAW baseline and document lines by index.
+    // Normalization cannot change line counts, so the indices must still line up.
     const baseline = 'alpha\nbeta\ngamma\n';
     const current  = 'alpha\r\nbeta CHANGED\r\ngamma\r\n';
     const hunk = computeHunks(baseline, current)[0];
 
-    const currentLines = current.split('\n');
-    const baselineLines = baseline.split('\n');
-    const newBaseline = [
-      ...baselineLines.slice(0, hunk.oldStart - 1),
-      ...currentLines.slice(hunk.newStart - 1, hunk.newStart - 1 + hunk.newLines),
-      ...baselineLines.slice(hunk.oldStart - 1 + hunk.oldLines),
-    ].join('\n');
+    const newBaseline = acceptHunkBaseline(baseline, current, hunk);
 
     // The accepted line carries its CRLF over; the untouched lines keep the baseline's LF.
     assert.equal(newBaseline, 'alpha\nbeta CHANGED\r\ngamma\n');

@@ -15,13 +15,8 @@ scripts/**
 # Internal working notes — shipping a list of known-unfixed issues to users is not the
 # intent, and `.gitignore` in an installed extension is just noise.
 todo.md
+CLAUDE.md
 .gitignore
-skills/**
-design.md
-hunkwise-evaluation.md
-interactive-review-model.md
-prior-art-and-alternatives.md
-plan.md
 review-flow-comparison.html
 node_modules/**
 !node_modules/ignore/**
@@ -29,4 +24,3 @@ node_modules/**
 *.vsix
 tsconfig*.json
 package-lock.json
-README.zh.md

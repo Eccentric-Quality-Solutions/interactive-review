@@ -18,17 +18,19 @@ export function baselineGitEnv(root: string): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * The baseline repo's tracked paths. Throws when the repo cannot be read (missing, no commit
+ * yet, damaged), so a negative assertion such as `!gitListTracked(root).includes(x)` cannot
+ * pass on a dead repo. Inside `waitForCondition` a throw counts as "not met yet".
+ */
 export function gitListTracked(root: string): string[] {
-  try {
-    const out = execSync('git -c core.quotepath=false ls-tree HEAD --name-only -r', {
-      cwd: root,
-      env: baselineGitEnv(root),
-      encoding: 'utf-8',
-    });
-    return out.split('\n').map(l => l.trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
+  const out = execSync('git -c core.quotepath=false ls-tree HEAD --name-only -r', {
+    cwd: root,
+    env: baselineGitEnv(root),
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return out.split('\n').map(l => l.trim()).filter(Boolean);
 }
 
 /**
@@ -75,14 +77,20 @@ export async function sleep(ms: number): Promise<void> {
 // is true of the cases that have actually been measured, and that is not all of them.
 const WAIT_FLOOR_MS = 15000;
 
+/** Poll `fn` until true. A throw from `fn` counts as "not met yet"; the last one is reported on timeout. */
 export async function waitForCondition(fn: () => boolean, timeoutMs = 10000, intervalMs = 100): Promise<void> {
   const effectiveTimeout = Math.max(timeoutMs, WAIT_FLOOR_MS);
   const start = Date.now();
+  let lastError: unknown;
   while (Date.now() - start < effectiveTimeout) {
-    if (fn()) return;
+    try {
+      if (fn()) return;
+    } catch (err) {
+      lastError = err;
+    }
     await sleep(intervalMs);
   }
-  throw new Error('Condition not met within timeout');
+  throw new Error(`Condition not met within timeout${lastError ? ` (last error: ${lastError})` : ''}`);
 }
 
 /**

@@ -316,7 +316,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         break;
       case 'setClearOnBranchSwitch':
         if (msg.value !== undefined) {
-          this.stateManager.setClearOnBranchSwitch(msg.value);
+          await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', msg.value);
         }
         break;
       case 'setQuoteRotationInterval': {

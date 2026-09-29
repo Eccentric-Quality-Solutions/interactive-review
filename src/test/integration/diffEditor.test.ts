@@ -27,10 +27,12 @@ suite('interactive-review diff editor integration', function () {
   // ── textDocuments scheme filtering ────────────────────────────────────────
 
   test('acceptHunk finds doc by file scheme even when baseline doc exists', async () => {
+    // Two hunks, so accepting the first leaves the file in review and the assertion below
+    // always runs. Against the baseline doc, the accept would find no hunk and change nothing.
     const filePath = await setupReviewingFile(
       'scheme-test.txt',
-      'line 1\nline 2\nline 3\n',
-      'line 1\nMODIFIED\nline 3\n'
+      'line 1\nline 2\nline 3\nline 4\nline 5\n',
+      'line 1\nMODIFIED\nline 3\nline 4\nCHANGED\n'
     );
 
     const sm = getStateManager();
@@ -46,18 +48,16 @@ suite('interactive-review diff editor integration', function () {
     // Now accept the hunk — should work despite baseline doc being open
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     const hunks = computeHunks(fileState.baseline, doc.getText());
-    assert.ok(hunks.length > 0, 'Should have at least one hunk');
+    assert.strictEqual(hunks.length, 2, 'precondition: two hunks');
 
     acceptHunk(sm, filePath, hunkId(hunks[0]), () => {});
     await sleep(200);
 
-    // Should have processed (not skipped due to scheme mismatch)
     const updated = sm.getFile(filePath);
-    // Either file exited reviewing (last hunk) or baseline was updated
-    if (updated) {
-      const remaining = computeHunks(updated.baseline, doc.getText());
-      assert.ok(remaining.length < hunks.length, 'Hunk count should decrease after accept');
-    }
+    assert.ok(updated, 'one hunk is left, so the file stays in review');
+    const remaining = computeHunks(updated.baseline, doc.getText());
+    assert.deepStrictEqual(remaining.map(h => h.addedContent), [['CHANGED']],
+      'the first hunk was accepted, not skipped for want of the file-scheme doc');
   });
 
   test('file stays in the panel while its review diff is open (baseline-doc scheme collision)', async () => {

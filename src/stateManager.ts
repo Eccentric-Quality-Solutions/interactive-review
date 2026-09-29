@@ -137,7 +137,7 @@ export class StateManager {
 
   /**
    * Bumped when a branch switch is seen (`markQueueClearing`), when a queue clear starts
-   * (`clearHunksOnBranchSwitch`, from a branch switch or the clearHunks command), and again
+   * (`clearHunksOnBranchSwitch`, from a branch switch), and again
    * when that clear empties the queue, so an action recorded during its awaits goes too.
    * The undo history treats a change like a new session: its entries describe the queue
    * being cleared, and an undo in flight stops. Guarded by `undoHistory.test.ts`

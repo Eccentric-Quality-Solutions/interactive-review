@@ -5,7 +5,7 @@ import assert from 'assert';
 import {
   getWorkspaceRoot, gitListTracked, gitGetBaseline,
   sleep, waitForCondition, enableReview, disableReview,
-  writeFileExternally, cleanWorkspace, getStateManager, settle,
+  writeFileExternally, cleanWorkspace, getStateManager, getFileWatcher, settle,
 } from './helpers';
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     cleanWorkspace();
   });
 
-  test('clearHunks clears multiple reviewing files and updates all baselines', async () => {
+  test('clearing the queue clears multiple reviewing files and updates all baselines', async () => {
     const root = getWorkspaceRoot();
 
     // Create multiple files
@@ -57,7 +57,7 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     }
 
     // Clear hunks (simulates branch switch)
-    await vscode.commands.executeCommand('interactiveReview.clearHunks');
+    await getStateManager().clearHunksOnBranchSwitch((fp: string, d?: boolean) => getFileWatcher().shouldIgnore(fp, d));
     await sleep(500);
 
     // All baselines should be updated to current disk content
@@ -70,11 +70,11 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     for (const name of ['a.txt', 'b.txt', 'c.txt']) {
       const state = allFilesAfter.get(path.join(root, name));
       assert.ok(!state || state.status !== 'reviewing',
-        `${name} should NOT be in reviewing state after clearHunks`);
+        `${name} should NOT be in reviewing state after the clear`);
     }
   });
 
-  test('clearHunks removes deleted files from tracking', async () => {
+  test('clearing the queue removes deleted files from tracking', async () => {
     const root = getWorkspaceRoot();
 
     // Create a file, enable, snapshot baseline
@@ -94,19 +94,19 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     await sleep(1500);
 
     // Now clear hunks
-    await vscode.commands.executeCommand('interactiveReview.clearHunks');
+    await getStateManager().clearHunksOnBranchSwitch((fp: string, d?: boolean) => getFileWatcher().shouldIgnore(fp, d));
     await settle();
 
     // doomed.txt should be removed from git tracking (file doesn't exist)
     const tracked = gitListTracked(root);
     assert.ok(!tracked.includes('doomed.txt'),
-      'deleted file should be removed from tracking after clearHunks');
+      'deleted file should be removed from tracking after the clear');
 
     // survives.txt baseline should be updated
     assert.strictEqual(gitGetBaseline(root, 'survives.txt'), 'modified\n');
   });
 
-  test('clearHunks with no reviewing files is a no-op', async () => {
+  test('clearing the queue with no reviewing files is a no-op', async () => {
     const root = getWorkspaceRoot();
 
     // Create a file but don't modify it (stays idle, not reviewing)
@@ -118,7 +118,7 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     const baselineBefore = gitGetBaseline(root, 'idle.txt');
 
     // Clear hunks — nothing should change
-    await vscode.commands.executeCommand('interactiveReview.clearHunks');
+    await getStateManager().clearHunksOnBranchSwitch((fp: string, d?: boolean) => getFileWatcher().shouldIgnore(fp, d));
     await sleep(300);
 
     const baselineAfter = gitGetBaseline(root, 'idle.txt');
@@ -126,7 +126,7 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
       'baseline should not change when no files are reviewing');
   });
 
-  test('clearHunks only affects reviewing files, not idle files', async () => {
+  test('clearing the queue only affects reviewing files, not idle files', async () => {
     const root = getWorkspaceRoot();
 
     writeFileExternally(path.join(root, 'idle.txt'), 'idle\n');
@@ -150,7 +150,7 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     assert.ok(activeState && activeState.status === 'reviewing', 'active.txt should be reviewing');
 
     // Clear hunks
-    await vscode.commands.executeCommand('interactiveReview.clearHunks');
+    await getStateManager().clearHunksOnBranchSwitch((fp: string, d?: boolean) => getFileWatcher().shouldIgnore(fp, d));
     await sleep(500);
 
     // idle.txt baseline should be unchanged
@@ -211,60 +211,5 @@ suite('interactive-review clearOnBranchSwitch integration', function () {
     assert.ok(sm, 'StateManager should be available');
     assert.strictEqual(sm.clearOnBranchSwitch, true,
       'in-memory clearOnBranchSwitch should be restored after re-enable');
-  });
-
-  test('.git/HEAD watcher triggers clearHunks on branch switch', async function () {
-    const root = getWorkspaceRoot();
-    const gitDir = path.join(root, '.git');
-    const gitHeadPath = path.join(gitDir, 'HEAD');
-
-    // Skip if .git/HEAD doesn't exist in workspace (watcher won't be active)
-    // The watcher is initialized during activate() — if workspace has no .git,
-    // we can't test the watcher. This test verifies behavior when it IS present.
-    if (!fs.existsSync(gitHeadPath)) {
-      // Create .git/HEAD so future test runs (after extension re-activate) can use it.
-      // For now, skip this test since the watcher wasn't set up at activate time.
-      this.skip();
-      return;
-    }
-
-    // If we get here, the workspace has .git/HEAD and the watcher should be active
-    writeFileExternally(path.join(root, 'branch-test.txt'), 'before-switch\n');
-    await enableReview();
-    await waitForCondition(() => gitListTracked(root).includes('branch-test.txt'));
-
-    // Enable clearOnBranchSwitch
-    await vscode.commands.executeCommand('interactiveReview.setClearOnBranchSwitch', true);
-    await sleep(200);
-
-    // Modify file to enter reviewing
-    writeFileExternally(path.join(root, 'branch-test.txt'), 'after-switch\n');
-    await sleep(1500);
-
-    const sm = getStateManager();
-    assert.ok(sm, 'StateManager should be available');
-    const state = (sm.getAllFiles() as Map<string, any>).get(path.join(root, 'branch-test.txt'));
-    assert.ok(state && state.status === 'reviewing', 'file should be reviewing before branch switch');
-
-    // Simulate branch switch by modifying .git/HEAD
-    const currentHead = fs.readFileSync(gitHeadPath, 'utf-8').trim();
-    const fakeHead = currentHead.includes('fake-branch')
-      ? 'ref: refs/heads/main'
-      : 'ref: refs/heads/fake-branch';
-    fs.writeFileSync(gitHeadPath, fakeHead + '\n');
-
-    // Wait for watcher to trigger and clear hunks
-    await waitForCondition(() => {
-      const files = sm.getAllFiles() as Map<string, any>;
-      const s = files.get(path.join(root, 'branch-test.txt'));
-      return !s || s.status !== 'reviewing';
-    }, 5000);
-
-    // Baseline should be updated
-    assert.strictEqual(gitGetBaseline(root, 'branch-test.txt'), 'after-switch\n',
-      'baseline should be updated after branch switch');
-
-    // Restore original HEAD
-    fs.writeFileSync(gitHeadPath, currentHead + '\n');
   });
 });

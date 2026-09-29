@@ -99,8 +99,8 @@ write made while a bulk action was still running as later work.
 ### Requirement: The history belongs to one session and one queue
 
 The history SHALL be emptied by a window reload, End review, Begin review, and any clear
-of the review queue (a branch switch with clear-on-switch on, or Clear Hunks). An undo in
-progress when one of these happens SHALL stop and say the rest was not undone. An action
+of the review queue (a branch switch with clear-on-switch on). An undo in progress when one
+of these happens SHALL stop and say the rest was not undone. An action
 recorded while a queue clear is running SHALL NOT survive the clear.
 
 #### Scenario: Branch switch during an earlier clear
